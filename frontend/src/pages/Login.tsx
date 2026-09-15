@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useNavigate, Navigate, Link } from 'react-router-dom'
 import { useAuthStore } from '../store/authStore'
-import { LogIn, TrendingUp, BarChart3, Users, LayoutDashboard, Eye, EyeOff } from 'lucide-react'
+import { LogIn, TrendingUp, BarChart3, FileText, Truck, ShieldCheck, Eye, EyeOff } from 'lucide-react'
 
 export default function Login() {
   const navigate = useNavigate()
@@ -43,83 +43,113 @@ export default function Login() {
     <div className="min-h-screen flex w-full">
       
       {/* Esquerda: Showcase / Criativo (Escondido no Mobile) */}
-      <div className="hidden lg:flex w-3/5 bg-gradient-to-br from-slate-900 via-brand-900 to-slate-900 relative overflow-hidden flex-col justify-between p-12">
-        {/* Efeitos de fundo (Círculos desfocados) */}
-        <div className="absolute top-[-10%] left-[-10%] w-96 h-96 bg-brand-500/30 rounded-full blur-3xl" />
-        <div className="absolute bottom-[-10%] right-[-10%] w-96 h-96 bg-blue-500/20 rounded-full blur-3xl" />
+      {/* Esquerda: Showcase / Criativo (Escondido no Mobile) */}
+      <div className="hidden lg:flex w-3/5 relative overflow-hidden flex-col justify-between p-12 bg-slate-950">
+        {/* Imagem de Fundo com o Caminhão Coliseu Transporte */}
+        <img 
+          src="/caminhao-bg.jpg" 
+          alt="Coliseu Transporte" 
+          className="absolute inset-0 w-full h-full object-cover object-center scale-[1.02] transform transition-transform duration-1000" 
+        />
+        
+        {/* Overlays escuros e gradientes para contraste e leitura impecável */}
+        <div className="absolute inset-0 bg-gradient-to-r from-slate-950/95 via-slate-950/80 to-slate-950/45" />
+        <div className="absolute inset-0 bg-gradient-to-t from-slate-950/95 via-slate-900/30 to-slate-950/70" />
+        
+        {/* Efeitos de iluminação de fundo */}
+        <div className="absolute top-[-10%] left-[-10%] w-96 h-96 bg-sky-500/15 rounded-full blur-3xl pointer-events-none" />
+        <div className="absolute bottom-[-10%] right-[-10%] w-96 h-96 bg-blue-600/15 rounded-full blur-3xl pointer-events-none" />
         
         {/* Topo da área criativa */}
         <div className="relative z-10">
-          <div className="flex items-center gap-2 mb-12">
-            <div className="bg-white/10 p-2 rounded-xl backdrop-blur-md border border-white/20">
+          <div className="flex items-center gap-3 mb-10">
+            <div className="bg-white/10 p-2.5 rounded-xl backdrop-blur-md border border-white/20 shadow-lg">
               <img src="/nexus-simbolo.png" className="w-6 h-6 object-contain" alt="Coliseu Transporte" />
             </div>
-            <span className="text-white font-heading font-bold text-xl tracking-tight">Coliseu Transporte</span>
+            <div className="flex flex-col">
+              <span className="text-white font-heading font-bold text-xl tracking-tight leading-none">Coliseu Transporte</span>
+              <span className="text-sky-400 text-xs font-semibold tracking-wider uppercase mt-1">Gestão de MDF-e, CT-e & Transportadoras</span>
+            </div>
           </div>
           
-          <h1 className="text-4xl xl:text-5xl font-heading font-bold text-white leading-tight mb-6 max-w-2xl">
-            Seus resultados,<br/>
-            <span className="text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-cyan-300">em tempo real.</span>
+          <h1 className="text-4xl xl:text-5xl font-heading font-bold text-white leading-tight mb-5 max-w-2xl drop-shadow-md">
+            Controle total de MDF-e, CT-e<br/>
+            <span className="text-transparent bg-clip-text bg-gradient-to-r from-sky-400 via-cyan-300 to-blue-200">
+              e frotas em tempo real.
+            </span>
           </h1>
-          <p className="text-slate-300 text-lg max-w-xl leading-relaxed">
-            A plataforma gerencial definitiva do ecossistema Coliseu Transporte. Transforme os dados do seu ERP em decisões estratégicas de qualquer lugar.
+          <p className="text-slate-200 text-lg max-w-xl leading-relaxed font-light drop-shadow">
+            A plataforma definitiva para transportadoras e operadores logísticos. Emissão ágil de manifestos, autorização na SEFAZ, controle de fretes e rastreamento de cargas sincronizados diretamente com seu ERP.
           </p>
         </div>
 
         {/* Centro/Widgets de Demonstração */}
-        <div className="relative z-10 mt-12 grid grid-cols-2 gap-6 max-w-2xl">
-          {/* Card 1 */}
-          <div className="bg-white/10 backdrop-blur-md border border-white/10 rounded-2xl p-6 transform transition-transform hover:-translate-y-1">
-            <div className="flex items-center gap-3 mb-4">
-              <div className="bg-green-500/20 p-2 rounded-lg">
-                <TrendingUp className="text-green-400 w-5 h-5" />
+        <div className="relative z-10 mt-10 grid grid-cols-2 gap-5 max-w-2xl">
+          {/* Card 1: MDF-e e CT-e */}
+          <div className="bg-slate-900/70 backdrop-blur-md border border-white/15 rounded-2xl p-5 transform transition-transform hover:-translate-y-1 shadow-2xl">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="bg-sky-500/25 p-2 rounded-lg border border-sky-400/20">
+                  <FileText className="text-sky-400 w-5 h-5" />
+                </div>
+                <span className="text-slate-200 font-medium text-sm">CT-e & MDF-e</span>
               </div>
-              <span className="text-slate-300 font-medium">Faturamento Diário</span>
+              <span className="text-[11px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                SEFAZ Online
+              </span>
             </div>
-            <div className="text-white font-bold text-2xl">R$ 12.450,00</div>
-            <div className="text-green-400 text-sm font-medium mt-2 flex items-center gap-1">
-              +15.2% <span className="text-slate-400 font-normal">vs ontem</span>
+            <div className="text-white font-bold text-2xl tracking-tight">1.428 <span className="text-sm font-normal text-slate-300">emitidos</span></div>
+            <div className="text-sky-300 text-xs font-medium mt-2 flex items-center gap-1">
+              +18.4% <span className="text-slate-400 font-normal">autorizados no mês</span>
             </div>
           </div>
 
-          {/* Card 2 */}
-          <div className="bg-white/10 backdrop-blur-md border border-white/10 rounded-2xl p-6 transform transition-transform hover:-translate-y-1">
-            <div className="flex items-center gap-3 mb-4">
-              <div className="bg-blue-500/20 p-2 rounded-lg">
-                <Users className="text-blue-400 w-5 h-5" />
+          {/* Card 2: Frotas e Transportadoras */}
+          <div className="bg-slate-900/70 backdrop-blur-md border border-white/15 rounded-2xl p-5 transform transition-transform hover:-translate-y-1 shadow-2xl">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="bg-emerald-500/25 p-2 rounded-lg border border-emerald-400/20">
+                  <Truck className="text-emerald-400 w-5 h-5" />
+                </div>
+                <span className="text-slate-200 font-medium text-sm">Frota & Cargas</span>
               </div>
-              <span className="text-slate-300 font-medium">Clientes Ativos</span>
+              <span className="text-[11px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-full bg-sky-500/20 text-sky-300 border border-sky-500/30">
+                Em Rota
+              </span>
             </div>
-            <div className="text-white font-bold text-2xl">4.861</div>
-            <div className="text-blue-400 text-sm font-medium mt-2 flex items-center gap-1">
-              +42 <span className="text-slate-400 font-normal">esta semana</span>
+            <div className="text-white font-bold text-2xl tracking-tight">94 <span className="text-sm font-normal text-slate-300">veículos ativos</span></div>
+            <div className="text-emerald-300 text-xs font-medium mt-2 flex items-center gap-1">
+              100% <span className="text-slate-400 font-normal">monitoramento de entrega</span>
             </div>
           </div>
           
-          {/* Card 3 (Span 2) */}
-          <div className="col-span-2 bg-gradient-to-r from-white/10 to-white/5 backdrop-blur-md border border-white/10 rounded-2xl p-6 flex items-center justify-between transform transition-transform hover:-translate-y-1">
+          {/* Card 3 (Span 2): Fretes Faturados */}
+          <div className="col-span-2 bg-gradient-to-r from-slate-900/80 via-slate-900/70 to-slate-900/60 backdrop-blur-md border border-white/15 rounded-2xl p-5 flex items-center justify-between transform transition-transform hover:-translate-y-1 shadow-2xl">
             <div>
-              <div className="flex items-center gap-3 mb-2">
-                <BarChart3 className="text-cyan-400 w-5 h-5" />
-                <span className="text-slate-300 font-medium">Ticket Médio Geral</span>
+              <div className="flex items-center gap-2.5 mb-1.5">
+                <div className="bg-cyan-500/25 p-1.5 rounded-lg border border-cyan-400/20">
+                  <TrendingUp className="text-cyan-400 w-4 h-4" />
+                </div>
+                <span className="text-slate-200 font-medium text-sm">Volume de Fretes Faturados</span>
               </div>
-              <div className="text-white font-bold text-3xl">R$ 643,27</div>
+              <div className="text-white font-bold text-3xl tracking-tight">R$ 482.650,00</div>
+              <div className="text-slate-400 text-xs mt-1">Total consolidado dos manifestos integrados</div>
             </div>
-            <div className="hidden sm:flex items-end gap-1 h-12">
+            <div className="hidden sm:flex items-end gap-1.5 h-12 pr-2">
                {/* Barras decorativas */}
-               {[40, 70, 45, 90, 65, 80, 100].map((h, i) => (
-                 <div key={i} className="w-3 bg-cyan-400/80 rounded-t-sm" style={{ height: `${h}%` }} />
+               {[35, 60, 45, 80, 65, 90, 100].map((h, i) => (
+                 <div key={i} className="w-3 bg-gradient-to-t from-sky-500 to-cyan-400 rounded-t-sm shadow-sm" style={{ height: `${h}%` }} />
                ))}
             </div>
           </div>
         </div>
 
         {/* Rodapé da área criativa */}
-        <div className="relative z-10 mt-12 flex items-center justify-between text-slate-400 text-sm">
-          <span>© 2026 Coliseu Sistemas</span>
+        <div className="relative z-10 mt-10 flex items-center justify-between text-slate-300 text-sm">
+          <span>© 2026 Coliseu Sistemas • Gestão de Transportes</span>
           <div className="flex items-center gap-2">
-            <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-            Sistemas Operacionais
+            <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+            <span className="text-emerald-300 font-medium text-xs">SEFAZ & ERP Integrados</span>
           </div>
         </div>
       </div>
@@ -147,7 +177,7 @@ export default function Login() {
             />
             <h2 className="font-heading text-3xl font-bold text-text-primary tracking-tight">Bem-vindo de volta.</h2>
             <p className="text-text-secondary mt-2 text-base">
-              Entre para acessar seus dashboards gerenciais.
+              Entre para acessar a gestão de transportes e documentos fiscais.
             </p>
           </div>
 
