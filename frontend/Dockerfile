@@ -3,11 +3,14 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 
+# Força instalação de devDependencies (Vite, TypeScript, Tailwind) para a etapa de compilação
+ENV NODE_ENV=development
+
 # Copia os arquivos de dependência
 COPY package*.json ./
 
-# Instala dependências
-RUN npm install
+# Instala todas as dependências necessárias para o build
+RUN npm install --include=dev
 
 # Copia o código-fonte inteiro
 COPY . .
