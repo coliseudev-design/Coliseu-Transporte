@@ -1,0 +1,69 @@
+version: '3.8'
+
+services:
+  # Serviço 1: Frontend SPA (React/Vite + Nginx)
+  dashboard-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: coliseu-transporte-frontend
+    restart: unless-stopped
+    ports:
+      - "80"  # Permitir que Coolify mapie dinamicamente via Traefik
+    networks:
+      - coolify
+    depends_on:
+      - middleware
+
+  # Serviço 2: API Node.js Express (Backend)
+  middleware:
+    build: 
+      context: ./middleware
+      dockerfile: Dockerfile
+    container_name: coliseu-transporte-middleware
+    restart: unless-stopped
+    networks:
+      coolify:
+        aliases:
+          - nexus-middleware
+          - coliseu-middleware
+          - coliseu-transporte-middleware
+    environment:
+      - NODE_ENV=production
+      - PORT=3200
+      
+      # Banco de dados (passar via secret/env variables no GitHub Actions / Coolify)
+      - PG_HOST=${PG_HOST}
+      - PG_PORT=5432
+      - PG_DATABASE=${PG_DATABASE:-coliseu_dashboard}
+      - PG_USER=${PG_USER}
+      - PG_PASSWORD=${PG_PASSWORD}
+      - PG_SSL=false
+      
+      # Identity Server / Segurança
+      - JWT_DEVICE_KEY=${JWT_DEVICE_KEY}
+      - EXPECTED_MODULE_SLUG=coliseu-transporte
+      - IDENTITY_API_URL=https://adminlicencas.coliseusistemas.com.br
+      - IDENTITY_INTERNAL_KEY=${INTERNAL_API_KEY}
+      
+      # Comunicação com o Worker
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+      
+      # Limits
+      - RATE_LIMIT_MAX=1000
+    
+    ports:
+      - "3200" # Exposto apenas para a rede interna; Nginx/Traefik cuidam do roteamento externo
+      
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --spider http://localhost:3200/health/liveness || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+# db-backup removido pois o Coolify cuida do backup da base central nativamente.
+
+networks:
+  coolify:
+    external: true

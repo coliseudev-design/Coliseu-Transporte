@@ -1,0 +1,106 @@
+version: '3.8'
+
+# =============================================================
+# AMBIENTE LOCAL DE TESTES - Coliseu Transporte
+# Espelha a VPS mas usa um Postgres LOCAL isolado.
+# NÃO usa a rede 'coolify' — totalmente separado da produção.
+# =============================================================
+# Como usar:
+#   docker-compose -f docker-compose.local.yml up --build
+#   Acesse: http://localhost:3100 (middleware) | http://localhost:8080 (frontend)
+# =============================================================
+
+services:
+  # -------------------------------------------------------
+  # Banco de dados PostgreSQL LOCAL (isolado da VPS)
+  # -------------------------------------------------------
+  db-local:
+    image: postgres:15-alpine
+    container_name: coliseu-db-local
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: coliseu_dashboard_local
+      POSTGRES_USER: coliseu_admin
+      POSTGRES_PASSWORD: coliseu_local_test_2026
+    ports:
+      - "5433:5432"   # Porta 5433 para não conflitar com Postgres local
+    volumes:
+      - coliseu_db_local:/var/lib/postgresql/data
+      # Schema aplicado automaticamente na primeira vez
+      - ./middleware/src/db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
+      - ./middleware/src/db/views.sql:/docker-entrypoint-initdb.d/02_views.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U coliseu_admin -d coliseu_dashboard_local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - coliseu-local
+
+  # -------------------------------------------------------
+  # Middleware API Node.js (aponta para db-local)
+  # -------------------------------------------------------
+  middleware-local:
+    build:
+      context: ./middleware
+      dockerfile: Dockerfile
+    container_name: coliseu-middleware-local
+    restart: unless-stopped
+    depends_on:
+      db-local:
+        condition: service_healthy
+    environment:
+      - NODE_ENV=development
+      - PORT=3200
+
+      # Banco LOCAL
+      - PG_HOST=db-local
+      - PG_PORT=5432
+      - PG_DATABASE=coliseu_dashboard_local
+      - PG_USER=coliseu_admin
+      - PG_PASSWORD=coliseu_local_test_2026
+      - PG_SSL=false
+
+      # Identity e segurança (usar valores de dev/local)
+      - JWT_DEVICE_KEY=local_dev_secret_key_2026
+      - EXPECTED_MODULE_SLUG=coliseu-transporte
+      - IDENTITY_API_URL=https://adminlicencas.coliseusistemas.com.br
+      - IDENTITY_INTERNAL_KEY=local_internal_key
+      - INTERNAL_API_KEY=local_internal_key
+      - RATE_LIMIT_MAX=10000
+
+    ports:
+      - "3100:3200"   # Exposto em 3100 para não conflitar com a VPS
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --spider http://localhost:3200/health/liveness || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks:
+      - coliseu-local
+
+  # -------------------------------------------------------
+  # Frontend React (aponta para middleware-local)
+  # -------------------------------------------------------
+  frontend-local:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        - VITE_API_URL=http://localhost:3100
+    container_name: coliseu-frontend-local
+    restart: unless-stopped
+    depends_on:
+      middleware-local:
+        condition: service_healthy
+    ports:
+      - "8080:80"   # Acesso via http://localhost:8080
+    networks:
+      - coliseu-local
+
+volumes:
+  coliseu_db_local:
+
+networks:
+  coliseu-local:
+    driver: bridge

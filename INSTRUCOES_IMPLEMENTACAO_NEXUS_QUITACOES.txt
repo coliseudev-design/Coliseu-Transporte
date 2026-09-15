@@ -1,0 +1,219 @@
+================================================================================
+GUIA DETALHADO DE IMPLEMENTACAO: QUITACAO DE TITULOS NEXUS -> WORKER -> FIREBIRD
+Nexus ERP / Middleware & Coliseu Sales Worker
+Data: 01/09/2026 | Versao Worker: 2.5.147
+================================================================================
+
+1. RESUMO DO PROBLEMA E DIAGNOSTICO
+--------------------------------------------------------------------------------
+Sintoma:
+Quando um titulo financeiro era quitado no Nexus (baixa manual, webhook do Banco 
+Asaas, webhook do Banco Cora ou conciliacao de boletos/Pix), a quitacao nao era 
+repassada para o Worker e o titulo permanecia em aberto no ERP Coliseu (Firebird FDB).
+
+Causas-Raiz:
+1. Erro de Sintaxe/Constraint no PostgreSQL do Nexus:
+   As instrucoes "INSERT INTO pending_payments ... ON CONFLICT (tenant_id, id_firebird, data_pagamento)"
+   ou "ON CONFLICT DO UPDATE" falhavam no PostgreSQL porque a chave unica da tabela 
+   pending_payments e composta por (tenant_id, titulo_id).
+   Como o comando estava envelopado em .catch(() => {}), o erro era silenciado e os 
+   registros NUNCA eram inseridos na tabela pending_payments.
+
+2. Ausencia do Processamento no Worker:
+   O SyncNexusDataJob no Worker .NET realizava apenas a sincronizacao unidirecional 
+   (Firebird -> Nexus). Nao existia a rotina para consumir "GET /internal/sync/pending-payments",
+   dar baixa na tabela CONTAS e CLIENTES do Firebird e confirmar via "POST /internal/sync/confirm-payment".
+
+
+================================================================================
+2. SCRIPT DE BANCO DE DADOS (POSTGRESQL - NEXUS)
+================================================================================
+Execute o script SQL abaixo no PostgreSQL do Nexus (caso queira rodar manualmente, 
+embora o middleware execute a auto-migracao ao iniciar):
+
+--------------------------------------------------------------------------------
+-- 1. Cria ou ajusta a tabela pending_payments
+CREATE TABLE IF NOT EXISTS pending_payments (
+    id SERIAL PRIMARY KEY,
+    tenant_id UUID NOT NULL,
+    titulo_id INTEGER,
+    id_firebird INTEGER,
+    nosso_numero VARCHAR(100),
+    numero_documento VARCHAR(100),
+    valor_pago DECIMAL(15,2) NOT NULL,
+    data_pagamento TIMESTAMPTZ NOT NULL,
+    forma_pagamento VARCHAR(50) DEFAULT 'BOLETO_ASAAS',
+    status VARCHAR(50) DEFAULT 'PENDENTE',
+    tentativas INTEGER DEFAULT 0,
+    erro_mensagem TEXT,
+    criado_em TIMESTAMPTZ DEFAULT NOW(),
+    processado_em TIMESTAMPTZ
+);
+
+-- 2. Permite que id_firebird seja nulo (titulos lancados direto no Nexus)
+ALTER TABLE pending_payments ALTER COLUMN id_firebird DROP NOT NULL;
+
+-- 3. Cria indices para performance e constraint unica para UPSERT correto
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_payments_tenant_titulo ON pending_payments(tenant_id, titulo_id) WHERE titulo_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_payments_tenant_titulo_all ON pending_payments(tenant_id, titulo_id);
+CREATE INDEX IF NOT EXISTS idx_pending_payments_tenant_status ON pending_payments(tenant_id, status);
+
+DO $$ 
+BEGIN 
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_pending_payments_tenant_titulo') THEN
+        ALTER TABLE pending_payments ADD CONSTRAINT uq_pending_payments_tenant_titulo UNIQUE (tenant_id, titulo_id);
+    END IF;
+EXCEPTION WHEN OTHERS THEN NULL;
+END $$;
+--------------------------------------------------------------------------------
+
+
+================================================================================
+3. ALTERACOES APLICADAS NO CODIGO DO NEXUS MIDDLEWARE
+================================================================================
+
+A. Arquivo: middleware/src/db/postgres.js
+--------------------------------------------------------------------------------
+Adicionada a auto-migracao no startup para garantir a criacao da constraint:
+`uq_pending_payments_tenant_titulo UNIQUE (tenant_id, titulo_id)`
+
+
+B. Arquivo: middleware/src/routes/financeiro.js
+--------------------------------------------------------------------------------
+1. Rota POST /api/financeiro/quitacao (Baixa Manual de Titulo):
+   O comando de insercao na fila pending_payments foi corrigido para:
+   ```javascript
+   await client.query(`
+       INSERT INTO pending_payments (tenant_id, titulo_id, id_firebird, nosso_numero, numero_documento, valor_pago, data_pagamento, forma_pagamento, status, tentativas)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'PENDENTE', 0)
+       ON CONFLICT (tenant_id, titulo_id) DO UPDATE
+       SET valor_pago = EXCLUDED.valor_pago,
+           data_pagamento = EXCLUDED.data_pagamento,
+           forma_pagamento = COALESCE(EXCLUDED.forma_pagamento, pending_payments.forma_pagamento),
+           id_firebird = COALESCE(EXCLUDED.id_firebird, pending_payments.id_firebird),
+           nosso_numero = COALESCE(EXCLUDED.nosso_numero, pending_payments.nosso_numero),
+           numero_documento = COALESCE(EXCLUDED.numero_documento, pending_payments.numero_documento),
+           status = 'PENDENTE',
+           tentativas = 0,
+           processado_em = NULL,
+           erro_mensagem = NULL;
+   `, [tenantId, title.id, title.id_firebird || null, title.nosso_numero || null, title.numero_documento || null, valRecebido, data_recebimento || new Date().toISOString(), forma_pagamento || 'DINHEIRO']);
+   ```
+
+2. Rota POST /api/financeiro/boletos-emitidos/sincronizar:
+   Corrigido o ON CONFLICT para (tenant_id, titulo_id).
+
+3. Rota POST /api/financeiro/boletos-emitidos/vincular:
+   Corrigido o ON CONFLICT para (tenant_id, titulo_id).
+
+
+C. Arquivo: middleware/src/services/asaasService.js e middleware/src/routes/asaas.js
+--------------------------------------------------------------------------------
+Nos webhooks e rotas de conciliacao do Asaas:
+Corrigida a clausula de conflito inválida "ON CONFLICT DO UPDATE" para:
+"ON CONFLICT (tenant_id, titulo_id) DO UPDATE SET valor_pago = EXCLUDED.valor_pago, data_pagamento = EXCLUDED.data_pagamento, status = 'PENDENTE', tentativas = 0, processado_em = NULL, erro_mensagem = NULL"
+
+
+D. Arquivo: middleware/src/routes/cora.js
+--------------------------------------------------------------------------------
+No webhook de notificacao do Banco Cora (evento invoice.paid):
+Adicionada a insercao do titulo quitado na tabela pending_payments com 
+forma_pagamento = 'BOLETO_CORA'.
+
+
+E. Arquivo: middleware/src/routes/sync.js
+--------------------------------------------------------------------------------
+Garantidos os endpoints para o Worker:
+- GET  /internal/sync/pending-payments -> Retorna pagamentos com status 'PENDENTE' ou 'ERRO' (com tentativas < 15) e altera status temporario para 'PROCESSANDO'.
+- POST /internal/sync/confirm-payment  -> Recebe { id, success: true } (atualiza status para 'CONCLUIDO') ou { id, success: false, error } (incrementa tentativas e marca 'ERRO').
+- POST /api/sync/resync-quitacoes      -> Reenfileira todos os titulos que estao como 'PAGO' em dash_financeiro para o Worker baixar.
+
+
+================================================================================
+4. ALTERACOES APLICADAS NO COLISEU WORKER (.NET C#)
+================================================================================
+
+A. Arquivo: worker/ColiseuSales.Worker/Jobs/SyncNexusDataJob.cs
+--------------------------------------------------------------------------------
+1. Implementado o metodo ProcessPendingPaymentsAsync(CancellationToken ct):
+   - Consulta GET /internal/sync/pending-payments enviando X-Internal-Key e X-Tenant-Id.
+   - Para cada pagamento retornado:
+     a) Busca o titulo no Firebird por ID_CONTA = id_firebird, NOSSO_NUMERO = nosso_numero ou N_DOC = numero_documento.
+     b) Se encontrado:
+        * Inicia transacao no Firebird.
+        * Executa UPDATE na tabela CONTAS:
+          UPDATE CONTAS
+          SET BAIXA = @BAIXA, -- 1 se Total, 2 se Parcial
+              DATA_PAGAMENTO = @DATA_PGTO,
+              VALOR_PAGO = @VALOR_PAGO,
+              TIPO_BAIXA = 5,
+              OBS = COALESCE(OBS, '') || ' [Quitado via Nexus em dd/MM/yyyy]'
+          WHERE ID_CONTA = @ID_CONTA;
+        * Se for Contas a Receber (DC = 1), atualiza o saldo devedor do cliente em CLIENTES:
+          UPDATE CLIENTES
+          SET SALDO = CASE WHEN (COALESCE(SALDO, 0) - @VALOR_ABATIDO) < 0 THEN 0 ELSE (COALESCE(SALDO, 0) - @VALOR_ABATIDO) END,
+              DATA_UP = CURRENT_TIMESTAMP
+          WHERE ID_CLIENTE = @ID_CLIENTE;
+        * Comita a transacao.
+        * Notifica o Nexus: POST /internal/sync/confirm-payment { id, success: true }.
+     c) Se nao localizado no Firebird:
+        * Notifica o Nexus: POST /internal/sync/confirm-payment { id, success: false, error: 'Titulo nao localizado' }.
+
+2. Integrado na execucao principal:
+   O metodo ProcessPendingPaymentsAsync e executado no inicio de RunAsync (sempre 
+   processando as quitacoes do Nexus para o Firebird mesmo quando nao houver novas 
+   alteracoes no Firebird).
+
+
+B. Arquivo: worker/ColiseuSales.Worker/WorkerService.cs
+--------------------------------------------------------------------------------
+Adicionada a chamada para _nexusData.ProcessPendingPaymentsAsync() no loop de ordens
+(executado a cada 60 segundos), garantindo que pagamentos efetuados no Nexus sejam 
+refletidos no Firebird em menos de 1 minuto.
+
+
+================================================================================
+5. PASSO A PASSO PARA IMPLANTACAO NO SERVIDOR DO NEXUS
+================================================================================
+
+Passo 1: Enviar os arquivos alterados do Nexus para o Git
+No terminal da sua maquina local:
+  cd C:\Mac\Home\Documents\GitHub\Nexus
+  git add middleware/src/db/postgres.js middleware/src/routes/financeiro.js middleware/src/services/asaasService.js middleware/src/routes/asaas.js middleware/src/routes/cora.js
+  git commit -m "fix(financeiro): correcao de quitacao de titulos e fila pending_payments para o worker"
+  git push origin main
+
+Passo 2: Atualizar o Servidor Nexus (VPS)
+Conecte-se via SSH no servidor do Nexus e execute:
+  cd /caminho/do/nexus/middleware
+  git pull origin main
+  pm2 restart nexus-middleware
+  # Ou caso use docker:
+  # docker compose restart middleware
+
+Passo 3: Reenviar Quitacoes Anteriores (Opcional, se houver titulos ja pagos no Nexus)
+Execute o comando cURL no terminal ou via Postman:
+  curl -X POST https://nexus.coliseusistemas.com.br/api/sync/resync-quitacoes \
+    -H "Content-Type: application/json" \
+    -H "X-Tenant-Id: SEU_TENANT_ID_UUID" \
+    -H "X-Internal-Key: SUA_INTERNAL_API_KEY"
+
+Passo 4: Atualizar o Worker no Cliente/Empresa
+Copie o novo executavel compilado (v2.5.147):
+  Origem: ColiseuSales\worker\ColiseuSales.Worker\bin\Release\net8.0-windows\win-x64\publish\ColiseuSales.Worker.exe
+  Destino: Pasta de instalacao do Worker no cliente (ex: C:\ColiseuSalesWorker)
+  Reinicie o servico do Worker no Windows.
+
+
+================================================================================
+6. COMO TESTAR E VALIDAR A INTEGRACAO
+================================================================================
+1. Acesse o Nexus ERP Web (Financeiro -> Contas a Receber).
+2. Selecione um titulo em aberto e clique em "Liquidar" (ou pague um boleto Asaas/Cora em ambiente de teste).
+3. Verifique nos logs do Worker (Console / Logs / StatusStore):
+   A mensagem "💰 [Nexus] Processando X quitação(ões) no Firebird..." sera exibida.
+4. Abra o banco Firebird do Coliseu ERP (ex: FlameRobin / IBExpert):
+   Execute: SELECT ID_CONTA, BAIXA, VALOR, VALOR_PAGO, DATA_PAGAMENTO, TIPO_BAIXA, OBS FROM CONTAS WHERE ID_CONTA = <ID>;
+   O campo BAIXA estara com 1 (Quitada), VALOR_PAGO preenchido e TIPO_BAIXA = 5.
+5. No Nexus, verifique a tabela pending_payments: o status estara como 'CONCLUIDO'.
+================================================================================

@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" fill="none">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e40af"/>
+      <stop offset="50%" stop-color="#3b82f6"/>
+      <stop offset="100%" stop-color="#0284c7"/>
+    </linearGradient>
+    <linearGradient id="goldGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fbbf24"/>
+      <stop offset="100%" stop-color="#d97706"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#1e3a8a" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+  
+  <!-- Outer Shield Background -->
+  <path d="M128 20 C180 20 220 40 220 90 C220 170 148 224 128 236 C108 224 36 170 36 90 C36 40 76 20 128 20 Z" 
+        fill="url(#bgGrad)" filter="url(#shadow)" stroke="#60a5fa" stroke-width="4"/>
+  
+  <!-- Inner Shield Border -->
+  <path d="M128 36 C170 36 204 52 204 94 C204 160 144 206 128 218 C112 206 52 160 52 94 C52 52 86 36 128 36 Z" 
+        fill="none" stroke="url(#goldGrad)" stroke-width="3" stroke-dasharray="6 4"/>
+
+  <!-- Certificate Paper / Document -->
+  <rect x="80" y="68" width="96" height="116" rx="10" fill="#ffffff" filter="url(#shadow)"/>
+  <rect x="92" y="84" width="50" height="8" rx="4" fill="#1e40af"/>
+  <rect x="92" y="100" width="72" height="6" rx="3" fill="#94a3b8"/>
+  <rect x="92" y="112" width="64" height="6" rx="3" fill="#cbd5e1"/>
+  <rect x="92" y="124" width="52" height="6" rx="3" fill="#cbd5e1"/>
+
+  <!-- Gold Seal Ribbon -->
+  <circle cx="146" cy="150" r="18" fill="url(#goldGrad)" stroke="#ffffff" stroke-width="2"/>
+  <path d="M138 164 L132 184 L142 178 L150 184 L146 164 Z" fill="url(#goldGrad)"/>
+
+  <!-- Lock Icon in Seal -->
+  <path d="M143 144 L149 144 C151 144 152 145 152 147 L152 153 C152 155 151 156 149 156 L143 156 C141 156 140 155 140 153 L140 147 C140 145 141 144 143 144 Z" fill="#ffffff"/>
+  <path d="M143 144 V141 C143 139.3 144.3 138 146 138 C147.7 138 149 139.3 149 141 V144" stroke="#ffffff" stroke-width="1.8" fill="none"/>
+
+  <!-- e-CNPJ / e-CPF Chip / Badge -->
+  <rect x="92" y="142" width="28" height="20" rx="4" fill="url(#goldGrad)"/>
+  <line x1="92" y1="152" x2="120" y2="152" stroke="#78350f" stroke-width="1"/>
+  <line x1="106" y1="142" x2="106" y2="162" stroke="#78350f" stroke-width="1"/>
+</svg>
