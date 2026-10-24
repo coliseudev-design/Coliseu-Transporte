@@ -17,6 +17,7 @@ export default function Sidebar({ open, onClose }: Props) {
   const user = useAuthStore((s) => s.user)
   
   // Collapsible groups state
+  const [transporteOpen, setTransporteOpen] = useState(true)
   const [cadastrosOpen, setCadastrosOpen] = useState(true)
   const [crmOpen, setCrmOpen] = useState(true)
   const [faturamentoOpen, setFaturamentoOpen] = useState(true)
@@ -133,6 +134,17 @@ export default function Sidebar({ open, onClose }: Props) {
           
           {/* Dashboard Executivo */}
           {renderLink('/', 'Dashboard Executivo', LayoutDashboard, true)}
+
+          {/* Grupo: Transporte & Frotas (CT-e / MDF-e) */}
+          {renderGroupHeader('Transporte & Frotas', Truck, transporteOpen, () => setTransporteOpen(!transporteOpen))}
+          {transporteOpen && (
+            <div className="space-y-0.5 pl-1">
+              {renderLink('/transporte/cargas', 'Central de Cargas (NF-e)', Package)}
+              {renderLink('/transporte/ctes', 'Conhecimentos (CT-e)', FileText)}
+              {renderLink('/transporte/mdfes', 'Manifestos (MDF-e)', Truck)}
+              {renderLink('/transporte/frota', 'Gestão de Frota', Layers)}
+            </div>
+          )}
 
           {/* Grupo: Cadastros */}
           {(hasAccess('cadastros') || hasAccess('clientes')) && (

@@ -39,6 +39,10 @@ const TABELAS_MAP = {
     'adm_ocorrencias_itens': ['id_firebird', 'ocorrencia_id_firebird', 'descricao', 'quantidade', 'valor_unitario', 'valor_total'],
     'rel_ic_contas_plano_res': ['id_firebird', 'codigo', 'descricao', 'tipo', 'nivel', 'conta_pai_id_firebird', 'ativo'],
     'dash_estatisticas_software': ['cliente_id_firebird', 'versao_software', 'versao_atualizacao', 'servidor', 'certificado_vencimento', 'usa_nfe', 'usa_nfce', 'usa_nfse', 'usa_sped', 'usa_boleto', 'usa_folha', 'usa_whats', 'usa_pix', 'usa_cobranca', 'usa_pontuacao', 'usa_os', 'usa_cte', 'usa_mdfe', 'usa_sales', 'usa_dash', 'usa_coletor', 'softwares'],
+    // Módulo Coliseu Transporte (Sincronizado pelo Worker do ERP)
+    'dash_cargas': ['id_firebird', 'tipo_documento', 'chave_acesso', 'numero', 'serie', 'data_emissao', 'remetente_documento', 'remetente_nome', 'remetente_municipio', 'remetente_uf', 'destinatario_documento', 'destinatario_nome', 'destinatario_municipio', 'destinatario_uf', 'valor_total', 'valor_produtos', 'peso_bruto', 'peso_liquido', 'volume_m3', 'volumes', 'especie', 'produto_predominante', 'dados_nfe'],
+    'dash_veiculos': ['id_firebird', 'placa', 'renavam', 'chassi', 'uf', 'tipo_rodado', 'tipo_carroceria', 'tara_kg', 'capacidade_kg', 'capacidade_m3', 'tipo_proprietario', 'rntrc', 'cpf_cnpj_proprietario', 'nome_proprietario', 'uf_proprietario'],
+    'dash_motoristas': ['id_firebird', 'cpf', 'nome', 'cnh', 'cnh_categoria', 'cnh_validade', 'telefone'],
 };
 
 /**
@@ -104,6 +108,9 @@ const ALIAS_MAP = {
     'adm-ocorrencias-itens':  'adm_ocorrencias_itens',
     'contas-plano-res':       'rel_ic_contas_plano_res',
     'estatisticas-software': 'dash_estatisticas_software',
+    'cargas':                 'dash_cargas',
+    'veiculos':               'dash_veiculos',
+    'motoristas':             'dash_motoristas',
 };
 
 router.post('/adm-ocorrencias', requireInternalAuth, (req, res, next) => {

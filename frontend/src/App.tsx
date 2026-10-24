@@ -34,6 +34,12 @@ import ConfigIntegracoes from './pages/ConfigIntegracoes'
 import CadastrosPage from './pages/CadastrosPage'
 import MotoresCobranca from './pages/MotoresCobranca'
 
+// Módulo de Transporte
+import CargasPage from './pages/transporte/CargasPage'
+import CtesPage from './pages/transporte/CtesPage'
+import MdfesPage from './pages/transporte/MdfesPage'
+import FrotaPage from './pages/transporte/FrotaPage'
+
 // BI Modules
 import BiDashboard from './pages/bi/BiDashboard'
 import SalesIntelligenceDashboard from './pages/bi/SalesIntelligenceDashboard'
@@ -143,6 +149,12 @@ export default function App() {
         <Route path="bancos" element={<ContasBancarias />} />
         <Route path="gerencia-financeiro" element={<RequirePermission module="gerencia" submenu="gerencia_financeira"><GerenciaFinanceiro /></RequirePermission>} />
         
+        {/* Módulo Coliseu Transporte */}
+        <Route path="transporte/cargas" element={<CargasPage />} />
+        <Route path="transporte/ctes" element={<CtesPage />} />
+        <Route path="transporte/mdfes" element={<MdfesPage />} />
+        <Route path="transporte/frota" element={<FrotaPage />} />
+
         {/* Novas Rotas NEXOS */}
         <Route path="crm" element={<RequirePermission module="crm"><KanbanCRM /></RequirePermission>} />
         <Route path="contratos" element={<RequirePermission module="crm" submenu="contratos"><Contratos /></RequirePermission>} />

@@ -35,6 +35,8 @@ const asaasRouter = require('./routes/asaas');
 const coraRouter = require('./routes/cora');
 const emailRouter = require('./routes/email');
 const { router: trackingRouter } = require('./routes/tracking');
+const transporteRouter = require('./routes/transporte');
+const TransporteService = require('./services/transporteService');
 
 const path = require('path');
 const fs = require('fs');
@@ -106,6 +108,17 @@ app.use('/api/webhooks/asaas', asaasRouter); // Pública para receber webhooks d
 app.use('/api/webhooks/cora', coraRouter); // Pública para receber webhooks do Banco Cora
 app.use(['/api/cora/webhook', '/api/cora/webhook-receive', '/cora/webhook', '/cora/webhook-receive'], coraRouter); // Pública para endpoints alternativos Cora
 
+// Webhook público da Focus NFe (retornos de autorização/rejeição de CT-e e MDF-e da SEFAZ)
+app.post('/api/webhooks/focus', async (req, res) => {
+    try {
+        const resultado = await TransporteService.processarWebhook(req.body);
+        return res.status(200).json({ received: true, ...resultado });
+    } catch (err) {
+        console.error('[Webhook Focus] Erro ao processar:', err.message);
+        return res.status(200).json({ received: true, error: err.message }); // 200 para a Focus não travar a fila
+    }
+});
+
 // Habilita rotas de sincronização para o Worker C#/Python e Frontend Web sem exigir JWT de usuário web
 app.use('/api/sync', syncRouter);
 
@@ -159,6 +172,7 @@ app.use('/api/automacoes', automacoesRouter);
 app.use('/api/asaas', asaasRouter);
 app.use('/api/cora', coraRouter);
 app.use('/api/email', emailRouter);
+app.use('/api/transporte', transporteRouter); // Módulo Fiscal de CT-e, MDF-e, Cargas e Frota
 
 app.use('/internal', requireInternalAuth);
 app.use('/internal/sync', syncRouter); // Mantém /internal/sync para o C# Worker
