@@ -246,15 +246,18 @@ router.post('/register', async (req, res) => {
             const data = await response.json();
             const deviceLimit = data.deviceLimit || 0;
 
-            // Checar a quantidade atual de usuários para este tenant
-            const countQuery = `SELECT COUNT(*) as total FROM dash_usuarios WHERE tenant_id = $1`;
+            // Checar a quantidade atual de usuários ativos para este tenant
+            const countQuery = `SELECT COUNT(*) as total FROM dash_usuarios WHERE tenant_id = $1 AND ativo = true`;
             const countResult = await db.query(countQuery, [companyKey]);
             const currentUsersCount = parseInt(countResult.rows[0].total, 10);
 
-            if (currentUsersCount >= deviceLimit) {
-                return res.status(403).json({ 
-                    error: `O limite de licenças (${deviceLimit}) para esta empresa foi atingido. Nenhuma nova conta pode ser criada.`, 
-                    code: 'LICENSE_LIMIT_REACHED' 
+            // Permitir cadastro de administradores/suporte mesmo no limite de licenças
+            const isSuperAdminEmail = email.toLowerCase().endsWith('@silenus.com.br') || email.toLowerCase().endsWith('@coliseusistemas.com.br');
+
+            if (!isSuperAdminEmail && currentUsersCount >= deviceLimit) {
+                return res.status(403).json({
+                    error: `O limite de licenças (${deviceLimit}) para esta empresa foi atingido. Nenhuma nova conta pode ser criada.`,
+                    code: 'LICENSE_LIMIT_REACHED'
                 });
             }
         } catch (err) {
@@ -274,13 +277,14 @@ router.post('/register', async (req, res) => {
         const salt = await bcrypt.genSalt(10);
         const senhaHash = await bcrypt.hash(password, salt);
 
-        // Insere o usuário (default role: viewer)
+        // Insere o usuário (admin para emails autorizados de gestão, senão viewer)
+        const initialRole = isSuperAdminEmail ? 'admin' : 'viewer';
         const insertQuery = `
             INSERT INTO dash_usuarios (tenant_id, email, nome, role, ativo, senha_hash, permissions, layout_version)
-            VALUES ($1, $2, $3, 'viewer', true, $4, NULL, 'v1.0')
+            VALUES ($1, $2, $3, $5, true, $4, NULL, 'v1.0')
             RETURNING id, tenant_id, email, nome, role, permissions, layout_version
         `;
-        const result = await db.query(insertQuery, [companyKey, email, nome, senhaHash]);
+        const result = await db.query(insertQuery, [companyKey, email, nome, senhaHash, initialRole]);
         const user = result.rows[0];
 
         logger.info('[Auth] Novo usuário cadastrado', { email: user.email, tenant: user.tenant_id });
