@@ -43,6 +43,13 @@ interface Carga {
   status: string;
 }
 
+// Lista Oficial das 27 Unidades Federativas do Brasil (bloqueia digitação inválida como JJ)
+const UFS_BRASIL = [
+  'AC', 'AL', 'AP', 'AM', 'BA', 'CE', 'DF', 'ES', 'GO', 'MA',
+  'MT', 'MS', 'MG', 'PA', 'PB', 'PR', 'PE', 'PI', 'RJ', 'RN',
+  'RS', 'RO', 'RR', 'SC', 'SP', 'SE', 'TO'
+];
+
 export default function CargasPage() {
   const [search, setSearch] = useState('');
   const [cliente, setCliente] = useState('');
@@ -167,10 +174,37 @@ export default function CargasPage() {
 
   const cargas: Carga[] = data?.data || [];
 
-  // Totais das cargas selecionadas
+  // Totais e Inteligência de Rota das cargas selecionadas
   const selecionadas = cargas.filter(c => selectedIds.includes(c.id));
   const totalValorCarga = selecionadas.reduce((acc, c) => acc + Number(c.valor_total || 0), 0);
   const totalPeso = selecionadas.reduce((acc, c) => acc + Number(c.peso_bruto || 0), 0);
+
+  // Estados e Cidades envolvidos no lote selecionado
+  const analiseLote = useMemo(() => {
+    const ufsOrigem = Array.from(new Set(selecionadas.map(c => (c.remetente_uf || '').toUpperCase()).filter(Boolean)));
+    const ufsDestino = Array.from(new Set(selecionadas.map(c => (c.destinatario_uf || '').toUpperCase()).filter(Boolean)));
+
+    // Agrupa cidades de destino com peso e quantidade de notas
+    const cidadesMap: Record<string, { cidade: string; uf: string; qtd: number; valor: number; peso: number }> = {};
+    selecionadas.forEach(c => {
+      const key = `${c.destinatario_municipio || 'Não Informado'}/${c.destinatario_uf || 'MS'}`;
+      if (!cidadesMap[key]) {
+        cidadesMap[key] = {
+          cidade: c.destinatario_municipio || 'Não Informado',
+          uf: c.destinatario_uf || 'MS',
+          qtd: 0,
+          valor: 0,
+          peso: 0
+        };
+      }
+      cidadesMap[key].qtd += 1;
+      cidadesMap[key].valor += Number(c.valor_total || 0);
+      cidadesMap[key].peso += Number(c.peso_bruto || 0);
+    });
+
+    const cidadesList = Object.values(cidadesMap);
+    return { ufsOrigem, ufsDestino, cidadesList };
+  }, [selecionadas]);
 
   const toggleSelect = (id: number) => {
     setSelectedIds(prev =>
@@ -883,140 +917,242 @@ export default function CargasPage() {
         </div>
       )}
 
-      {/* Modal de Criação de MDF-e Direto (Carga Própria / Varejo) */}
+      {/* Modal Amplo de Criação de MDF-e Direto (Carga Própria / Varejo) */}
       {modalMdfeDiretoOpen && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-white dark:bg-slate-800 w-full max-w-lg rounded-2xl p-6 shadow-xl border border-slate-200 dark:border-slate-700">
-            <div className="flex items-start justify-between gap-2">
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white dark:bg-slate-800 w-full max-w-5xl rounded-3xl p-6 sm:p-8 shadow-2xl border border-slate-200 dark:border-slate-700 my-8 max-h-[92vh] flex flex-col">
+
+            {/* Cabeçalho do Modal */}
+            <div className="flex items-start justify-between pb-4 border-b border-slate-100 dark:border-slate-700/60 shrink-0">
               <div>
-                <h2 className="text-lg font-bold text-slate-900 dark:text-white flex items-center gap-2">
-                  <Truck className="w-5 h-5 text-emerald-600" />
-                  Emitir MDF-e Direto (Carga Própria)
+                <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 text-xs font-semibold mb-1.5 border border-emerald-200 dark:border-emerald-800/40">
+                  <Truck className="w-3.5 h-3.5 text-emerald-600" />
+                  MDF-e de Carga Própria (Tipo 2 - Varejo / Comércio)
+                </div>
+                <h2 className="text-2xl font-bold text-slate-900 dark:text-white tracking-tight">
+                  Despacho de Viagem e Manifesto de Carga
                 </h2>
-                <p className="text-xs text-slate-500 mt-1">
-                  Varejo/Comércio que transporta mercadorias próprias: gera o MDF-e agrupando {selecionadas.length} NF-e(s) <strong className="text-emerald-600">sem precisar de CT-e</strong>.
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                  Emita o manifesto fiscal para transporte de mercadorias próprias diretamente na SEFAZ sem necessidade de emissão de CT-e.
                 </p>
               </div>
+              <button
+                onClick={() => setModalMdfeDiretoOpen(false)}
+                className="p-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
             </div>
 
-            <div className="my-4 p-4 rounded-xl bg-emerald-50/60 dark:bg-emerald-950/30 border border-emerald-200/80 dark:border-emerald-800/50 text-xs space-y-1.5">
-              <div className="flex justify-between">
-                <span className="text-slate-600 dark:text-slate-400">Valor Total das Mercadorias:</span>
-                <span className="font-bold text-emerald-700 dark:text-emerald-300">R$ {totalValorCarga.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-slate-600 dark:text-slate-400">Peso Total Consolidado:</span>
-                <span className="font-bold text-slate-900 dark:text-white">{totalPeso.toLocaleString('pt-BR')} kg</span>
-              </div>
-            </div>
+            <form onSubmit={handleCriarMdfeDireto} className="flex-1 overflow-y-auto py-5 space-y-6 pr-1">
 
-            <form onSubmit={handleCriarMdfeDireto} className="space-y-4 text-sm">
-              <div>
-                <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1">
-                  Empresa Emitente (Filial) *
-                </label>
-                <select
-                  required
-                  value={emitenteId}
-                  onChange={e => setEmitenteId(e.target.value)}
-                  className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:ring-2 focus:ring-brand-500 text-xs"
-                >
-                  <option value="">Selecione a empresa...</option>
-                  {emitentes.map((em: any) => (
-                    <option key={em.id} value={em.id}>
-                      {em.razao_social} — {em.cnpj}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
+              {/* 1. Visão Geral da Rota e Cidades Envolvidas */}
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-3 bg-slate-50 dark:bg-slate-900/40 p-4 rounded-2xl border border-slate-100 dark:border-slate-800">
                 <div>
-                  <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1">
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Notas Selecionadas</span>
+                  <p className="text-xl font-black text-slate-900 dark:text-white mt-0.5">
+                    {selecionadas.length} NF-e
+                  </p>
+                </div>
+                <div>
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Valor Total das Mercadorias</span>
+                  <p className="text-xl font-black text-emerald-600 dark:text-emerald-400 mt-0.5 tabular-nums">
+                    R$ {totalValorCarga.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                  </p>
+                </div>
+                <div>
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Peso Total Consolidado</span>
+                  <p className="text-xl font-black text-slate-900 dark:text-white mt-0.5 tabular-nums">
+                    {totalPeso.toLocaleString('pt-BR')} kg
+                  </p>
+                </div>
+                <div>
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Destinos Atendidos</span>
+                  <p className="text-xl font-black text-blue-600 dark:text-blue-400 mt-0.5">
+                    {analiseLote.cidadesList.length} cidade(s)
+                  </p>
+                </div>
+              </div>
+
+              {/* 2. Cidades de Entrega Envolvidas na Viagem */}
+              <div className="p-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-700/80">
+                <h4 className="text-xs font-bold text-slate-700 dark:text-slate-300 uppercase tracking-wider mb-2.5 flex items-center gap-1.5">
+                  <MapPin className="w-3.5 h-3.5 text-blue-500" />
+                  Cidades e Destinos Detectados no Lote:
+                </h4>
+                <div className="flex flex-wrap gap-2">
+                  {analiseLote.cidadesList.map((cid, i) => (
+                    <span key={i} className="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 text-xs font-medium text-slate-700 dark:text-slate-200 border border-slate-200/60 dark:border-slate-700">
+                      <span className="font-bold text-slate-900 dark:text-white">{cid.cidade}/{cid.uf}</span>
+                      <span className="text-[11px] text-slate-400">({cid.qtd} nota(s) · {cid.peso.toLocaleString('pt-BR')} kg)</span>
+                    </span>
+                  ))}
+                </div>
+              </div>
+
+              {/* 3. Dados do Emitente e Seleção dos Estados (Dropdown das 27 UFs do Brasil) */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div className="sm:col-span-1">
+                  <label className="block font-semibold text-slate-700 dark:text-slate-300 text-xs mb-1.5">
+                    Empresa Emitente (Filial) *
+                  </label>
+                  <select
+                    required
+                    value={emitenteId}
+                    onChange={e => setEmitenteId(e.target.value)}
+                    className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:ring-2 focus:ring-brand-500 text-xs"
+                  >
+                    <option value="">Selecione a empresa...</option>
+                    {emitentes.map((em: any) => (
+                      <option key={em.id} value={em.id}>
+                        {em.razao_social} — {em.cnpj}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block font-semibold text-slate-700 dark:text-slate-300 text-xs mb-1.5">
                     UF Início (Carregamento) *
                   </label>
-                  <input
-                    type="text" required maxLength={2}
+                  <select
+                    required
                     value={mdfeUfInicio}
-                    onChange={e => setMdfeUfInicio(e.target.value.toUpperCase())}
-                    className="w-24 px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white uppercase font-mono"
-                  />
+                    onChange={e => setMdfeUfInicio(e.target.value)}
+                    className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white font-bold uppercase focus:ring-2 focus:ring-brand-500 text-xs"
+                  >
+                    {UFS_BRASIL.map(uf => (
+                      <option key={uf} value={uf}>
+                        {uf} {analiseLote.ufsOrigem.includes(uf) ? '★ (Origem das Notas)' : ''}
+                      </option>
+                    ))}
+                  </select>
                 </div>
+
                 <div>
-                  <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1">
-                    UF Fim (Descarregamento) *
+                  <label className="block font-semibold text-slate-700 dark:text-slate-300 text-xs mb-1.5">
+                    UF Fim (Descarregamento Final) *
                   </label>
-                  <input
-                    type="text" required maxLength={2}
+                  <select
+                    required
                     value={mdfeUfFim}
-                    onChange={e => setMdfeUfFim(e.target.value.toUpperCase())}
-                    className="w-24 px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white uppercase font-mono"
-                  />
+                    onChange={e => setMdfeUfFim(e.target.value)}
+                    className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white font-bold uppercase focus:ring-2 focus:ring-brand-500 text-xs"
+                  >
+                    {UFS_BRASIL.map(uf => (
+                      <option key={uf} value={uf}>
+                        {uf} {analiseLote.ufsDestino.includes(uf) ? '★ (Destino das Notas)' : ''}
+                      </option>
+                    ))}
+                  </select>
                 </div>
               </div>
 
-              <div>
-                <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1">
-                  Veículo de Tração (Placa) *
-                </label>
-                <select
-                  required
-                  value={mdfeVeiculoId}
-                  onChange={e => setMdfeVeiculoId(e.target.value)}
-                  className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:ring-2 focus:ring-brand-500 text-xs"
-                >
-                  <option value="">Selecione o veículo da frota...</option>
-                  {veiculos.map((v: any) => (
-                    <option key={v.id} value={v.id}>
-                      Placa: {v.placa} — Cap: {Number(v.capacidade_kg || 0).toLocaleString('pt-BR')} kg ({v.tipo_proprietario === '1' ? 'Próprio' : 'Terceiro'})
-                    </option>
-                  ))}
-                </select>
-                {veiculos.length === 0 && (
-                  <p className="text-[11px] text-amber-600 mt-1">
-                    Nenhum veículo cadastrado. Vá em Cadastros → Frota para adicionar.
-                  </p>
-                )}
+              {/* 4. Seleção de Veículo e Condutor */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block font-semibold text-slate-700 dark:text-slate-300 text-xs mb-1.5">
+                    Veículo de Tração (Frota) *
+                  </label>
+                  <select
+                    required
+                    value={mdfeVeiculoId}
+                    onChange={e => setMdfeVeiculoId(e.target.value)}
+                    className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:ring-2 focus:ring-brand-500 text-xs"
+                  >
+                    <option value="">Selecione o veículo da frota...</option>
+                    {veiculos.map((v: any) => (
+                      <option key={v.id} value={v.id}>
+                        Placa: {v.placa} — Cap: {Number(v.capacidade_kg || 0).toLocaleString('pt-BR')} kg ({v.tipo_proprietario === '1' ? 'Próprio' : 'Terceiro/TAC'})
+                      </option>
+                    ))}
+                  </select>
+                  {veiculos.length === 0 && (
+                    <p className="text-[11px] text-amber-600 mt-1">
+                      Nenhum veículo cadastrado na frota. Cadastre em Frota & Condutores.
+                    </p>
+                  )}
+                </div>
+
+                <div>
+                  <label className="block font-semibold text-slate-700 dark:text-slate-300 text-xs mb-1.5">
+                    Condutor / Motorista Autorizado *
+                  </label>
+                  <select
+                    required
+                    value={mdfeMotoristaId}
+                    onChange={e => setMdfeMotoristaId(e.target.value)}
+                    className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:ring-2 focus:ring-brand-500 text-xs"
+                  >
+                    <option value="">Selecione o condutor da viagem...</option>
+                    {motoristas.map((m: any) => (
+                      <option key={m.id} value={m.id}>
+                        {m.nome} — CPF: {m.cpf} (CNH: {m.cnh_categoria || 'D'})
+                      </option>
+                    ))}
+                  </select>
+                  {motoristas.length === 0 && (
+                    <p className="text-[11px] text-amber-600 mt-1">
+                      Nenhum motorista cadastrado. Cadastre em Frota & Condutores.
+                    </p>
+                  )}
+                </div>
               </div>
 
-              <div>
-                <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1">
-                  Condutor / Motorista *
-                </label>
-                <select
-                  required
-                  value={mdfeMotoristaId}
-                  onChange={e => setMdfeMotoristaId(e.target.value)}
-                  className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:ring-2 focus:ring-brand-500 text-xs"
-                >
-                  <option value="">Selecione o motorista...</option>
-                  {motoristas.map((m: any) => (
-                    <option key={m.id} value={m.id}>
-                      {m.nome} — CPF: {m.cpf} (CNH: {m.cnh_categoria || 'D'})
-                    </option>
+              {/* 5. Tabela Completa de Conferência das NF-es Vinculadas */}
+              <div className="border border-slate-200/80 dark:border-slate-700 rounded-2xl overflow-hidden">
+                <div className="px-4 py-2.5 bg-slate-50 dark:bg-slate-900 text-xs font-bold text-slate-700 dark:text-slate-300 flex items-center justify-between border-b border-slate-200/60 dark:border-slate-700">
+                  <span>Notas Fiscais Vinculadas ao Manifesto ({selecionadas.length})</span>
+                  <span className="text-[11px] text-slate-400 font-normal">Clique no X para remover alguma nota do lote</span>
+                </div>
+                <div className="max-h-52 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800 text-xs">
+                  {selecionadas.map(c => (
+                    <div key={c.id} className="p-3 flex items-center justify-between gap-3 hover:bg-slate-50/50 dark:hover:bg-slate-800/40">
+                      <div className="min-w-0 flex-1">
+                        <p className="font-bold text-slate-900 dark:text-white truncate">
+                          NF-e nº {c.numero} (Série {c.serie}) · {c.destinatario_nome}
+                        </p>
+                        <p className="text-[11px] font-mono text-slate-400 truncate mt-0.5">
+                          {c.destinatario_municipio}/{c.destinatario_uf} · Chave: {c.chave_acesso}
+                        </p>
+                      </div>
+                      <div className="text-right shrink-0 pr-2">
+                        <p className="font-bold text-slate-900 dark:text-white">
+                          R$ {Number(c.valor_total || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                        </p>
+                        <p className="text-[10px] text-slate-400">
+                          {Number(c.peso_bruto || 0).toLocaleString('pt-BR')} kg
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => toggleSelect(c.id)}
+                        className="p-1 text-slate-400 hover:text-red-600 rounded-lg transition-colors"
+                        title="Remover deste manifesto"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
                   ))}
-                </select>
-                {motoristas.length === 0 && (
-                  <p className="text-[11px] text-amber-600 mt-1">
-                    Nenhum motorista cadastrado. Vá em Cadastros → Frota para adicionar.
-                  </p>
-                )}
+                </div>
               </div>
 
-              <div className="flex justify-end gap-2.5 pt-3 border-t border-slate-100 dark:border-slate-700">
+              {/* Botões do Rodapé */}
+              <div className="flex justify-end gap-3 pt-4 border-t border-slate-100 dark:border-slate-700/60 shrink-0">
                 <button
                   type="button"
                   onClick={() => setModalMdfeDiretoOpen(false)}
-                  className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
+                  className="px-5 py-2.5 rounded-xl text-xs font-semibold text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
                 >
                   Cancelar
                 </button>
                 <button
                   type="submit"
-                  disabled={submittingMdfe}
-                  className="px-5 py-2 rounded-xl text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 transition-colors shadow-sm"
+                  disabled={submittingMdfe || selecionadas.length === 0}
+                  className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 transition-all shadow-md shadow-emerald-600/20"
                 >
-                  {submittingMdfe ? 'Criando Manifesto...' : 'Gerar MDF-e de Carga Própria'}
+                  <Truck className="w-4 h-4" />
+                  {submittingMdfe ? 'Transmitindo à SEFAZ...' : 'Gerar e Emitir MDF-e de Carga Própria'}
                 </button>
               </div>
             </form>

@@ -68,7 +68,7 @@ export default function Header() {
       hoverBorderLeft: 'hover:border-l-[#6366F1]',
       items: [
         { to: '/clientes', label: 'Clientes (ERP Coliseu)', icon: Users },
-        { to: '/departamentos', label: 'Regiões & Cidades', icon: Network },
+        { to: '/regioes', label: 'Regiões & Cidades', icon: Network },
       ]
     },
     {

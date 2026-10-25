@@ -120,6 +120,7 @@ export default function Sidebar({ open, onClose }: Props) {
           {cadastrosOpen && (
             <div className="space-y-0.5 pl-1">
               {renderLink('/clientes', 'Clientes (ERP Coliseu)', Users)}
+              {renderLink('/regioes', 'Regiões & Cidades', Route)}
               {renderLink('/transporte/frota', 'Frota & Condutores', Layers)}
             </div>
           )}

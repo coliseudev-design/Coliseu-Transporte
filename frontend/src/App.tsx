@@ -10,6 +10,8 @@ import DashboardLayout from './components/DashboardLayout'
 
 import Home from './pages/Home'
 import Usuarios from './pages/Usuarios'
+import Clientes from './pages/Clientes'
+import CadastrosPage from './pages/CadastrosPage'
 
 // ─────────────────────────────────────────────────────────────
 // Módulo Coliseu Transporte
@@ -124,6 +126,11 @@ export default function App() {
         <Route path="transporte/campos" element={<CamposDinamicosPage />} />
         <Route path="transporte/roteiro" element={<RoteiroEntregaPage />} />
         <Route path="transporte/certificados" element={<CertificadosPage />} />
+
+        {/* ── Cadastros do ERP Sincronizados ── */}
+        <Route path="clientes" element={<Clientes />} />
+        <Route path="regioes" element={<CadastrosPage type="regioes" />} />
+        <Route path="departamentos" element={<CadastrosPage type="regioes" />} />
 
         {/* Administração (mantida do sistema base) */}
         <Route path="usuarios" element={<RequirePermission module="configuracoes" submenu="usuarios"><Usuarios /></RequirePermission>} />
