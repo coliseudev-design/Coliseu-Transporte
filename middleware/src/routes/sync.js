@@ -22,8 +22,9 @@ const TABELAS_MAP = {
     ],
     'dash_vendedores': ['id_firebird', 'nome', 'email', 'ativo'],
     'dash_fornecedores': ['id_firebird', 'nome', 'documento', 'cidade', 'estado'],
-    'dash_vendas': ['id_firebird', 'numero_pedido', 'data_venda', 'data_vencimento', 'cliente_id_firebird', 'vendedor_id_firebird', 'valor_total', 'valor_custo', 'valor_desconto', 'status', 'marca', 'categoria', 'especie', 'depto_id', 'cfop', 'numero_nota', 'data_hora_proc', 'es', 'processo'],
-    'dash_vendas_itens': ['id_firebird', 'venda_id_firebird', 'produto_id_firebird', 'quantidade', 'preco_unitario', 'custo_unitario', 'valor_total', 'vendedor', 'produto', 'marca', 'categoria', 'depto_id'],
+    'dash_vendas': ['id_firebird', 'numero_pedido', 'data_venda', 'data_vencimento', 'cliente_id_firebird', 'vendedor_id_firebird', 'valor_total', 'valor_custo', 'valor_desconto', 'status', 'marca', 'categoria', 'especie', 'depto_id', 'cfop', 'numero_nota', 'chave_nfe', 'data_hora_proc', 'es', 'processo'],
+    'dash_vendas_itens': ['id_firebird', 'venda_id_firebird', 'produto_id_firebird', 'quantidade', 'preco_unitario', 'custo_unitario', 'valor_total', 'desconto_item', 'vendedor', 'produto', 'marca', 'categoria', 'depto_id', 'cfop', 'numero_nota', 'chave_nfe'],
+    'dash_produtos_depto': ['id_firebird', 'produto_id_firebird', 'depto_id', 'estoque', 'preco', 'custo', 'ativo'],
     'dash_comissoes': ['id_firebird', 'vendedor_id_firebird', 'venda_id_firebird', 'periodo', 'valor_vendas', 'percentual', 'valor_comissao', 'data_referencia'],
     'dash_financeiro': [
         'id_firebird', 'tipo', 'tipo_documento', 'descricao', 'cliente_id_firebird', 'fornecedor_id_firebird', 
@@ -48,8 +49,6 @@ const TABELAS_MAP = {
 /**
  * POST /api/sync/start
  * Acionado pelo frontend para solicitar o início manual de sincronização.
- * Como o agente de sincronização roda no cliente localmente (via APScheduler ou Worker .NET),
- * retornamos 200 OK para confirmar o sinal de sync.
  */
 router.post('/start', async (req, res) => {
     const { id: tenantId } = req.tenant || {};
@@ -61,30 +60,80 @@ router.post('/start', async (req, res) => {
 });
 
 /**
+ * POST /internal/sync/heartbeat
+ * Recebe batimento cardíaco do Worker .NET e registra em dash_sync_metadata.
+ */
+router.post('/heartbeat', async (req, res) => {
+    const tenantId = req.tenant?.id || req.headers['x-tenant-id'];
+    if (!tenantId) return res.status(200).json({ ok: true });
+    try {
+        await db.query(`
+            INSERT INTO dash_sync_metadata (tenant_id, tabela, ultima_sincronizacao, registros_sincronizados, status, erro_mensagem)
+            VALUES ($1, '__heartbeat__', NOW(), 0, 'OK', NULL)
+            ON CONFLICT (tenant_id, tabela) WHERE operacao IS NULL DO UPDATE SET
+                ultima_sincronizacao = NOW(),
+                status = 'OK',
+                erro_mensagem = NULL
+        `, [tenantId]);
+    } catch (_) { /* ignore if metadata table missing */ }
+    return res.status(200).json({ ok: true, timestamp: new Date().toISOString() });
+});
+
+/**
  * GET /api/sync/status
- * Retorna o status de sincronização por tabela para o frontend / hooks de sync.
+ * Retorna o status de sincronização por tabela (Quadro de Sincronismo do Transporte / ERP).
  */
 router.get('/status', async (req, res) => {
     try {
         const tenantId = req.tenant?.id || req.headers['x-tenant-id'] || '6ab9b8b2-09b1-4698-aead-bea948a42036';
-        
-        const [rClientes, rVendas, rFinanceiro, rProdutos, rPending] = await Promise.all([
-            db.query(`SELECT COUNT(*)::int AS total, MAX(data_cadastro) AS max_date FROM dash_clientes WHERE ($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text))`, [String(tenantId)]).catch(() => ({ rows: [{ total: 0 }] })),
-            db.query(`SELECT COUNT(*)::int AS total, MAX(data_venda) AS max_date FROM dash_vendas WHERE ($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text))`, [String(tenantId)]).catch(() => ({ rows: [{ total: 0 }] })),
-            db.query(`SELECT COUNT(*)::int AS total, MAX(data_emissao) AS max_date FROM dash_financeiro WHERE ($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text))`, [String(tenantId)]).catch(() => ({ rows: [{ total: 0 }] })),
-            db.query(`SELECT COUNT(*)::int AS total FROM dash_produtos WHERE ($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text))`, [String(tenantId)]).catch(() => ({ rows: [{ total: 0 }] })),
-            db.query(`SELECT COUNT(*)::int AS total FROM dash_sync_metadata WHERE status = 'PENDENTE' AND ($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text))`, [String(tenantId)]).catch(() => ({ rows: [{ total: 0 }] }))
+
+        const [rClientes, rProdutos, rCargas, rVendas, rVendasItens, rFinanceiro, rMeta] = await Promise.all([
+            db.query(`SELECT COUNT(*)::int AS total, MAX(sincronizado_em) AS max_date FROM dash_clientes WHERE ($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text))`, [String(tenantId)]).catch(() => ({ rows: [{ total: 0 }] })),
+            db.query(`SELECT COUNT(*)::int AS total, MAX(sincronizado_em) AS max_date FROM dash_produtos WHERE ($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text))`, [String(tenantId)]).catch(() => ({ rows: [{ total: 0 }] })),
+            db.query(`SELECT COUNT(*)::int AS total, MAX(sincronizado_em) AS max_date FROM dash_cargas WHERE ($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text))`, [String(tenantId)]).catch(() => ({ rows: [{ total: 0 }] })),
+            db.query(`SELECT COUNT(*)::int AS total, MAX(sincronizado_em) AS max_date FROM dash_vendas WHERE ($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text))`, [String(tenantId)]).catch(() => ({ rows: [{ total: 0 }] })),
+            db.query(`SELECT COUNT(*)::int AS total, MAX(sincronizado_em) AS max_date FROM dash_vendas_itens WHERE ($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text))`, [String(tenantId)]).catch(() => ({ rows: [{ total: 0 }] })),
+            db.query(`SELECT COUNT(*)::int AS total, MAX(sincronizado_em) AS max_date FROM dash_financeiro WHERE ($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text))`, [String(tenantId)]).catch(() => ({ rows: [{ total: 0 }] })),
+            db.query(`SELECT tabela, ultima_sincronizacao AS ultima, status, registros_sincronizados AS registros FROM dash_sync_metadata WHERE ($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text))`, [String(tenantId)]).catch(() => ({ rows: [] }))
         ]);
 
+        const metaByTable = {};
+        for (const m of (rMeta.rows || [])) {
+            metaByTable[m.tabela] = m;
+        }
+
         const statusItems = [
-            { tabela: 'dash_clientes', ultima: rClientes.rows[0]?.max_date || new Date().toISOString(), status: 'OK', registros: rClientes.rows[0]?.total || 0 },
-            { tabela: 'dash_vendas', ultima: rVendas.rows[0]?.max_date || new Date().toISOString(), status: 'OK', registros: rVendas.rows[0]?.total || 0 },
-            { tabela: 'dash_financeiro', ultima: rFinanceiro.rows[0]?.max_date || new Date().toISOString(), status: 'OK', registros: rFinanceiro.rows[0]?.total || 0 },
-            { tabela: 'dash_produtos', ultima: new Date().toISOString(), status: 'OK', registros: rProdutos.rows[0]?.total || 0 },
-            { tabela: 'dash_sync_metadata', ultima: new Date().toISOString(), status: (rPending.rows[0]?.total || 0) > 0 ? 'PENDENTE' : 'OK', registros: rPending.rows[0]?.total || 0 }
+            { tabela: 'dash_clientes', ultima: metaByTable['dash_clientes']?.ultima || rClientes.rows[0]?.max_date || null, status: (rClientes.rows[0]?.total || 0) > 0 ? 'OK' : (metaByTable['dash_clientes']?.status || 'AGUARDANDO'), registros: rClientes.rows[0]?.total || 0 },
+            { tabela: 'dash_produtos', ultima: metaByTable['dash_produtos']?.ultima || rProdutos.rows[0]?.max_date || null, status: (rProdutos.rows[0]?.total || 0) > 0 ? 'OK' : (metaByTable['dash_produtos']?.status || 'AGUARDANDO'), registros: rProdutos.rows[0]?.total || 0 },
+            { tabela: 'dash_cargas', ultima: metaByTable['dash_cargas']?.ultima || rCargas.rows[0]?.max_date || null, status: (rCargas.rows[0]?.total || 0) > 0 ? 'OK' : (metaByTable['dash_cargas']?.status || 'AGUARDANDO'), registros: rCargas.rows[0]?.total || 0 },
+            { tabela: 'dash_vendas', ultima: metaByTable['dash_vendas']?.ultima || rVendas.rows[0]?.max_date || null, status: (rVendas.rows[0]?.total || 0) > 0 ? 'OK' : (metaByTable['dash_vendas']?.status || 'AGUARDANDO'), registros: rVendas.rows[0]?.total || 0 },
+            { tabela: 'dash_vendas_itens', ultima: metaByTable['dash_vendas_itens']?.ultima || rVendasItens.rows[0]?.max_date || null, status: (rVendasItens.rows[0]?.total || 0) > 0 ? 'OK' : (metaByTable['dash_vendas_itens']?.status || 'AGUARDANDO'), registros: rVendasItens.rows[0]?.total || 0 },
+            { tabela: 'dash_financeiro', ultima: metaByTable['dash_financeiro']?.ultima || rFinanceiro.rows[0]?.max_date || null, status: (rFinanceiro.rows[0]?.total || 0) > 0 ? 'OK' : (metaByTable['dash_financeiro']?.status || 'AGUARDANDO'), registros: rFinanceiro.rows[0]?.total || 0 },
         ];
 
-        return res.json({ success: true, status: statusItems });
+        const validDates = [
+            metaByTable['__heartbeat__']?.ultima,
+            ...statusItems.map(i => i.ultima)
+        ].map(d => d ? new Date(d).getTime() : 0).filter(t => !isNaN(t) && t > 0);
+
+        let heartbeatStatus = 'OFFLINE';
+        let ultimaHeartbeat = null;
+        if (validDates.length > 0) {
+            const maxTime = Math.max(...validDates);
+            ultimaHeartbeat = new Date(maxTime).toISOString();
+            if (Date.now() - maxTime < 30 * 60 * 1000) {
+                heartbeatStatus = 'OK';
+            }
+        }
+
+        statusItems.push({
+            tabela: '__heartbeat__',
+            ultima: ultimaHeartbeat,
+            status: heartbeatStatus,
+            registros: 0
+        });
+
+        return res.json({ success: true, status: statusItems, timestamp: new Date().toISOString() });
     } catch (err) {
         logger.error('[Sync] Erro no endpoint GET /sync/status:', err.message);
         return res.json({ success: true, status: [] });
@@ -109,6 +158,7 @@ const ALIAS_MAP = {
     'contas-plano-res':       'rel_ic_contas_plano_res',
     'estatisticas-software': 'dash_estatisticas_software',
     'cargas':                 'dash_cargas',
+    'notas':                  'dash_cargas',
     'veiculos':               'dash_veiculos',
     'motoristas':             'dash_motoristas',
 };
@@ -124,48 +174,6 @@ router.post('/adm-ocorrencias-itens', requireInternalAuth, (req, res, next) => {
 router.post('/contas-plano-res', requireInternalAuth, (req, res, next) => {
     req.params.tabela = 'rel_ic_contas_plano_res';
     next();
-});
-
-
-
-/**
- * Consulta a última data de sync do tenant
- */
-router.get('/status', async (req, res) => {
-    const tenantId = req.tenant?.id || req.headers['x-tenant-id'] || '6ab9b8b2-09b1-4698-aead-bea948a42036';
-    try {
-        const { rows } = await db.query(`
-            SELECT tabela, ultima_sincronizacao as ultima, status, registros_sincronizados as registros
-            FROM dash_sync_metadata
-            WHERE tenant_id = $1
-            ORDER BY tabela
-        `, [tenantId]);
-        
-        let heartbeatStatus = 'OFFLINE';
-        let ultimaHeartbeat = null;
-        if (rows.length > 0) {
-            const validDates = rows.map(r => r.ultima ? new Date(r.ultima).getTime() : 0).filter(t => !isNaN(t) && t > 0);
-            if (validDates.length > 0) {
-                const maxTime = Math.max(...validDates);
-                const lastSyncDate = new Date(maxTime);
-                ultimaHeartbeat = lastSyncDate.toISOString();
-                if (Date.now() - maxTime < 30 * 60 * 1000) {
-                    heartbeatStatus = 'OK';
-                }
-            }
-        }
-        
-        rows.push({
-            tabela: '__heartbeat__',
-            ultima: ultimaHeartbeat,
-            status: heartbeatStatus,
-            registros: 0
-        });
-
-        return res.json({ status: rows, timestamp: new Date().toISOString() });
-    } catch (err) {
-        return res.status(500).json({ error: 'Erro ao consultar status' });
-    }
 });
 
 /**
@@ -797,10 +805,65 @@ router.post('/:tabela', async (req, res) => {
     let inserted = 0;
     const errors = [];
 
+    const getConflictKey = (tbl) => {
+        if (tbl === 'dash_filiais') return 'depto_id';
+        if (tbl === 'dash_estatisticas_software') return 'cliente_id_firebird';
+        if (tbl === 'dash_cargas') return 'chave_acesso';
+        if (tbl === 'dash_veiculos') return 'placa';
+        if (tbl === 'dash_motoristas') return 'cpf';
+        return 'id_firebird';
+    };
+
     // Pegamos um client único para aproveitar mesma conexão para o loop/batch
     const client = await db.pool.connect();
 
     try {
+        if (tabela === 'dash_vendas') {
+            await client.query(`ALTER TABLE dash_vendas ADD COLUMN IF NOT EXISTS chave_nfe VARCHAR(44)`).catch(() => {});
+        } else if (tabela === 'dash_vendas_itens') {
+            await client.query(`
+                ALTER TABLE dash_vendas_itens ADD COLUMN IF NOT EXISTS desconto_item NUMERIC(15,2) DEFAULT 0;
+                ALTER TABLE dash_vendas_itens ADD COLUMN IF NOT EXISTS cfop VARCHAR(10);
+                ALTER TABLE dash_vendas_itens ADD COLUMN IF NOT EXISTS numero_nota VARCHAR(30);
+                ALTER TABLE dash_vendas_itens ADD COLUMN IF NOT EXISTS chave_nfe VARCHAR(44);
+            `).catch(() => {});
+        } else if (tabela === 'dash_cargas') {
+            await client.query(`
+                CREATE TABLE IF NOT EXISTS dash_cargas (
+                    id SERIAL PRIMARY KEY,
+                    tenant_id UUID NOT NULL,
+                    id_firebird INTEGER,
+                    tipo_documento VARCHAR(10) DEFAULT 'NFE',
+                    chave_acesso VARCHAR(44) NOT NULL,
+                    numero VARCHAR(20),
+                    serie VARCHAR(5),
+                    data_emissao DATE,
+                    remetente_documento VARCHAR(20),
+                    remetente_nome VARCHAR(200),
+                    remetente_municipio VARCHAR(100),
+                    remetente_uf VARCHAR(2),
+                    destinatario_documento VARCHAR(20),
+                    destinatario_nome VARCHAR(200),
+                    destinatario_municipio VARCHAR(100),
+                    destinatario_uf VARCHAR(2),
+                    valor_total NUMERIC(15,2) DEFAULT 0,
+                    valor_produtos NUMERIC(15,2) DEFAULT 0,
+                    peso_bruto NUMERIC(15,4) DEFAULT 0,
+                    peso_liquido NUMERIC(15,4) DEFAULT 0,
+                    volume_m3 NUMERIC(15,4) DEFAULT 0,
+                    volumes INTEGER DEFAULT 1,
+                    especie VARCHAR(60) DEFAULT 'VOLUMES',
+                    produto_predominante VARCHAR(200),
+                    status VARCHAR(30) DEFAULT 'PENDENTE',
+                    cte_id INTEGER,
+                    mdfe_id INTEGER,
+                    dados_nfe JSONB,
+                    sincronizado_em TIMESTAMPTZ DEFAULT NOW(),
+                    UNIQUE(tenant_id, chave_acesso)
+                );
+            `).catch(() => {});
+        }
+
         await client.query('BEGIN');
 
         for (const rawRow of rows) {
@@ -817,7 +880,7 @@ router.post('/:tabela', async (req, res) => {
                 }
 
                 // Guarda: valida chave primária obrigatória
-                const conflictKeyCheck = tabela === 'dash_filiais' ? 'depto_id' : (tabela === 'dash_estatisticas_software' ? 'cliente_id_firebird' : 'id_firebird');
+                const conflictKeyCheck = getConflictKey(tabela);
                 const pkVal = row[conflictKeyCheck];
                 if (pkVal === null || pkVal === undefined || pkVal === '') {
                     errors.push(`Row sem ${conflictKeyCheck}: dados inválidos ignorados`);
@@ -1063,6 +1126,7 @@ router.post('/:tabela', async (req, res) => {
                     let val = row[c];
                     if (val === '') return null;
                     if (c === 'ativo') return val == 1 || String(val).toLowerCase() === 'true';
+                    if (c === 'dados_nfe' && val && typeof val === 'object') return JSON.stringify(val);
                     
                     // Force client textual fields to uppercase
                     const textFields = [
@@ -1079,7 +1143,7 @@ router.post('/:tabela', async (req, res) => {
                 // Geração posicional para o Pg (ex: $1, $2, $3)
                 const placeholders = insertCols.map((_, i) => `$${i + 1}`).join(', ');
 
-                const conflictKey = tabela === 'dash_filiais' ? 'depto_id' : (tabela === 'dash_estatisticas_software' ? 'cliente_id_firebird' : 'id_firebird');
+                const conflictKey = getConflictKey(tabela);
 
                 // Regra de conflito: Atualiza todos os campos menos conflictKey e tenant_id
                 let updateSet = '';
@@ -1147,7 +1211,7 @@ router.post('/:tabela', async (req, res) => {
                     throw rowErr; // re-lança para o catch externo da linha
                 }
             } catch (err) {
-                const conflictKey = tabela === 'dash_filiais' ? 'depto_id' : (tabela === 'dash_estatisticas_software' ? 'cliente_id_firebird' : 'id_firebird');
+                const conflictKey = getConflictKey(tabela);
                 const idVal = row[conflictKey] || rawRow[conflictKey] || rawRow[conflictKey.toUpperCase()] || rawRow.ID_FIREBIRD || 'Unknown';
                 errors.push(`Row ID ${idVal}: ${err.message}`);
                 logger.error('[Sync] Falha em linha', { error: err.message, tenantId, rowId: idVal });

@@ -1,9 +1,11 @@
 import React, { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import { useNavigate } from 'react-router-dom';
 import api from '../../services/api';
+import DocumentoDrawer from '../../components/DocumentoDrawer';
 import {
   Truck, Send, CheckCircle2, Clock, CheckSquare,
-  AlertCircle, Eye, Download, Plus, Navigation
+  AlertCircle, Eye, Download, Plus, Navigation, MapPin, MoreHorizontal
 } from 'lucide-react';
 
 interface Mdfe {
@@ -25,7 +27,9 @@ interface Mdfe {
 }
 
 export default function MdfesPage() {
+  const navigate = useNavigate();
   const [loadingEmit, setLoadingEmit] = useState<number | null>(null);
+  const [drawerId, setDrawerId] = useState<number | null>(null);
   const [modalEncerrar, setModalEncerrar] = useState<Mdfe | null>(null);
   const [municipioEncerramento, setMunicipioEncerramento] = useState('');
   const [ufEncerramento, setUfEncerramento] = useState('');
@@ -180,14 +184,30 @@ export default function MdfesPage() {
                     </button>
                   )}
                   {mdfe.status === 'AUTORIZADO' && (
-                    <button
-                      onClick={() => setModalEncerrar(mdfe)}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl font-semibold text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/60 border border-amber-200 dark:border-amber-800/50 hover:bg-amber-100 transition-colors"
-                    >
-                      <CheckSquare className="w-3.5 h-3.5" />
-                      Encerrar Viagem
-                    </button>
+                    <>
+                      <button
+                        onClick={() => navigate('/transporte/roteiro')}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl font-semibold text-sky-700 dark:text-sky-300 bg-sky-50 dark:bg-sky-950/60 border border-sky-200 dark:border-sky-800/50 hover:bg-sky-100 transition-colors"
+                      >
+                        <MapPin className="w-3.5 h-3.5" />
+                        Roteiro
+                      </button>
+                      <button
+                        onClick={() => setModalEncerrar(mdfe)}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl font-semibold text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/60 border border-amber-200 dark:border-amber-800/50 hover:bg-amber-100 transition-colors"
+                      >
+                        <CheckSquare className="w-3.5 h-3.5" />
+                        Encerrar
+                      </button>
+                    </>
                   )}
+                  <button
+                    onClick={() => setDrawerId(mdfe.id)}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl font-semibold bg-slate-900 dark:bg-white text-white dark:text-slate-900 hover:bg-slate-700 dark:hover:bg-slate-200 transition-colors"
+                  >
+                    <MoreHorizontal className="w-3.5 h-3.5" />
+                    Detalhes
+                  </button>
                 </div>
               </div>
             </div>
@@ -257,6 +277,14 @@ export default function MdfesPage() {
           </div>
         </div>
       )}
+
+      {/* Drawer de detalhes do MDF-e */}
+      <DocumentoDrawer
+        tipo="MDFE"
+        documentoId={drawerId}
+        onClose={() => setDrawerId(null)}
+        onVerRoteiro={() => navigate('/transporte/roteiro')}
+      />
     </div>
   );
 }

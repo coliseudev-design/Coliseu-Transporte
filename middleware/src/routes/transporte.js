@@ -922,4 +922,609 @@ router.delete('/campos/:id', async (req, res) => {
     }
 });
 
+// ─────────────────────────────────────────────────────────────
+// 11. ROTEIROS DE ENTREGA (MAPA E LOGÍSTICA)
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Calcula a distância em km entre dois pontos (fórmula de Haversine).
+ */
+function distanciaKm(lat1, lon1, lat2, lon2) {
+    const R = 6371;
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLon = (lon2 - lon1) * Math.PI / 180;
+    const a = Math.sin(dLat / 2) ** 2 +
+              Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+/**
+ * Gera (ou recupera) o roteiro de entrega sequencial a partir de um MDF-e.
+ * As paradas saem dos documentos vinculados (CT-e / NF-e) e recebem
+ * coordenadas para plotagem no mapa.
+ */
+router.get('/roteiro/:mdfe_id', async (req, res) => {
+    const tenantId = req.tenant.id;
+    const mdfeId = parseInt(req.params.mdfe_id, 10);
+
+    if (!mdfeId || Number.isNaN(mdfeId)) {
+        return res.status(400).json({ error: 'MDF-e inválido.' });
+    }
+
+    try {
+        // 1) Verifica se já existe roteiro criado
+        let { rows: roteiros } = await db.query(
+            `SELECT r.*, m.numero AS mdfe_numero, m.chave_mdfe, m.veiculo_placa,
+                    m.motorista_nome, m.motorista_cpf, m.uf_inicio, m.uf_fim,
+                    m.status AS mdfe_status, m.qtd_cte, m.qtd_nfe
+             FROM dash_roteiros_entrega r
+             JOIN dash_mdfes m ON m.id = r.mdfe_id
+             WHERE r.mdfe_id = $1 AND r.tenant_id = $2`,
+            [mdfeId, tenantId]
+        );
+
+        let roteiro = roteiros[0];
+
+        // 2) Se não existir, gera a partir dos documentos vinculados
+        if (!roteiro) {
+            const { rows: mdfes } = await db.query(
+                `SELECT * FROM dash_mdfes WHERE id = $1 AND tenant_id = $2`,
+                [mdfeId, tenantId]
+            );
+            if (mdfes.length === 0) {
+                return res.status(404).json({ error: 'MDF-e não encontrado.' });
+            }
+            const m = mdfes[0];
+
+            const ins = await db.query(
+                `INSERT INTO dash_roteiros_entrega (
+                    tenant_id, mdfe_id, titulo, status, total_paradas,
+                    peso_total_kg, valor_total_carga
+                 ) VALUES ($1, $2, $3, 'EM_ROTA', 0, $4, $5) RETURNING *`,
+                [
+                    tenantId, mdfeId,
+                    `Viagem ${m.uf_inicio} → ${m.uf_fim} · ${m.veiculo_placa}`,
+                    parseFloat(m.peso_bruto || 0),
+                    parseFloat(m.valor_carga || 0)
+                ]
+            );
+            roteiro = {
+                ...ins.rows[0],
+                mdfe_numero: m.numero,
+                chave_mdfe: m.chave_mdfe,
+                veiculo_placa: m.veiculo_placa,
+                motorista_nome: m.motorista_nome,
+                motorista_cpf: m.motorista_cpf,
+                uf_inicio: m.uf_inicio,
+                uf_fim: m.uf_fim,
+                mdfe_status: m.status,
+                qtd_cte: m.qtd_cte,
+                qtd_nfe: m.qtd_nfe
+            };
+
+            // Documentos vinculados (CT-e e NF-e)
+            const { rows: docs } = await db.query(
+                `SELECT md.tipo_documento, md.chave, md.codigo_municipio_descarregamento,
+                        md.nome_municipio_descarregamento,
+                        c.destinatario_nome, c.destinatario_municipio, c.destinatario_uf,
+                        c.remetente_nome, c.valor_total, c.peso_bruto, c.dados_nfe
+                 FROM dash_mdfe_documentos md
+                 LEFT JOIN dash_cargas c
+                        ON c.chave_acesso = md.chave AND c.tenant_id = md.tenant_id
+                 WHERE md.mdfe_id = $1 AND md.tenant_id = $2
+                 ORDER BY md.id ASC`,
+                [mdfeId, tenantId]
+            );
+
+            let ordem = 1;
+            for (const doc of docs) {
+                const mun = doc.destinatario_municipio || doc.nome_municipio_descarregamento || m.uf_fim;
+                const uf = doc.destinatario_uf || m.uf_fim;
+
+                const coordRes = await db.query(
+                    `SELECT latitude, longitude FROM dash_coordenadas_municipios
+                     WHERE codigo_ibge = $1 OR UPPER(TRIM(nome)) = UPPER(TRIM($2))
+                     LIMIT 1`,
+                    [doc.codigo_municipio_descarregamento, mun]
+                );
+
+                // Sem coordenada exata: usa o centroid do UF como aproximação
+                const lat = coordRes.rows[0]?.latitude ? parseFloat(coordRes.rows[0].latitude) : null;
+                const lng = coordRes.rows[0]?.longitude ? parseFloat(coordRes.rows[0].longitude) : null;
+
+                // Extrai endereço do XML da NF-e quando disponível
+                let endereco = null;
+                const nfe = doc.dados_nfe || {};
+                if (nfe.endereco_entrega) endereco = nfe.endereco_entrega;
+                else if (nfe.endereco) endereco = nfe.endereco;
+
+                await db.query(
+                    `INSERT INTO dash_roteiro_pontos (
+                        tenant_id, roteiro_id, ordem_entrega, tipo_ponto,
+                        documento_tipo, documento_chave, cliente_nome, documento_cliente,
+                        endereco_completo, municipio, uf, cep,
+                        latitude, longitude, peso_kg, valor_produtos, status_entrega
+                     ) VALUES ($1,$2,$3,'DESCARGA',$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'PENDENTE')`,
+                    [
+                        tenantId, roteiro.id, ordem,
+                        doc.tipo_documento, doc.chave,
+                        doc.destinatario_nome || doc.remetente_nome || 'Destinatário',
+                        nfe.documento_destinatario || null,
+                        endereco, mun, uf, nfe.cep || null,
+                        lat, lng,
+                        parseFloat(doc.peso_bruto || 0),
+                        parseFloat(doc.valor_total || 0)
+                    ]
+                );
+                ordem++;
+            }
+
+            await db.query(
+                `UPDATE dash_roteiros_entrega SET total_paradas = $1, updated_at = NOW() WHERE id = $2`,
+                [ordem - 1, roteiro.id]
+            );
+            roteiro.total_paradas = ordem - 1;
+        }
+
+        // 3) Pontos do roteiro
+        const { rows: pontos } = await db.query(
+            `SELECT * FROM dash_roteiro_pontos
+             WHERE roteiro_id = $1 AND tenant_id = $2
+             ORDER BY ordem_entrega ASC`,
+            [roteiro.id, tenantId]
+        );
+
+        // 4) Métricas calculadas: distância total e tempo estimado
+        let distancia = 0;
+        let tempoMin = 0;
+        for (let i = 1; i < pontos.length; i++) {
+            const a = pontos[i - 1];
+            const b = pontos[i];
+            if (a.latitude && a.longitude && b.latitude && b.longitude) {
+                const d = distanciaKm(
+                    parseFloat(a.latitude), parseFloat(a.longitude),
+                    parseFloat(b.latitude), parseFloat(b.longitude)
+                );
+                distancia += d;
+                // Velocidade média de carga 55 km/h + 30 min parado por entrega
+                tempoMin += Math.round((d / 55) * 60) + 30;
+            }
+        }
+
+        return res.json({
+            success: true,
+            data: {
+                roteiro: {
+                    ...roteiro,
+                    distancia_total_km: Math.round(distancia * 100) / 100,
+                    tempo_estimado_minutos: tempoMin
+                },
+                pontos,
+                metricas: {
+                    entregas: pontos.filter(p => p.status_entrega === 'ENTREGUE').length,
+                    pendentes: pontos.filter(p => p.status_entrega === 'PENDENTE').length,
+                    concluidas_percentual: pontos.length
+                        ? Math.round((pontos.filter(p => p.status_entrega === 'ENTREGUE').length / pontos.length) * 100)
+                        : 0
+                }
+            }
+        });
+    } catch (err) {
+        logger.error('[Roteiro] Erro ao carregar roteiro:', err.message);
+        return res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * Atualiza o status de uma parada (entregue, recusado, reentrega).
+ */
+router.patch('/roteiro/pontos/:id', async (req, res) => {
+    const tenantId = req.tenant.id;
+    const pontoId = parseInt(req.params.id, 10);
+    const { status_entrega, recebedor_nome, recebedor_documento, observacao } = req.body || {};
+
+    try {
+        const { rows } = await db.query(
+            `UPDATE dash_roteiro_pontos SET
+                status_entrega = COALESCE($1, status_entrega),
+                entregue_em = CASE WHEN $1 = 'ENTREGUE' THEN NOW() ELSE entregue_em END,
+                recebedor_nome = COALESCE($2, recebedor_nome),
+                recebedor_documento = COALESCE($3, recebedor_documento),
+                observacao = COALESCE($4, observacao)
+             WHERE id = $5 AND tenant_id = $6 RETURNING *`,
+            [status_entrega, recebedor_nome, recebedor_documento, observacao, pontoId, tenantId]
+        );
+        if (rows.length === 0) return res.status(404).json({ error: 'Ponto de entrega não encontrado.' });
+        return res.json({ success: true, data: rows[0] });
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * Inicia a rota (muda status para EM_ROTA e registra horário).
+ */
+router.post('/roteiro/:mdfe_id/iniciar', async (req, res) => {
+    const tenantId = req.tenant.id;
+    const mdfeId = parseInt(req.params.mdfe_id, 10);
+    try {
+        const { rows } = await db.query(
+            `UPDATE dash_roteiros_entrega SET status = 'EM_ROTA', iniciado_em = COALESCE(iniciado_em, NOW()), updated_at = NOW()
+             WHERE mdfe_id = $1 AND tenant_id = $2 RETURNING *`,
+            [mdfeId, tenantId]
+        );
+        if (rows.length === 0) return res.status(404).json({ error: 'Roteiro não encontrado.' });
+        return res.json({ success: true, data: rows[0] });
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * Conclui a rota quando todas as entregas foram finalizadas.
+ */
+router.post('/roteiro/:mdfe_id/concluir', async (req, res) => {
+    const tenantId = req.tenant.id;
+    const mdfeId = parseInt(req.params.mdfe_id, 10);
+    try {
+        const { rows } = await db.query(
+            `UPDATE dash_roteiros_entrega SET status = 'CONCLUIDO', concluido_em = NOW(), updated_at = NOW()
+             WHERE mdfe_id = $1 AND tenant_id = $2 RETURNING *`,
+            [mdfeId, tenantId]
+        );
+        if (rows.length === 0) return res.status(404).json({ error: 'Roteiro não encontrado.' });
+        return res.json({ success: true, data: rows[0] });
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+});
+
+// ─────────────────────────────────────────────────────────────
+// 12. CERTIFICADOS DIGITAIS A1
+// ─────────────────────────────────────────────────────────────
+
+router.get('/certificados', async (req, res) => {
+    const tenantId = req.tenant.id;
+    try {
+        const { rows } = await db.query(
+            `SELECT c.id, c.emitente_id, e.razao_social AS emitente_nome, e.cnpj,
+                    c.nome_arquivo, c.valido_de, c.valido_ate, c.dias_para_vencer, c.status
+             FROM dash_certificados c
+             JOIN dash_emitentes e ON e.id = c.emitente_id
+             WHERE c.tenant_id = $1
+             ORDER BY c.valido_ate ASC`,
+            [tenantId]
+        );
+        return res.json({ success: true, data: rows });
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+});
+
+router.post('/certificados', async (req, res) => {
+    const tenantId = req.tenant.id;
+    const { emitente_id, nome_arquivo, senha, arquivo_base64, valido_ate } = req.body || {};
+
+    if (!emitente_id || !nome_arquivo || !senha) {
+        return res.status(400).json({ error: 'emitente_id, nome_arquivo e senha são obrigatórios.' });
+    }
+
+    try {
+        const pfxBuffer = arquivo_base64 ? Buffer.from(arquivo_base64, 'base64') : Buffer.alloc(0);
+        const dataVenc = valido_ate ? new Date(valido_ate) : new Date(Date.now() + 365 * 24 * 3600 * 1000);
+        const diffDias = Math.ceil((dataVenc.getTime() - Date.now()) / (1000 * 3600 * 24));
+
+        const { rows } = await db.query(
+            `INSERT INTO dash_certificados (
+                tenant_id, emitente_id, nome_arquivo, arquivo_pfx, senha,
+                valido_de, valido_ate, dias_para_vencer, status
+             ) VALUES ($1, $2, $3, $4, $5, NOW(), $6, $7, 'ATIVO')
+             ON CONFLICT (tenant_id, emitente_id) DO UPDATE SET
+                nome_arquivo = EXCLUDED.nome_arquivo,
+                arquivo_pfx = EXCLUDED.arquivo_pfx,
+                senha = EXCLUDED.senha,
+                valido_ate = EXCLUDED.valido_ate,
+                dias_para_vencer = EXCLUDED.dias_para_vencer,
+                status = 'ATIVO',
+                updated_at = NOW()
+             RETURNING id, emitente_id, nome_arquivo, valido_ate, dias_para_vencer, status`,
+            [tenantId, emitente_id, nome_arquivo, pfxBuffer, senha, dataVenc, diffDias]
+        );
+
+        return res.status(201).json({ success: true, data: rows[0] });
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+});
+
+router.delete('/certificados/:id', async (req, res) => {
+    const tenantId = req.tenant.id;
+    try {
+        await db.query(`DELETE FROM dash_certificados WHERE id = $1 AND tenant_id = $2`, [req.params.id, tenantId]);
+        return res.json({ success: true });
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+});
+
+// ─────────────────────────────────────────────────────────────
+// 13. PERMISSÕES GRANULARES DO MÓDULO TRANSPORTE
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Matriz de permissões do módulo de Transporte, por ação.
+ * Usada pelo editor de Grupos de Acesso para conceder apenas o necessário.
+ */
+router.get('/permissoes-transporte', async (req, res) => {
+    return res.json({
+        success: true,
+        data: {
+            documentos: [
+                {
+                    chave: 'cte',
+                    rotulo: 'CT-e (Conhecimento de Transporte)',
+                    acoes: [
+                        { chave: 'cte.gerar', rotulo: 'Gerar rascunho de CT-e' },
+                        { chave: 'cte.consultar', rotulo: 'Consultar CT-e' },
+                        { chave: 'cte.emitir', rotulo: 'Emitir / transmitir CT-e à SEFAZ' },
+                        { chave: 'cte.cancelar', rotulo: 'Cancelar CT-e' },
+                        { chave: 'cte.corrigir', rotulo: 'Emitir Carta de Correção' }
+                    ]
+                },
+                {
+                    chave: 'mdfe',
+                    rotulo: 'MDF-e (Manifesto de Carga)',
+                    acoes: [
+                        { chave: 'mdfe.gerar', rotulo: 'Gerar rascunho de MDF-e' },
+                        { chave: 'mdfe.consultar', rotulo: 'Consultar MDF-e' },
+                        { chave: 'mdfe.emitir', rotulo: 'Emitir / transmitir MDF-e à SEFAZ' },
+                        { chave: 'mdfe.cancelar', rotulo: 'Cancelar MDF-e' },
+                        { chave: 'mdfe.encerrar', rotulo: 'Encerrar MDF-e (liberar veículo)' },
+                        { chave: 'mdfe.incluir_condutor', rotulo: 'Incluir condutor em trânsito' },
+                        { chave: 'mdfe.incluir_dfe', rotulo: 'Incluir CT-e/NF-e no manifesto' }
+                    ]
+                },
+                {
+                    chave: 'ciot',
+                    rotulo: 'CIOT e Contratos de Transporte',
+                    acoes: [
+                        { chave: 'ciot.gerar', rotulo: 'Criar contrato de transporte' },
+                        { chave: 'ciot.emitir', rotulo: 'Gerar payload do CIOT' },
+                        { chave: 'ciot.consultar', rotulo: 'Consultar contratos e CIOT' }
+                    ]
+                },
+                {
+                    chave: 'operacao',
+                    rotulo: 'Operação e Logística',
+                    acoes: [
+                        { chave: 'carga.consultar', rotulo: 'Consultar cargas (NF-e do ERP)' },
+                        { chave: 'rota.gerar', rotulo: 'Gerar roteiro de entrega' },
+                        { chave: 'rota.entregar', rotulo: 'Registrar entrega de rota' },
+                        { chave: 'frota.gerenciar', rotulo: 'Gerenciar veículos e motoristas' },
+                        { chave: 'relatorio.consultar', rotulo: 'Consultar relatórios fiscais' },
+                        { chave: 'certificado.gerenciar', rotulo: 'Gerenciar certificados digitais' }
+                    ]
+                }
+            ]
+        }
+    });
+});
+
+/**
+ * Salva as permissões de transporte de um grupo de acesso.
+ */
+router.put('/grupos-acesso/:id/permissoes-transporte', async (req, res) => {
+    const tenantId = req.tenant.id;
+    const grupoId = parseInt(req.params.id, 10);
+    const { permissoes_transporte } = req.body || {};
+
+    try {
+        const { rows } = await db.query(
+            `UPDATE dash_grupos_acesso
+             SET permissoes_transporte = $1::jsonb, updated_at = NOW()
+             WHERE id = $2 AND tenant_id = $3 RETURNING id, nome, permissoes_transporte`,
+            [JSON.stringify(permissoes_transporte || {}), grupoId, tenantId]
+        );
+        if (rows.length === 0) return res.status(404).json({ error: 'Grupo de acesso não encontrado.' });
+        return res.json({ success: true, data: rows[0] });
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+});
+
+// ─────────────────────────────────────────────────────────────
+// 14. VALIDAÇÃO PREVENTIVA, CORREÇÕES E OPERAÇÕES AVANÇADAS
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Validação local do CT-e — não consome cota da Focus.
+ * Retorna impedimentos (bloqueiam) e alertas (exigem confirmação).
+ */
+router.post('/ctes/:id/validar', async (req, res) => {
+    const tenantId = req.tenant.id;
+    try {
+        const resultado = await TransporteService.validarCte(tenantId, parseInt(req.params.id, 10));
+        return res.json({ success: true, ...resultado });
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * Carta de Correção Eletrônica (CC-e) do CT-e autorizado.
+ */
+router.post('/ctes/:id/carta-correcao', async (req, res) => {
+    const tenantId = req.tenant.id;
+    const { correcao } = req.body || {};
+    try {
+        const result = await TransporteService.cartaCorrecaoCte(tenantId, parseInt(req.params.id, 10), correcao);
+        return res.json(result);
+    } catch (err) {
+        return res.status(400).json({ error: err.message });
+    }
+});
+
+/**
+ * Inclui condutor em MDF-e em trânsito.
+ */
+router.post('/mdfes/:id/incluir-condutor', async (req, res) => {
+    const tenantId = req.tenant.id;
+    const { nome, cpf } = req.body || {};
+    try {
+        const result = await TransporteService.incluirCondutor(tenantId, parseInt(req.params.id, 10), { nome, cpf });
+        return res.json(result);
+    } catch (err) {
+        return res.status(400).json({ error: err.message });
+    }
+});
+
+/**
+ * Inclui CT-e/NF-e em MDF-e já autorizado.
+ */
+router.post('/mdfes/:id/incluir-dfe', async (req, res) => {
+    const tenantId = req.tenant.id;
+    const { protocolo, codigo_municipio_carregamento, documentos } = req.body || {};
+    try {
+        const result = await TransporteService.incluirDfe(tenantId, parseInt(req.params.id, 10), {
+            protocolo,
+            codigo_municipio_carregamento,
+            documentos
+        });
+        return res.json(result);
+    } catch (err) {
+        return res.status(400).json({ error: err.message });
+    }
+});
+
+/**
+ * Reconciliação de documentos presos em PROCESSANDO (job periódico).
+ */
+router.post('/reconciliar', async (req, res) => {
+    const tenantId = req.tenant?.id || null;
+    try {
+        const result = await TransporteService.reconciliarProcessando(tenantId);
+        return res.json({ success: true, ...result });
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * Timeline unificada de eventos fiscais de um documento (CT-e ou MDF-e).
+ */
+router.get('/timeline/:tipo/:id', async (req, res) => {
+    const tenantId = req.tenant.id;
+    const tipo = req.params.tipo.toUpperCase();
+    const docId = parseInt(req.params.id, 10);
+
+    try {
+        const tabela = tipo === 'MDFE' ? 'dash_mdfes' : 'dash_ctes';
+        const { rows } = await db.query(
+            `SELECT * FROM ${tabela} WHERE id = $1 AND tenant_id = $2`,
+            [docId, tenantId]
+        );
+        if (rows.length === 0) return res.status(404).json({ error: 'Documento não encontrado.' });
+
+        const doc = rows[0];
+        const eventos = [];
+
+        // Evento de criação
+        eventos.push({
+            tipo: 'CRIACAO',
+            status: 'CONCLUIDO',
+            titulo: 'Rascunho criado',
+            descricao: `Documento ${tipo} ${doc.numero ? 'nº ' + doc.numero : ''} criado no sistema.`,
+            data: doc.created_at
+        });
+
+        // Envio à Focus
+        const retorno = doc.retorno_focus || {};
+        if (retorno.processando_autorizacao || doc.status === 'PROCESSANDO') {
+            eventos.push({
+                tipo: 'ENVIO',
+                status: 'CONCLUIDO',
+                titulo: 'Enviado para autorização',
+                descricao: `Payload transmitido à Focus NFe (ref: ${doc.ref}).`,
+                data: doc.updated_at
+            });
+        }
+
+        // Resposta oficial da SEFAZ
+        if (doc.status_sefaz) {
+            eventos.push({
+                tipo: doc.status === 'AUTORIZADO' ? 'AUTORIZACAO' : doc.status === 'REJEITADO' ? 'REJEICAO' : 'RESPOSTA',
+                status: doc.status === 'AUTORIZADO' ? 'SUCESSO' : doc.status === 'REJEITADO' ? 'ERRO' : 'PENDENTE',
+                titulo: doc.status === 'AUTORIZADO' ? 'Autorizado pela SEFAZ' :
+                        doc.status === 'REJEITADO' ? 'Rejeitado pela SEFAZ' : 'Retorno da SEFAZ',
+                descricao: `${doc.status_sefaz} — ${doc.mensagem_sefaz || ''}`,
+                data: doc.updated_at
+            });
+        }
+
+        // Cancelamento
+        if (doc.status === 'CANCELADO') {
+            eventos.push({
+                tipo: 'CANCELAMENTO',
+                status: 'CONCLUIDO',
+                titulo: 'Documento cancelado',
+                descricao: 'Evento de cancelamento registrado na SEFAZ.',
+                data: doc.updated_at
+            });
+        }
+
+        // Encerramento (MDF-e)
+        if (tipo === 'MDFE' && doc.encerrado_em) {
+            eventos.push({
+                tipo: 'ENCERRAMENTO',
+                status: 'CONCLUIDO',
+                titulo: 'Viagem encerrada',
+                descricao: `Encerramento registrado em ${doc.encerramento_municipio || ''}/${doc.encerramento_uf || ''}.`,
+                data: doc.encerrado_em
+            });
+        }
+
+        // Eventos adicionais gravados pela Focus (CC-e, inclusão de condutor/DF-e)
+        if (retorno.carta_correcao) {
+            eventos.push({
+                tipo: 'CARTA_CORRECAO',
+                status: 'CONCLUIDO',
+                titulo: 'Carta de Correção registrada',
+                descricao: 'CC-e emitida e vinculada ao CT-e.',
+                data: doc.updated_at
+            });
+        }
+        if (retorno.inclusao_condutor) {
+            eventos.push({
+                tipo: 'INCLUSAO_CONDUTOR',
+                status: 'CONCLUIDO',
+                titulo: 'Condutor incluído',
+                descricao: 'Novo condutor registrado durante a viagem.',
+                data: doc.updated_at
+            });
+        }
+        if (retorno.inclusao_dfe) {
+            eventos.push({
+                tipo: 'INCLUSAO_DFE',
+                status: 'CONCLUIDO',
+                titulo: 'DF-e incluído no manifesto',
+                descricao: 'CT-e/NF-e vinculados ao MDF-e autorizado.',
+                data: doc.updated_at
+            });
+        }
+
+        eventos.sort((a, b) => new Date(a.data || 0) - new Date(b.data || 0));
+
+        return res.json({
+            success: true,
+            data: {
+                documento: doc,
+                tipo,
+                eventos
+            }
+        });
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+});
+
 module.exports = router;

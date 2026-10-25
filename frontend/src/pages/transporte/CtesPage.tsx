@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import api from '../../services/api';
+import DocumentoDrawer from '../../components/DocumentoDrawer';
 import {
   FileText, Send, CheckCircle2, AlertTriangle, XCircle,
-  Clock, Download, ExternalLink, RefreshCw, Eye
+  Clock, Download, ExternalLink, RefreshCw, Eye, MoreHorizontal
 } from 'lucide-react';
 
 interface Cte {
@@ -28,6 +29,7 @@ interface Cte {
 
 export default function CtesPage() {
   const [loadingEmit, setLoadingEmit] = useState<number | null>(null);
+  const [drawerId, setDrawerId] = useState<number | null>(null);
 
   const { data, isLoading, refetch } = useQuery({
     queryKey: ['ctes'],
@@ -97,7 +99,11 @@ export default function CtesPage() {
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-700/60">
                 {ctes.map(cte => (
-                  <tr key={cte.id} className="hover:bg-slate-50/50 dark:hover:bg-slate-700/30 transition-colors">
+                  <tr
+                    key={cte.id}
+                    onClick={() => setDrawerId(cte.id)}
+                    className="hover:bg-slate-50/50 dark:hover:bg-slate-700/30 transition-colors cursor-pointer"
+                  >
                     <td className="px-6 py-4">
                       <p className="font-bold text-slate-900 dark:text-white flex items-center gap-1.5">
                         {cte.numero ? `CT-e nº ${cte.numero}` : 'Rascunho'}
@@ -136,7 +142,7 @@ export default function CtesPage() {
                     <td className="px-6 py-4 text-right space-x-2">
                       {cte.status === 'RASCUNHO' && (
                         <button
-                          onClick={() => handleEmitir(cte.id)}
+                          onClick={(e) => { e.stopPropagation(); handleEmitir(cte.id); }}
                           disabled={loadingEmit === cte.id}
                           className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold text-white bg-brand-600 hover:bg-brand-700 disabled:opacity-50 transition-colors"
                         >
@@ -149,6 +155,7 @@ export default function CtesPage() {
                           href={cte.caminho_dacte}
                           target="_blank"
                           rel="noreferrer"
+                          onClick={e => e.stopPropagation()}
                           className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-medium bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 text-slate-700 dark:text-slate-200 transition-colors"
                         >
                           <Eye className="w-3.5 h-3.5" />
@@ -160,12 +167,20 @@ export default function CtesPage() {
                           href={cte.caminho_xml}
                           target="_blank"
                           rel="noreferrer"
+                          onClick={e => e.stopPropagation()}
                           className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-medium bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 text-slate-700 dark:text-slate-200 transition-colors"
                         >
                           <Download className="w-3.5 h-3.5" />
                           XML
                         </a>
                       )}
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setDrawerId(cte.id); }}
+                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-semibold bg-slate-900 dark:bg-white text-white dark:text-slate-900 hover:bg-slate-700 dark:hover:bg-slate-200 transition-colors"
+                      >
+                        <MoreHorizontal className="w-3.5 h-3.5" />
+                        Detalhes
+                      </button>
                     </td>
                   </tr>
                 ))}
@@ -174,6 +189,13 @@ export default function CtesPage() {
           </div>
         )}
       </div>
+
+      {/* Drawer de detalhes do CT-e */}
+      <DocumentoDrawer
+        tipo="CTE"
+        documentoId={drawerId}
+        onClose={() => setDrawerId(null)}
+      />
     </div>
   );
 }

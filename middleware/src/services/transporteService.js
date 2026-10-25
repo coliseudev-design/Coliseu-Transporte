@@ -226,6 +226,270 @@ class TransporteService {
     }
 
     /**
+     * Validação preventiva do CT-e — NÃO consome cota da Focus.
+     * Retorna impedimentos (bloqueiam emissão) e alertas (exigem confirmação).
+     */
+    static async validarCte(tenantId, cteId) {
+        const { rows } = await db.query(
+            `SELECT c.*, e.cnpj AS emitente_cnpj, e.rntrc AS emitente_rntrc,
+                    e.inscricao_estadual_emitente, e.codigo_municipio AS emitente_municipio_ibge,
+                    e.municipio AS emitente_municipio, e.uf AS emitente_uf,
+                    e.focus_token, e.focus_ambiente, e.focus_empresa_id
+             FROM dash_ctes c
+             JOIN dash_emitentes e ON e.id = c.emitente_id
+             WHERE c.id = $1 AND c.tenant_id = $2`,
+            [cteId, tenantId]
+        );
+
+        if (rows.length === 0) {
+            return { valido: false, impedimentos: [{ campo: 'cte', mensagem: 'CT-e não encontrado.' }], alertas: [] };
+        }
+
+        const c = rows[0];
+        const impedimentos = [];
+        const alertas = [];
+
+        // ── Emitente ──
+        if (!c.emitente_cnpj) {
+            impedimentos.push({ campo: 'emitente_cnpj', mensagem: 'CNPJ do emitente não informado.' });
+        }
+        if (!c.focus_token) {
+            impedimentos.push({ campo: 'focus_token', mensagem: 'Token da Focus NFe não configurado para esta transportadora.' });
+        }
+        if (!c.emitente_rntrc) {
+            alertas.push({ campo: 'rntrc', mensagem: 'RNTRC do emitente não informado — exigido em MDF-e rodoviário.' });
+        }
+
+        // ── Percurso ──
+        if (!c.uf_inicio || !c.uf_fim) {
+            impedimentos.push({ campo: 'uf_inicio', mensagem: 'UF de início e de fim são obrigatórios.' });
+        }
+        if (!c.codigo_municipio_inicio) {
+            impedimentos.push({ campo: 'codigo_municipio_inicio', mensagem: 'Código IBGE do município de início é obrigatório.' });
+        }
+        if (!c.codigo_municipio_fim) {
+            impedimentos.push({ campo: 'codigo_municipio_fim', mensagem: 'Código IBGE do município de fim é obrigatório.' });
+        }
+
+        // ── Valores ──
+        if (!c.valor_total || Number(c.valor_total) <= 0) {
+            impedimentos.push({ campo: 'valor_total', mensagem: 'Valor do frete deve ser maior que zero.' });
+        }
+        if (!c.peso_bruto || Number(c.peso_bruto) <= 0) {
+            alertas.push({ campo: 'peso_bruto', mensagem: 'Peso bruto zerado — a SEFAZ pode rejeitar por divergência de ponderação.' });
+        }
+
+        // ── NF-e vinculadas ──
+        const { rows: cargas } = await db.query(
+            `SELECT c.chave_acesso, c.valor_total, c.peso_bruto,
+                    cc.valor_nfe, cc.peso_nfe
+             FROM dash_cte_cargas cc
+             JOIN dash_cargas c ON c.id = cc.carga_id
+             WHERE cc.cte_id = $1 AND cc.tenant_id = $2`,
+            [cteId, tenantId]
+        );
+
+        if (cargas.length === 0) {
+            impedimentos.push({ campo: 'nfes', mensagem: 'Nenhuma NF-e vinculada — o CT-e exige ao menos um documento fiscal.' });
+        }
+
+        // Divergência de ponderação (regra clássica de rejeição SEFAZ)
+        const pesoCargas = cargas.reduce((acc, c) => acc + Number(c.peso_nfe || c.peso_bruto || 0), 0);
+        if (pesoCargas > 0 && c.peso_bruto > 0) {
+            const dif = Math.abs(pesoCargas - Number(c.peso_bruto));
+            const limite = Math.max(0.5, pesoCargas * 0.001); // 0,1% ou 500g
+            if (dif > limite) {
+                alertas.push({
+                    campo: 'peso_bruto',
+                    mensagem: `Peso do CT-e (${Number(c.peso_bruto).toFixed(3)} kg) diverge das NF-e (${pesoCargas.toFixed(3)} kg). A SEFAZ pode rejeitar por divergência de ponderação.`
+                });
+            }
+        }
+
+        // Valor da carga vs. valor do frete (frete não pode ser superior ao valor da carga)
+        const valorCargas = cargas.reduce((acc, c) => acc + Number(c.valor_nfe || c.valor_total || 0), 0);
+        if (valorCargas > 0 && c.valor_total > valorCargas) {
+            alertas.push({
+                campo: 'valor_total',
+                mensagem: `Frete (R$ ${Number(c.valor_total).toFixed(2)}) maior que o valor da carga (R$ ${valorCargas.toFixed(2)}).`
+            });
+        }
+
+        // ── Regras fiscais aplicáveis (ICMS) ──
+        const { rows: regra } = await db.query(
+            `SELECT * FROM dash_regras_fiscais
+             WHERE tenant_id = $1 AND ativo = true
+               AND (escopo = 'GLOBAL'
+                 OR (escopo = 'UF' AND (uf_origem IS NULL OR uf_origem = $2))
+                 OR (escopo = 'UF_PAR' AND uf_origem = $2 AND uf_destino = $3))
+             ORDER BY CASE escopo WHEN 'UF_PAR' THEN 1 WHEN 'UF' THEN 2 ELSE 3 END
+             LIMIT 1`,
+            [tenantId, c.uf_inicio, c.uf_fim]
+        );
+
+        const r = regra[0];
+        let icmsCalculado = 0;
+        if (r && Number(r.aliquota_icms) > 0) {
+            const base = Number(c.valor_total || 0);
+            icmsCalculado = (base * Number(r.aliquota_icms)) / 100;
+            if (c.aliquota_icms && Number(c.aliquota_icms) !== Number(r.aliquota_icms)) {
+                alertas.push({
+                    campo: 'aliquota_icms',
+                    mensagem: `Alíquota do formulário (${c.aliquota_icms}%) difere da regra fiscal ${c.uf_inicio}→${c.uf_fim} (${r.aliquota_icms}%).`
+                });
+            }
+        } else {
+            alertas.push({ campo: 'aliquota_icms', mensagem: 'Nenhuma regra de ICMS configurada para esta rota — o valor será calculado manualmente.' });
+        }
+
+        return {
+            valido: impedimentos.length === 0,
+            impedimentos,
+            alertas,
+            calculos: {
+                valor_frete: Number(c.valor_total || 0),
+                valor_carga: valorCargas,
+                peso_cte: Number(c.peso_bruto || 0),
+                peso_nfes: pesoCargas,
+                icms_estimado: Math.round(icmsCalculado * 100) / 100,
+                aliquota_aplicada: r ? Number(r.aliquota_icms) : null,
+                situacao_tributaria: r ? r.situacao_tributaria : null
+            },
+            resumo: {
+                nfes_vinculadas: cargas.length,
+                emitente: c.emitente_nome || c.emitente_cnpj,
+                ambiente: c.focus_ambiente || 'homologacao'
+            }
+        };
+    }
+
+    /**
+     * Emite a Carta de Correção Eletrônica de um CT-e autorizado.
+     */
+    static async cartaCorrecaoCte(tenantId, cteId, correcao) {
+        const { rows } = await db.query(
+            `SELECT c.ref, c.emitente_id, c.status FROM dash_ctes WHERE c.id = $1 AND c.tenant_id = $2`,
+            [cteId, tenantId]
+        );
+        if (rows.length === 0) throw new Error('CT-e não encontrado.');
+        if (rows[0].status !== 'AUTORIZADO') {
+            throw new Error('Somente CT-e com status AUTORIZADO pode receber Carta de Correção.');
+        }
+
+        const { client } = await this.getFocusClient(tenantId, rows[0].emitente_id);
+        const resFocus = await client.cartaCorrecaoCte(rows[0].ref, correcao);
+
+        await db.query(
+            `UPDATE dash_ctes SET retorno_focus = jsonb_set(COALESCE(retorno_focus,'{}'::jsonb), '{carta_correcao}', $1::jsonb), updated_at = NOW() WHERE id = $2`,
+            [JSON.stringify(resFocus), cteId]
+        );
+
+        return { success: true, focus: resFocus };
+    }
+
+    /**
+     * Inclui condutor durante a viagem (MDF-e autorizado).
+     */
+    static async incluirCondutor(tenantId, mdfeId, { nome, cpf }) {
+        const { rows } = await db.query(
+            `SELECT m.ref, m.emitente_id, m.status FROM dash_mdfes m WHERE m.id = $1 AND m.tenant_id = $2`,
+            [mdfeId, tenantId]
+        );
+        if (rows.length === 0) throw new Error('MDF-e não encontrado.');
+        if (rows[0].status !== 'AUTORIZADO') {
+            throw new Error('Somente MDF-e AUTORIZADO aceita inclusão de condutor.');
+        }
+
+        const { client } = await this.getFocusClient(tenantId, rows[0].emitente_id);
+        const resFocus = await client.incluirCondutorMdfe(rows[0].ref, { nome, cpf });
+
+        await db.query(
+            `UPDATE dash_mdfes SET retorno_focus = jsonb_set(COALESCE(retorno_focus,'{}'::jsonb), '{inclusao_condutor}', $1::jsonb), updated_at = NOW() WHERE id = $2`,
+            [JSON.stringify(resFocus), mdfeId]
+        );
+
+        return { success: true, focus: resFocus };
+    }
+
+    /**
+     * Inclui CT-e/NF-e em um MDF-e já autorizado.
+     */
+    static async incluirDfe(tenantId, mdfeId, { protocolo, codigo_municipio_carregamento, documentos }) {
+        const { rows } = await db.query(
+            `SELECT m.ref, m.emitente_id, m.status FROM dash_mdfes m WHERE m.id = $1 AND m.tenant_id = $2`,
+            [mdfeId, tenantId]
+        );
+        if (rows.length === 0) throw new Error('MDF-e não encontrado.');
+        if (rows[0].status !== 'AUTORIZADO') {
+            throw new Error('Somente MDF-e AUTORIZADO aceita inclusão de DF-e.');
+        }
+
+        const { client } = await this.getFocusClient(tenantId, rows[0].emitente_id);
+        const resFocus = await client.incluirDfeMdfe(rows[0].ref, {
+            protocolo,
+            codigo_municipio_carregamento,
+            documentos
+        });
+
+        await db.query(
+            `UPDATE dash_mdfes SET retorno_focus = jsonb_set(COALESCE(retorno_focus,'{}'::jsonb), '{inclusao_dfe}', $1::jsonb), updated_at = NOW() WHERE id = $2`,
+            [JSON.stringify(resFocus), mdfeId]
+        );
+
+        return { success: true, focus: resFocus };
+    }
+
+    /**
+     * Reconciliação: consulta na Focus documentos presos em PROCESSANDO.
+     * Executado por job periódico — o webhook é a fonte primária de status.
+     */
+    static async reconciliarProcessando(tenantId = null, limiteMinutos = 10) {
+        const params = [limiteMinutos];
+        let filtro = '';
+        if (tenantId) {
+            params.push(tenantId);
+            filtro = ' AND c.tenant_id = $' + params.length;
+        }
+
+        const { rows } = await db.query(
+            `SELECT c.id, c.tenant_id, c.ref, c.emitente_id, c.status
+             FROM dash_ctes c
+             WHERE c.status = 'PROCESSANDO'
+               AND c.updated_at < NOW() - ($1 || ' minutes')::interval${filtro}
+             LIMIT 50`,
+            params
+        );
+
+        let reconciliados = 0;
+        for (const c of rows) {
+            try {
+                const { client } = await this.getFocusClient(c.tenant_id, c.emitente_id);
+                const st = await client.consultarCte(c.ref, true);
+
+                let novoStatus = c.status;
+                if (st.status === 'autorizado') novoStatus = 'AUTORIZADO';
+                else if (st.status === 'cancelado') novoStatus = 'CANCELADO';
+                else if (st.status === 'erro_autorizacao') novoStatus = 'REJEITADO';
+
+                if (novoStatus !== c.status) {
+                    await db.query(
+                        `UPDATE dash_ctes SET status = $1, status_sefaz = $2, mensagem_sefaz = $3,
+                                chave_cte = COALESCE($4, chave_cte), caminho_xml = COALESCE($5, caminho_xml),
+                                caminho_dacte = COALESCE($6, caminho_dacte), updated_at = NOW()
+                         WHERE id = $7`,
+                        [novoStatus, st.status_sefaz, st.mensagem_sefaz, st.chave, st.caminho_xml, st.caminho_dacte, c.id]
+                    );
+                    reconciliados++;
+                }
+            } catch (err) {
+                logger.warn(`[Reconciliação] CT-e ref=${c.ref}: ${err.message}`);
+            }
+        }
+
+        return { reconciliados, total: rows.length };
+    }
+
+    /**
      * Encerramento do MDF-e para liberar o veículo/motorista na SEFAZ.
      */
     static async encerrarMdfe(tenantId, mdfeId, { siglaUf, nomeMunicipio, dataEncerramento }) {

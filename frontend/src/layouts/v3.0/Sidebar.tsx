@@ -3,7 +3,7 @@ import {
   LayoutDashboard, Users, Package, FileText,
   Layers, Settings, ChevronDown, ChevronUp,
   LogOut, Shield, X, BarChart3, Truck, BrainCircuit,
-  Route, ClipboardList, Building2
+  Route, ClipboardList, Building2, Navigation, KeyRound
 } from 'lucide-react'
 import clsx from 'clsx'
 import { useAuthStore } from '../../store/authStore'
@@ -110,6 +110,7 @@ export default function Sidebar({ open, onClose }: Props) {
               {renderLink('/transporte/cargas', 'Central de Cargas (NF-e)', Package)}
               {renderLink('/transporte/ctes', 'Conhecimentos (CT-e)', FileText)}
               {renderLink('/transporte/mdfes', 'Manifestos (MDF-e)', Truck)}
+              {renderLink('/transporte/roteiro', 'Roteiro de Entrega (Mapa)', Navigation)}
               {renderLink('/transporte/contratos', 'Contratos & CIOT', Route)}
             </div>
           )}
@@ -140,6 +141,7 @@ export default function Sidebar({ open, onClose }: Props) {
             <div className="space-y-0.5 pl-1">
               {renderLink('/transporte/config', 'Regras Fiscais por UF', Settings)}
               {renderLink('/transporte/campos', 'Campos Dinâmicos', BrainCircuit)}
+              {renderLink('/transporte/certificados', 'Certificados Digitais', KeyRound)}
               {renderLink('/usuarios', 'Usuários & Permissões', Shield)}
             </div>
           )}

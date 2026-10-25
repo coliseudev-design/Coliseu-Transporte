@@ -6,6 +6,18 @@ import {
   Search, Filter, AlertCircle, FileText, ChevronRight
 } from 'lucide-react';
 
+interface CargaItem {
+  id_item?: number;
+  id_produto?: number;
+  codigo?: string;
+  descricao?: string;
+  unidade?: string;
+  quantidade?: number;
+  valor_unitario?: number;
+  valor_total?: number;
+  cfop?: string;
+}
+
 interface Carga {
   id: number;
   chave_acesso: string;
@@ -20,12 +32,20 @@ interface Carga {
   destinatario_uf: string;
   valor_total: number;
   peso_bruto: number;
+  volumes?: number;
+  produto_predominante?: string;
+  dados_nfe?: {
+    itens?: CargaItem[];
+    protocolo?: string;
+    natureza?: string;
+  };
   status: string;
 }
 
 export default function CargasPage() {
   const [search, setSearch] = useState('');
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
+  const [expandedItemsIds, setExpandedItemsIds] = useState<number[]>([]);
   const [modalOpen, setModalOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
@@ -46,6 +66,16 @@ export default function CargasPage() {
       return res.data;
     }
   });
+
+  // Quadro de Sincronismo do Worker (Clientes, Produtos, Notas Fiscais, Vendas/Itens)
+  const { data: syncStatusData } = useQuery({
+    queryKey: ['transporte-sync-status'],
+    queryFn: async () => (await api.get('/sync/status')).data,
+    refetchInterval: 30000
+  });
+  const syncItems: Array<{ tabela: string; ultima: string | null; status: string; registros: number }> = syncStatusData?.status || [];
+  const getSyncInfo = (tbl: string) => syncItems.find(s => s.tabela === tbl);
+  const hbInfo = getSyncInfo('__heartbeat__');
 
   // Emitentes (transportadoras) cadastrados
   const { data: emitentesData } = useQuery({
@@ -75,6 +105,13 @@ export default function CargasPage() {
 
   const toggleSelect = (id: number) => {
     setSelectedIds(prev =>
+      prev.includes(id) ? prev.filter(i => i !== id) : [...prev, id]
+    );
+  };
+
+  const toggleExpandItems = (e: React.MouseEvent, id: number) => {
+    e.stopPropagation();
+    setExpandedItemsIds(prev =>
       prev.includes(id) ? prev.filter(i => i !== id) : [...prev, id]
     );
   };
@@ -130,7 +167,7 @@ export default function CargasPage() {
             Central de Cargas & NF-e (ERP Coliseu)
           </h1>
           <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
-            Notas fiscais sincronizadas do Firebird aguardando despacho e agrupamento em CT-e/MDF-e.
+            Notas fiscais sincronizadas do Firebird (com Chave XML e Itens da Nota) aguardando despacho em CT-e/MDF-e.
           </p>
         </div>
 
@@ -145,13 +182,54 @@ export default function CargasPage() {
         )}
       </div>
 
+      {/* Quadro de Sincronismo do Transporte */}
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+        <div className="bg-white dark:bg-slate-800 p-3.5 rounded-xl border border-slate-200/80 dark:border-slate-700/80 flex items-center justify-between">
+          <div>
+            <span className="text-[11px] font-medium text-slate-400 uppercase block">Worker ERP</span>
+            <span className={`text-sm font-bold ${hbInfo?.status === 'OK' ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'}`}>
+              {hbInfo?.status === 'OK' ? '🟢 Online' : '🟡 Aguardando'}
+            </span>
+          </div>
+          <CheckCircle2 className={`w-5 h-5 ${hbInfo?.status === 'OK' ? 'text-emerald-500' : 'text-slate-300'}`} />
+        </div>
+
+        <div className="bg-white dark:bg-slate-800 p-3.5 rounded-xl border border-slate-200/80 dark:border-slate-700/80">
+          <span className="text-[11px] font-medium text-slate-400 uppercase block">Clientes Sync</span>
+          <span className="text-base font-bold text-slate-900 dark:text-white">
+            {(getSyncInfo('dash_clientes')?.registros || 0).toLocaleString('pt-BR')}
+          </span>
+        </div>
+
+        <div className="bg-white dark:bg-slate-800 p-3.5 rounded-xl border border-slate-200/80 dark:border-slate-700/80">
+          <span className="text-[11px] font-medium text-slate-400 uppercase block">Produtos Sync</span>
+          <span className="text-base font-bold text-slate-900 dark:text-white">
+            {(getSyncInfo('dash_produtos')?.registros || 0).toLocaleString('pt-BR')}
+          </span>
+        </div>
+
+        <div className="bg-white dark:bg-slate-800 p-3.5 rounded-xl border border-slate-200/80 dark:border-slate-700/80">
+          <span className="text-[11px] font-medium text-slate-400 uppercase block">Notas Fiscais (NF-e)</span>
+          <span className="text-base font-bold text-brand-600 dark:text-brand-400">
+            {(getSyncInfo('dash_cargas')?.registros || cargas.length || 0).toLocaleString('pt-BR')}
+          </span>
+        </div>
+
+        <div className="bg-white dark:bg-slate-800 p-3.5 rounded-xl border border-slate-200/80 dark:border-slate-700/80">
+          <span className="text-[11px] font-medium text-slate-400 uppercase block">Itens de Nota Sync</span>
+          <span className="text-base font-bold text-slate-900 dark:text-white">
+            {(getSyncInfo('dash_vendas_itens')?.registros || 0).toLocaleString('pt-BR')}
+          </span>
+        </div>
+      </div>
+
       {/* Barra de Filtros e Busca */}
       <div className="flex flex-col sm:flex-row gap-3">
         <div className="relative flex-1">
           <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
           <input
             type="text"
-            placeholder="Buscar por chave da NF-e, número, remetente ou destinatário..."
+            placeholder="Buscar por chave XML da NF-e, número, remetente ou destinatário..."
             value={search}
             onChange={e => setSearch(e.target.value)}
             className="w-full pl-10 pr-4 py-2 text-sm bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-brand-500 text-slate-900 dark:text-white"
@@ -182,6 +260,8 @@ export default function CargasPage() {
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {cargas.map(carga => {
             const isSelected = selectedIds.includes(carga.id);
+            const itens = carga.dados_nfe?.itens || [];
+            const isExpanded = expandedItemsIds.includes(carga.id);
             return (
               <div
                 key={carga.id}
@@ -195,7 +275,7 @@ export default function CargasPage() {
                 <div className="flex items-start justify-between gap-2">
                   <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold bg-blue-50 dark:bg-blue-950/40 text-blue-700 dark:text-blue-400 border border-blue-200/60 dark:border-blue-800/40">
                     <FileText className="w-3.5 h-3.5" />
-                    NF-e {carga.numero || 'S/N'}
+                    NF-e {carga.numero || 'S/N'} {carga.serie ? `(Série ${carga.serie})` : ''}
                   </span>
                   <span className={`text-xs px-2.5 py-0.5 rounded-full font-medium ${
                     carga.status === 'PENDENTE'
@@ -206,7 +286,17 @@ export default function CargasPage() {
                   </span>
                 </div>
 
-                <div className="mt-4 space-y-2 text-sm">
+                {/* Chave de Acesso XML 44 dígitos */}
+                {carga.chave_acesso && (
+                  <div className="mt-2.5 px-2.5 py-1.5 rounded-lg bg-slate-50 dark:bg-slate-900/60 border border-slate-200/60 dark:border-slate-700/60">
+                    <span className="text-[10px] uppercase tracking-wider text-slate-400 block">Chave XML NF-e</span>
+                    <span className="font-mono text-[11px] text-slate-700 dark:text-slate-300 break-all select-all">
+                      {carga.chave_acesso}
+                    </span>
+                  </div>
+                )}
+
+                <div className="mt-3 space-y-2 text-sm">
                   <div>
                     <span className="text-xs text-slate-400 uppercase tracking-wider block">Origem</span>
                     <p className="font-medium text-slate-900 dark:text-slate-100 truncate">{carga.remetente_nome || 'Consumidor'}</p>
@@ -219,6 +309,34 @@ export default function CargasPage() {
                     <p className="text-xs text-slate-500">{carga.destinatario_municipio}/{carga.destinatario_uf}</p>
                   </div>
                 </div>
+
+                {/* Itens da Nota Fiscal */}
+                {itens.length > 0 && (
+                  <div className="mt-3 pt-2 border-t border-slate-100 dark:border-slate-700/60">
+                    <button
+                      type="button"
+                      onClick={e => toggleExpandItems(e, carga.id)}
+                      className="text-xs font-medium text-brand-600 dark:text-brand-400 hover:underline flex items-center gap-1"
+                    >
+                      <ChevronRight className={`w-3.5 h-3.5 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
+                      {itens.length} item(ns) na NF-e {carga.produto_predominante ? `• ${carga.produto_predominante}` : ''}
+                    </button>
+                    {isExpanded && (
+                      <div className="mt-2 max-h-36 overflow-y-auto space-y-1 pr-1">
+                        {itens.map((it, idx) => (
+                          <div key={idx} className="text-[11px] flex justify-between gap-2 py-1 border-b border-slate-100 dark:border-slate-700/40 last:border-0">
+                            <span className="text-slate-700 dark:text-slate-300 truncate">
+                              {Number(it.quantidade || 0)} {it.unidade || 'UN'} - {it.descricao}
+                            </span>
+                            <span className="font-semibold text-slate-900 dark:text-slate-100 whitespace-nowrap">
+                              R$ {Number(it.valor_total || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 <div className="mt-4 pt-3 border-t border-slate-100 dark:border-slate-700/60 flex items-center justify-between text-xs">
                   <span className="text-slate-500">{Number(carga.peso_bruto || 0).toLocaleString('pt-BR')} kg</span>

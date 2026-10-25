@@ -8,11 +8,56 @@ const URLS = {
     homologacao: 'https://homologacao.focusnfe.com.br/v2'
 };
 
+/**
+ * Rate limit da Focus NFe: 100 requisições por minuto POR TOKEN.
+ * O controle é local (janela deslizante em memória) para nunca estourar a cota
+ * e evitar o HTTP 429 que devolveria.
+ */
+class TokenRateLimiter {
+    constructor(maxPorMinuto = 100) {
+        this.max = maxPorMinuto;
+        this.hits = new Map(); // token → array de timestamps
+    }
+
+    _limpar(token) {
+        const agora = Date.now();
+        const janela = (hits) => hits.filter(t => agora - t < 60000);
+        const atuais = this.hits.get(token) || [];
+        const validos = janela(atuais);
+        if (validos.length !== atuais.length) {
+            this.hits.set(token, validos);
+        }
+        return validos;
+    }
+
+    /**
+     * Aguarda (se necessário) até haver vaga na janela de 1 minuto.
+     */
+    async adquirir(token) {
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
+            const validos = this._limpar(token);
+            if (validos.length < this.max) {
+                validos.push(Date.now());
+                this.hits.set(token, validos);
+                return;
+            }
+            const maisAntigo = Math.min(...validos);
+            const esperaMs = Math.max(1000, maisAntigo + 60000 - Date.now());
+            logger.warn(`[FocusClient] Rate limit atingido para token. Aguardando ${Math.ceil(esperaMs / 1000)}s.`);
+            await new Promise(r => setTimeout(r, esperaMs));
+        }
+    }
+}
+
+const rateLimiter = new TokenRateLimiter(
+    parseInt(process.env.FOCUS_RATE_LIMIT_POR_MINUTO || '100', 10)
+);
+
 class FocusClient {
     /**
-     * Instancia o cliente configurado para um emitente específico.
      * @param {Object} options
-     * @param {string} options.token - Token da Focus NFe da empresa
+     * @param {string} options.token - Token da Focus NFe da empresa (por CNPJ)
      * @param {'homologacao'|'producao'} [options.ambiente='homologacao']
      */
     constructor({ token, ambiente = 'homologacao' }) {
@@ -28,7 +73,7 @@ class FocusClient {
             timeout: 45000,
             auth: {
                 username: this.token,
-                password: '' // Autenticação Basic da Focus usa senha em branco
+                password: '' // HTTP Basic da Focus: usuário = token, senha em branco
             },
             headers: {
                 'Content-Type': 'application/json',
@@ -38,180 +83,187 @@ class FocusClient {
     }
 
     // ─────────────────────────────────────────────────────────
-    // CT-e (Conhecimento de Transporte Eletrônico)
+    // CT-e (Conhecimento de Transporte Eletrônico — modelo 57)
     // ─────────────────────────────────────────────────────────
 
     /**
-     * Envia o CT-e para autorização na SEFAZ.
-     * @param {string} ref - Referência única do CT-e
-     * @param {Object} payload - Dados completos no formato Focus NFe
+     * POST /cte?ref={ref} — Emite o CT-e (assíncrono).
+     * Regra Focus: o `ref` é único por token. Após autorizado, o ref fica
+     * travado (cancelamento não o libera).
      */
     async emitirCte(ref, payload) {
-        try {
-            logger.info(`[FocusClient] Emitindo CT-e (ref=${ref}) no ambiente ${this.ambiente}`);
-            const res = await this.http.post(`/cte?ref=${encodeURIComponent(ref)}`, payload);
-            return res.data;
-        } catch (err) {
-            this._handleError('emitirCte', err, ref);
-        }
+        return this._request('POST', `/cte`, payload, { ref }, 'emitirCte');
     }
 
     /**
-     * Consulta o status do CT-e pela referência.
-     * @param {string} ref
-     * @param {boolean} [completa=false] - Se true, inclui o protocolo completo da SEFAZ
+     * GET /cte/{ref}[?completa=1] — Consulta status, protocolo, XML e DACTE.
      */
     async consultarCte(ref, completa = false) {
-        try {
-            const query = completa ? '?completa=1' : '';
-            const res = await this.http.get(`/cte/${encodeURIComponent(ref)}${query}`);
-            return res.data;
-        } catch (err) {
-            this._handleError('consultarCte', err, ref);
-        }
+        const query = completa ? '?completa=1' : '';
+        return this._request('GET', `/cte/${encodeURIComponent(ref)}${query}`, null, null, 'consultarCte');
     }
 
     /**
-     * Cancela um CT-e já autorizado na SEFAZ.
-     * @param {string} ref
-     * @param {string} justificativa - Mínimo 15 caracteres
+     * DELETE /cte/{ref} — Cancela CT-e autorizado.
+     * Só funciona com status "autorizado" e dentro do prazo (7 dias na prática).
      */
     async cancelarCte(ref, justificativa) {
-        if (!justificativa || justificativa.trim().length < 15) {
-            throw new Error('[FocusClient] Justificativa de cancelamento deve ter no mínimo 15 caracteres');
+        if (!justificativa || String(justificativa).trim().length < 15) {
+            throw new Error('[FocusClient] Justificativa de cancelamento deve ter no mínimo 15 caracteres.');
         }
-        try {
-            logger.info(`[FocusClient] Cancelando CT-e (ref=${ref})`);
-            const res = await this.http.delete(`/cte/${encodeURIComponent(ref)}`, {
-                data: { justificativa: justificativa.trim() }
-            });
-            return res.data;
-        } catch (err) {
-            this._handleError('cancelarCte', err, ref);
-        }
+        return this._request('DELETE', `/cte/${encodeURIComponent(ref)}`, { justificativa: String(justificativa).trim() }, null, 'cancelarCte');
     }
 
     /**
-     * Emite Carta de Correção Eletrônica (CC-e) para o CT-e.
+     * POST /cte/{ref}/carta_correcao — Carta de Correção Eletrônica.
      */
     async cartaCorrecaoCte(ref, correcao) {
-        if (!correcao || correcao.trim().length < 15) {
-            throw new Error('[FocusClient] Texto da correção deve ter no mínimo 15 caracteres');
+        if (!correcao || String(correcao).trim().length < 15) {
+            throw new Error('[FocusClient] Texto da correção deve ter no mínimo 15 caracteres.');
         }
-        try {
-            const res = await this.http.post(`/cte/${encodeURIComponent(ref)}/carta_correcao`, {
-                correcao: correcao.trim()
-            });
-            return res.data;
-        } catch (err) {
-            this._handleError('cartaCorrecaoCte', err, ref);
-        }
+        return this._request('POST', `/cte/${encodeURIComponent(ref)}/carta_correcao`, { correcao: String(correcao).trim() }, null, 'cartaCorrecaoCte');
+    }
+
+    /**
+     * POST /cte/{ref}/evento — Registra evento do CT-e na SEFAZ.
+     */
+    async eventoCte(ref, payload) {
+        return this._request('POST', `/cte/${encodeURIComponent(ref)}/evento`, payload, null, 'eventoCte');
     }
 
     // ─────────────────────────────────────────────────────────
-    // MDF-e (Manifesto Eletrônico de Documentos Fiscais)
+    // MDF-e (Manifesto Eletrônico de Documentos Fiscais — modelo 58)
     // ─────────────────────────────────────────────────────────
 
     /**
-     * Envia o MDF-e para autorização na SEFAZ.
+     * POST /mdfe?ref={ref} — Emite o MDF-e (assíncrono).
      */
     async emitirMdfe(ref, payload) {
-        try {
-            logger.info(`[FocusClient] Emitindo MDF-e (ref=${ref}) no ambiente ${this.ambiente}`);
-            const res = await this.http.post(`/mdfe?ref=${encodeURIComponent(ref)}`, payload);
-            return res.data;
-        } catch (err) {
-            this._handleError('emitirMdfe', err, ref);
-        }
+        return this._request('POST', `/mdfe`, payload, { ref }, 'emitirMdfe');
     }
 
     /**
-     * Consulta o status do MDF-e.
+     * GET /mdfe/{ref} — Consulta status, protocolo, XML e DAMDFE.
      */
     async consultarMdfe(ref) {
-        try {
-            const res = await this.http.get(`/mdfe/${encodeURIComponent(ref)}`);
-            return res.data;
-        } catch (err) {
-            this._handleError('consultarMdfe', err, ref);
-        }
+        return this._request('GET', `/mdfe/${encodeURIComponent(ref)}`, null, null, 'consultarMdfe');
     }
 
     /**
-     * Encerra um MDF-e autorizado.
-     * @param {string} ref
-     * @param {Object} dados - { data, sigla_uf, nome_municipio }
+     * POST /mdfe/{ref}/encerrar — Encerra o MDF-e.
+     * Resposta síncrona. Libera veículo e condutor na SEFAZ.
      */
     async encerrarMdfe(ref, { data, sigla_uf, nome_municipio }) {
-        try {
-            logger.info(`[FocusClient] Encerrando MDF-e (ref=${ref}) em ${nome_municipio}/${sigla_uf}`);
-            const res = await this.http.post(`/mdfe/${encodeURIComponent(ref)}/encerrar`, {
-                data: data || new Date().toISOString().split('T')[0],
-                sigla_uf: sigla_uf.toUpperCase(),
-                nome_municipio
-            });
-            return res.data;
-        } catch (err) {
-            this._handleError('encerrarMdfe', err, ref);
+        if (!nome_municipio) {
+            throw new Error('[FocusClient] Município de encerramento é obrigatório.');
         }
+        return this._request('POST', `/mdfe/${encodeURIComponent(ref)}/encerrar`, {
+            data: data || new Date().toISOString().split('T')[0],
+            sigla_uf: String(sigla_uf || '').toUpperCase(),
+            nome_municipio
+        }, null, 'encerrarMdfe');
     }
 
     /**
-     * Adiciona um condutor ao MDF-e em trânsito.
+     * POST /mdfe/{ref}/inclusao_condutor — Inclui condutor durante a viagem.
      */
     async incluirCondutorMdfe(ref, { nome, cpf }) {
-        try {
-            const res = await this.http.post(`/mdfe/${encodeURIComponent(ref)}/inclusao_condutor`, {
-                nome,
-                cpf: cpf.replace(/\D/g, '')
-            });
-            return res.data;
-        } catch (err) {
-            this._handleError('incluirCondutorMdfe', err, ref);
+        if (!nome || !cpf) {
+            throw new Error('[FocusClient] Nome e CPF do condutor são obrigatórios.');
         }
+        return this._request('POST', `/mdfe/${encodeURIComponent(ref)}/inclusao_condutor`, {
+            nome,
+            cpf: String(cpf).replace(/\D/g, '')
+        }, null, 'incluirCondutorMdfe');
     }
 
     /**
-     * Adiciona documentos (CT-e/NF-e) a um MDF-e já autorizado.
+     * POST /mdfe/{ref}/inclusao_dfe — Inclui CT-e/NF-e em MDF-e já autorizado.
      */
     async incluirDfeMdfe(ref, { protocolo, codigo_municipio_carregamento, documentos }) {
-        try {
-            const res = await this.http.post(`/mdfe/${encodeURIComponent(ref)}/inclusao_dfe`, {
-                protocolo,
-                codigo_municipio_carregamento,
-                documentos
-            });
-            return res.data;
-        } catch (err) {
-            this._handleError('incluirDfeMdfe', err, ref);
+        if (!protocolo || !codigo_municipio_carregamento || !Array.isArray(documentos) || documentos.length === 0) {
+            throw new Error('[FocusClient] protocolo, codigo_municipio_carregamento e documentos são obrigatórios.');
         }
+        return this._request('POST', `/mdfe/${encodeURIComponent(ref)}/inclusao_dfe`, {
+            protocolo,
+            codigo_municipio_carregamento: String(codigo_municipio_carregamento),
+            documentos
+        }, null, 'incluirDfeMdfe');
     }
 
     /**
-     * Cancela o MDF-e na SEFAZ.
+     * DELETE /mdfe/{ref} — Cancela o MDF-e.
      */
     async cancelarMdfe(ref, justificativa) {
+        return this._request('DELETE', `/mdfe/${encodeURIComponent(ref)}`, { justificativa }, null, 'cancelarMdfe');
+    }
+
+    /**
+     * POST /mdfe/{ref}/reenviar_hook — Reenvia a notificação do manifesto.
+     */
+    async reenviarHookMdfe(ref) {
+        return this._request('POST', `/mdfe/${encodeURIComponent(ref)}/reenviar_hook`, null, null, 'reenviarHookMdfe');
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // Infraestrutura interna
+    // ─────────────────────────────────────────────────────────
+
+    /**
+     * Executa a requisição com rate limit, retry e normalização de erro.
+     */
+    async _request(method, path, body, query, metodo) {
+        const started = Date.now();
+
         try {
-            const res = await this.http.delete(`/mdfe/${encodeURIComponent(ref)}`, {
-                data: { justificativa }
-            });
+            await rateLimiter.adquirir(this.token);
+
+            const config = { method, params: query || undefined };
+            if (body !== null && body !== undefined) config.data = body;
+
+            const res = await this.http.request(path, config);
+            logger.info(
+                `[FocusClient] ${metodo} OK em ${Date.now() - started}ms (ambiente=${this.ambiente})`
+            );
             return res.data;
         } catch (err) {
-            this._handleError('cancelarMdfe', err, ref);
+            this._handleError(metodo, err, path);
         }
     }
 
-    _handleError(metodo, err, ref) {
+    _handleError(metodo, err, path) {
         const status = err.response?.status;
         const data = err.response?.data;
-        logger.error(`[FocusClient] Erro em ${metodo} (ref=${ref}, status=${status}):`, data || err.message);
+
+        // 429 = rate limit estourado: a Focus cobra retry com backoff
+        if (status === 429) {
+            logger.warn(`[FocusClient] HTTP 429 (rate limit) em ${metodo}. Reenvie em instantes.`);
+            const erro = new Error(`[Focus NFe ${metodo}] Limite de requisições excedido (429). Tente novamente em instantes.`);
+            erro.status = 429;
+            erro.response = data;
+            throw erro;
+        }
+
+        // 409 = conflito (ref já em processamento ou já autorizado) — não é erro fatal
+        if (status === 409) {
+            logger.warn(`[FocusClient] HTTP 409 em ${metodo}: ${data?.codigo || data?.mensagem}`);
+            const erro = new Error(data?.mensagem || `[Focus NFe ${metodo}] Operação já em andamento (409).`);
+            erro.status = 409;
+            erro.response = data;
+            erro.codigo = data?.codigo;
+            throw erro;
+        }
+
+        logger.error(`[FocusClient] Erro em ${metodo} [${path}] status=${status}:`, data || err.message);
 
         const errorMsg = data?.mensagem || data?.error || err.message;
         const customErr = new Error(`[Focus NFe ${metodo}] ${errorMsg}`);
         customErr.status = status;
         customErr.response = data;
+        customErr.codigo = data?.codigo;
         throw customErr;
     }
 }
 
 module.exports = FocusClient;
+module.exports.rateLimiter = rateLimiter;

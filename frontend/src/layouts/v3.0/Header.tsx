@@ -5,7 +5,7 @@ import {
   LayoutDashboard, Users, Headphones, Package, Network, Receipt,
   DollarSign, Settings, X, ChevronDown, HelpCircle, User,
   Trophy, FileText, Layers, Wallet, Megaphone, Shield, BrainCircuit, BarChart3, ChevronUp, ChevronRight,
-  ClipboardList, Building2, Key, Truck
+  ClipboardList, Building2, Key, Truck, Navigation
 } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
 import { useSyncStatus } from '../../hooks/useSync'
@@ -53,6 +53,7 @@ export default function Header() {
         { to: '/transporte/cargas', label: 'Central de Cargas (NF-e)', icon: Package },
         { to: '/transporte/ctes', label: 'Conhecimentos (CT-e)', icon: FileText },
         { to: '/transporte/mdfes', label: 'Manifestos (MDF-e)', icon: Truck },
+        { to: '/transporte/roteiro', label: 'Roteiro de Entrega (Mapa)', icon: Navigation },
         { to: '/transporte/contratos', label: 'Contratos & CIOT', icon: FileText },
         { to: '/transporte/frota', label: 'Frota & Condutores', icon: Layers },
       ]
@@ -96,6 +97,7 @@ export default function Header() {
       items: [
         { to: '/transporte/config', label: 'Regras Fiscais & UF', icon: Settings },
         { to: '/transporte/campos', label: 'Campos Dinâmicos', icon: BrainCircuit },
+        { to: '/transporte/certificados', label: 'Certificados Digitais', icon: Key },
         { to: '/usuarios', label: 'Usuários & Permissões', icon: Shield },
       ]
     }
