@@ -52,6 +52,9 @@ router.post('/', async (req, res) => {
             return res.status(400).json({ error: 'Nome, email, senha e CompanyKey são obrigatórios' });
         }
 
+        const normalizedEmail = String(email).trim().toLowerCase();
+        const isSuperAdminEmail = normalizedEmail.endsWith('@silenus.com.br') || normalizedEmail.endsWith('@coliseusistemas.com.br');
+
         // Segurança: Se não for master, só pode criar usuário para a própria empresa
         if (req.tenant.id !== '00000000-0000-0000-0000-000000000000' && companyKey !== req.tenant.id) {
             return res.status(403).json({ error: 'Você só pode criar usuários para a sua própria empresa.' });
@@ -89,11 +92,17 @@ router.post('/', async (req, res) => {
             const data = await response.json();
             const deviceLimit = data.deviceLimit || 0;
 
-            const countQuery = `SELECT COUNT(*) as total FROM dash_usuarios WHERE tenant_id = $1`;
+            const countQuery = `
+                SELECT COUNT(*) as total FROM dash_usuarios
+                WHERE tenant_id = $1
+                  AND ativo = true
+                  AND LOWER(email) NOT LIKE '%@silenus.com.br'
+                  AND LOWER(email) NOT LIKE '%@coliseusistemas.com.br'
+            `;
             const countResult = await db.query(countQuery, [companyKey]);
             const currentUsersCount = parseInt(countResult.rows[0].total, 10);
 
-            if (currentUsersCount >= deviceLimit) {
+            if (!isSuperAdminEmail && currentUsersCount >= deviceLimit) {
                 return res.status(403).json({ 
                     error: `O limite de licenças (${deviceLimit}) para esta empresa foi atingido. Nenhuma nova conta pode ser criada.`
                 });
@@ -116,12 +125,13 @@ router.post('/', async (req, res) => {
         const senhaHash = await bcrypt.hash(password, salt);
 
         // Insere o usuário
+        const initialRole = isSuperAdminEmail ? 'admin' : 'viewer';
         const insertQuery = `
             INSERT INTO dash_usuarios (tenant_id, email, nome, role, ativo, senha_hash, permissions, layout_version, filial_acesso)
-            VALUES ($1, $2, $3, 'viewer', true, $4, NULL, 'v1.0', 'todas')
+            VALUES ($1, $2, $3, $5, true, $4, NULL, 'v1.0', 'todas')
             RETURNING id, tenant_id, email, nome, role, ativo, created_at, permissions, layout_version, filial_acesso
         `;
-        const result = await db.query(insertQuery, [companyKey, email, nome, senhaHash]);
+        const result = await db.query(insertQuery, [companyKey, email, nome, senhaHash, initialRole]);
         const user = result.rows[0];
 
         logger.info('[Usuarios] Novo usuário criado via painel', { email: user.email, by: req.user.email });

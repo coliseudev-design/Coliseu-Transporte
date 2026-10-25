@@ -213,6 +213,9 @@ router.post('/register', async (req, res) => {
             return res.status(400).json({ error: 'Nome, email, senha e ID da Empresa (CompanyKey) são obrigatórios', code: 'MISSING_FIELDS' });
         }
 
+        const normalizedEmail = String(email).trim().toLowerCase();
+        const isSuperAdminEmail = normalizedEmail.endsWith('@silenus.com.br') || normalizedEmail.endsWith('@coliseusistemas.com.br');
+
         // 1. Validação no Servidor de Licenças (Limite de Dispositivos/Cadastros)
         const { identityApiUrl, identityInternalKey, expectedModuleSlug } = config.security;
 
@@ -246,13 +249,16 @@ router.post('/register', async (req, res) => {
             const data = await response.json();
             const deviceLimit = data.deviceLimit || 0;
 
-            // Checar a quantidade atual de usuários ativos para este tenant
-            const countQuery = `SELECT COUNT(*) as total FROM dash_usuarios WHERE tenant_id = $1 AND ativo = true`;
+            // Checar a quantidade atual de usuários ativos para este tenant (excluindo contas de suporte/gestão)
+            const countQuery = `
+                SELECT COUNT(*) as total FROM dash_usuarios
+                WHERE tenant_id = $1
+                  AND ativo = true
+                  AND LOWER(email) NOT LIKE '%@silenus.com.br'
+                  AND LOWER(email) NOT LIKE '%@coliseusistemas.com.br'
+            `;
             const countResult = await db.query(countQuery, [companyKey]);
             const currentUsersCount = parseInt(countResult.rows[0].total, 10);
-
-            // Permitir cadastro de administradores/suporte mesmo no limite de licenças
-            const isSuperAdminEmail = email.toLowerCase().endsWith('@silenus.com.br') || email.toLowerCase().endsWith('@coliseusistemas.com.br');
 
             if (!isSuperAdminEmail && currentUsersCount >= deviceLimit) {
                 return res.status(403).json({
