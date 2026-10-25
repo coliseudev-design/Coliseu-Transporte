@@ -1,11 +1,10 @@
 import { useState, useEffect } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import {
-  Menu, LogOut, RefreshCw, CheckCircle2, AlertCircle, Bell, Search,
-  LayoutDashboard, Users, Headphones, Package, Network, Receipt,
-  DollarSign, Settings, X, ChevronDown, HelpCircle, User,
-  Trophy, FileText, Layers, Wallet, Megaphone, Shield, BrainCircuit, BarChart3, ChevronUp, ChevronRight,
-  ClipboardList, Building2, Key, Truck, Navigation
+  Menu, LogOut, X, ChevronDown, HelpCircle, User,
+  Users, Package, Network, Settings,
+  FileText, Shield, BrainCircuit, BarChart3, ChevronRight,
+  Building2, Key, Truck, Navigation, FileStack, BadgeCheck
 } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
 import { useSyncStatus } from '../../hooks/useSync'
@@ -39,28 +38,14 @@ export default function Header() {
     return () => document.removeEventListener('click', handleClickOutside)
   }, [])
 
-  // Menus do módulo Coliseu Transporte — CT-e, MDF-e, Cargas, Frota e CIOT
+  // ─────────────────────────────────────────────────────────────
+  // Barra Principal — 8 botões independentes conforme especificação
+  // ─────────────────────────────────────────────────────────────
   const navigationGroups = [
     {
-      label: 'Transporte',
-      icon: Truck,
-      hexColor: '#0284C7',
-      textColor: 'text-[#0284C7]',
-      hoverBg: 'hover:bg-[#0284C7]/10',
-      activeBg: 'bg-[#E0F2FE] text-[#0284C7] border-[#7DD3FC]',
-      hoverBorderLeft: 'hover:border-l-[#0284C7]',
-      items: [
-        { to: '/transporte/cargas', label: 'Central de Cargas (NF-e)', icon: Package },
-        { to: '/transporte/ctes', label: 'Conhecimentos (CT-e)', icon: FileText },
-        { to: '/transporte/mdfes', label: 'Manifestos (MDF-e)', icon: Truck },
-        { to: '/transporte/roteiro', label: 'Roteiro de Entrega (Mapa)', icon: Navigation },
-        { to: '/transporte/contratos', label: 'Contratos & CIOT', icon: FileText },
-        { to: '/transporte/frota', label: 'Frota & Condutores', icon: Layers },
-      ]
-    },
-    {
+      // 1. CADASTROS — primeiro botão, incorpora Frota e demais cadastros
       label: 'Cadastros',
-      icon: ClipboardList,
+      icon: Users,
       hexColor: '#6366F1',
       textColor: 'text-[#6366F1]',
       hoverBg: 'hover:bg-[#6366F1]/10',
@@ -69,15 +54,89 @@ export default function Header() {
       items: [
         { to: '/clientes', label: 'Clientes (ERP Coliseu)', icon: Users },
         { to: '/regioes', label: 'Regiões & Cidades', icon: Network },
+        { to: '/transporte/frota', label: 'Frota & Condutores', icon: Truck },
+        { to: '/transporte/partes', label: 'Partes do Transporte', icon: Building2 },
+        { to: '/transporte/empresa', label: 'Dados da Empresa (Emitente)', icon: Building2 },
       ]
     },
     {
+      // 2. TRANSPORTES — ações de emissão, simples e sem poluir
+      label: 'Transportes',
+      icon: Truck,
+      hexColor: '#0284C7',
+      textColor: 'text-[#0284C7]',
+      hoverBg: 'hover:bg-[#0284C7]/10',
+      activeBg: 'bg-[#E0F2FE] text-[#0284C7] border-[#7DD3FC]',
+      hoverBorderLeft: 'hover:border-l-[#0284C7]',
+      items: [
+        { to: '/transporte/ctes', label: 'Emitir CT-e', icon: FileText },
+        { to: '/transporte/mdfes', label: 'Emitir MDF-e', icon: Truck },
+        { to: '/transporte/documentos', label: 'Consultar Documentos Emitidos', icon: FileStack },
+      ]
+    },
+    {
+      // 3. DOCUMENTOS EMITIDOS — listagem unificada CT-e + MDF-e
+      label: 'Documentos',
+      icon: FileStack,
+      hexColor: '#2563EB',
+      textColor: 'text-[#2563EB]',
+      hoverBg: 'hover:bg-[#2563EB]/10',
+      activeBg: 'bg-[#EFF6FF] text-[#2563EB] border-[#BFDBFE]',
+      hoverBorderLeft: 'hover:border-l-[#2563EB]',
+      items: [
+        { to: '/transporte/documentos', label: 'Todos os Documentos', icon: FileStack },
+        { to: '/transporte/documentos?tipo=cte', label: 'Somente CT-e', icon: FileText },
+        { to: '/transporte/documentos?tipo=mdfe', label: 'Somente MDF-e', icon: Truck },
+      ]
+    },
+    {
+      // 4. CIOT — botão individual com ícone próprio
+      label: 'CIOT',
+      icon: BadgeCheck,
+      hexColor: '#7C3AED',
+      textColor: 'text-[#7C3AED]',
+      hoverBg: 'hover:bg-[#7C3AED]/10',
+      activeBg: 'bg-[#F5F3FF] text-[#7C3AED] border-[#DDD6FE]',
+      hoverBorderLeft: 'hover:border-l-[#7C3AED]',
+      items: [
+        { to: '/transporte/contratos', label: 'Contratos de Transporte', icon: FileText },
+        { to: '/transporte/contratos?acao=ciot', label: 'Gerar Payload do CIOT', icon: BadgeCheck },
+      ]
+    },
+    {
+      // 5. ROTEIRO DE ENTREGA — botão individual
+      label: 'Roteiro',
+      icon: Navigation,
+      hexColor: '#0D9488',
+      textColor: 'text-[#0D9488]',
+      hoverBg: 'hover:bg-[#0D9488]/10',
+      activeBg: 'bg-[#F0FDFA] text-[#0D9488] border-[#99F6E4]',
+      hoverBorderLeft: 'hover:border-l-[#0D9488]',
+      items: [
+        { to: '/transporte/roteiro', label: 'Roteiro de Entrega (Mapa)', icon: Navigation },
+      ]
+    },
+    {
+      // 6. CENTRAL DE CARGAS — botão individual
+      label: 'Cargas',
+      icon: Package,
+      hexColor: '#D97706',
+      textColor: 'text-[#D97706]',
+      hoverBg: 'hover:bg-[#D97706]/10',
+      activeBg: 'bg-[#FFFBEB] text-[#D97706] border-[#FDE68A]',
+      hoverBorderLeft: 'hover:border-l-[#D97706]',
+      items: [
+        { to: '/transporte/cargas', label: 'Central de Cargas (NF-e)', icon: Package },
+      ]
+    },
+    {
+      // 7. RELATÓRIOS — botão individual
       label: 'Relatórios',
       icon: BarChart3,
       hexColor: '#0D9488',
       textColor: 'text-[#0D9488]',
       hoverBg: 'hover:bg-[#0D9488]/10',
-      activeBg: 'bg-[#0D9488]/10 text-[#0D9488] border-[#0D9488]/30',
+      activeBg: 'bg-[#F0FDFA] text-[#0D9488] border-[#99F6E4]',
       hoverBorderLeft: 'hover:border-l-[#0D9488]',
       items: [
         { to: '/transporte/relatorios', label: 'Desempenho Fiscal', icon: BarChart3 },
@@ -86,6 +145,7 @@ export default function Header() {
       ]
     },
     {
+      // 8. CONFIGURAÇÕES — botão individual
       label: 'Configurações',
       icon: Settings,
       hexColor: '#64748B',
@@ -158,13 +218,18 @@ export default function Header() {
                   }}
                   title={group.label}
                   className={clsx(
-                    'group flex items-center gap-1.5 px-2.5 py-1.5 xl:px-3 2xl:px-3.5 rounded-xl text-[13px] xl:text-[13.5px] font-bold tracking-tight transition-all duration-200 cursor-pointer select-none border',
+                    'group relative flex items-center gap-2 px-3 py-2 rounded-xl text-[13px] font-semibold tracking-tight transition-all duration-200 cursor-pointer select-none border',
                     isGroupActive
-                      ? 'bg-white text-[#1E3A8A] border-2 border-[#1E3A8A] shadow-md font-black'
+                      ? 'bg-white border shadow-md -translate-y-0.5'
                       : isOpen
                       ? 'bg-white text-slate-900 border-slate-300 shadow-sm'
-                      : 'bg-white text-slate-700 border border-slate-200 hover:border-slate-300 hover:text-slate-900 hover:shadow-sm hover:-translate-y-0.5'
+                      : 'bg-white text-slate-600 border border-slate-200 hover:text-slate-900 hover:border-slate-300 hover:shadow-sm hover:-translate-y-0.5'
                   )}
+                  style={isGroupActive ? {
+                    color: group.hexColor,
+                    borderColor: `${group.hexColor}55`,
+                    boxShadow: `0 4px 12px -2px ${group.hexColor}33`
+                  } : undefined}
                 >
                   {/* Ícone colorido em um badge suave */}
                   <div

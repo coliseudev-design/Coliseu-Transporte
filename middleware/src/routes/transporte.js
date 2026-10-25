@@ -101,6 +101,108 @@ router.get('/cargas/:id/danfe', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────
+// 1.5 DOCUMENTOS EMITIDOS (listagem unificada CT-e + MDF-e)
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Lista CT-e e MDF-e na mesma tabela, para consulta unificada.
+ * Filtros: tipo (TODOS | CTE | MDFE), status, período, cliente e número do documento.
+ */
+router.get('/documentos', async (req, res) => {
+    const tenantId = req.tenant.id;
+    const {
+        tipo = 'TODOS', status, search,
+        data_inicio, data_fim, limit = 200, offset = 0
+    } = req.query;
+
+    try {
+        const tipos = tipo.toUpperCase() === 'MDFE' ? ['MDFE']
+            : tipo.toUpperCase() === 'CTE' ? ['CTE'] : ['CTE', 'MDFE'];
+
+        // ── CT-e ──
+        let cteSql = `
+            SELECT 'CTE' AS tipo_documento,
+                   c.id, c.ref, c.numero, c.serie, c.modelo,
+                   c.status, c.status_sefaz, c.mensagem_sefaz,
+                   c.chave_cte AS chave,
+                   c.natureza_operacao, c.tipo_servico, c.modal, c.tomador,
+                   c.uf_inicio, c.uf_fim, c.municipio_inicio, c.municipio_fim,
+                   c.valor_total, c.valor_carga, c.peso_bruto,
+                   c.valor_icms, c.aliquota_icms,
+                   c.caminho_xml, c.caminho_dacte AS caminho_pdf, c.protocolo,
+                   c.data_emissao, c.created_at,
+                   e.razao_social AS emitente_nome,
+                   (SELECT COUNT(*)::int FROM dash_cte_cargas cc WHERE cc.cte_id = c.id) AS qtd_documentos
+            FROM dash_ctes c
+            LEFT JOIN dash_emitentes e ON e.id = c.emitente_id
+            WHERE c.tenant_id = $1`;
+        const params = [tenantId];
+
+        // ── MDF-e ──
+        let mdfeSql = `
+            SELECT 'MDFE' AS tipo_documento,
+                   m.id, m.ref, m.numero, m.serie, m.modelo,
+                   m.status, m.status_sefaz, m.mensagem_sefaz,
+                   m.chave_mdfe AS chave,
+                   m.tipo_emitente AS natureza_operacao, m.tipo_transporte AS tipo_servico, m.modal, NULL AS tomador,
+                   m.uf_inicio, m.uf_fim, NULL AS municipio_inicio, NULL AS municipio_fim,
+                   NULL::numeric AS valor_total, m.valor_carga, m.peso_bruto,
+                   NULL::numeric AS valor_icms, NULL::numeric AS aliquota_icms,
+                   m.caminho_xml, m.caminho_damdfe AS caminho_pdf, m.protocolo,
+                   m.data_emissao, m.created_at,
+                   e.razao_social AS emitente_nome,
+                   (SELECT COUNT(*)::int FROM dash_mdfe_documentos md WHERE md.mdfe_id = m.id) AS qtd_documentos
+            FROM dash_mdfes m
+            LEFT JOIN dash_emitentes e ON e.id = m.emitente_id
+            WHERE m.tenant_id = $1`;
+
+        const clauses = [];
+        const p = (v) => { params.push(v); return `$${params.length}`; };
+
+        if (status && status !== 'TODAS') {
+            clauses.push(`status = ${p(status.toUpperCase())}`);
+        }
+        if (data_inicio) {
+            clauses.push(`data_emissao >= ${p(`${data_inicio} 00:00:00`)}::timestamptz`);
+        }
+        if (data_fim) {
+            clauses.push(`data_emissao <= ${p(`${data_fim} 23:59:59`)}::timestamptz`);
+        }
+        if (search) {
+            const s = p(`%${String(search).trim()}%`);
+            clauses.push(`(
+                chave ILIKE ${s} OR ref ILIKE ${s} OR CAST(numero AS TEXT) ILIKE ${s}
+                OR emitente_nome ILIKE ${s} OR CAST(serie AS TEXT) ILIKE ${s}
+            )`);
+        }
+
+        const whereExtra = clauses.length ? ` AND ${clauses.join(' AND ')}` : '';
+
+        // ── Monta a UNION conforme o filtro de tipo ──
+        let unionSql = '';
+        if (tipos.includes('CTE')) unionSql += cteSql + whereExtra;
+        if (tipos.includes('MDFE')) {
+            if (unionSql) unionSql += '\n                UNION ALL\n';
+            unionSql += mdfeSql + whereExtra;
+        }
+
+        const finalSql = `
+            SELECT * FROM (
+                ${unionSql}
+            ) docs
+            ORDER BY data_emissao DESC NULLS LAST, id DESC
+            LIMIT ${params.length + 1} OFFSET ${params.length + 2}`;
+        params.push(parseInt(limit, 10), parseInt(offset, 10));
+
+        const { rows } = await db.query(finalSql, params);
+        return res.json({ success: true, data: rows, total: rows.length });
+    } catch (err) {
+        logger.error('[Documentos API] Erro ao listar documentos:', err.message);
+        return res.status(500).json({ error: err.message });
+    }
+});
+
+// ─────────────────────────────────────────────────────────────
 // 2. CT-e (Conhecimento de Transporte)
 // ─────────────────────────────────────────────────────────────
 

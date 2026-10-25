@@ -60,7 +60,17 @@ class TransporteService {
      */
     static async emitirCte(tenantId, cteId) {
         const { rows } = await db.query(
-            `SELECT c.*, e.cnpj as emitente_cnpj
+            `SELECT c.*, e.cnpj as emitente_cnpj,
+                    e.inscricao_estadual as emitente_inscricao_estadual,
+                    e.razao_social as emitente_razao_social,
+                    e.nome_fantasia as emitente_nome_fantasia,
+                    e.logradouro as emitente_logradouro,
+                    e.numero as emitente_numero,
+                    e.complemento as emitente_complemento,
+                    e.bairro as emitente_bairro,
+                    e.cep as emitente_cep,
+                    e.telefone as emitente_telefone,
+                    e.rntrc as emitente_rntrc
              FROM dash_ctes c
              JOIN dash_emitentes e ON e.id = c.emitente_id
              WHERE c.id = $1 AND c.tenant_id = $2`,
@@ -82,14 +92,48 @@ class TransporteService {
 
         const nfesPayload = cargas.map(c => ({ chave_nfe: c.chave_nfe }));
 
-        // Monta o payload final consolidando o JSON configurado e as NF-e
+        // Componentes do frete: usa os configurados pelo operador ou o valor total como FRETE_PESO
+        const componentesFrete = Array.isArray(cte.componentes_valor) && cte.componentes_valor.length > 0
+            ? cte.componentes_valor.map(c => ({
+                nome: c.nome || 'FRETE_PESO',
+                valor: parseFloat(c.valor || 0).toFixed(2)
+            }))
+            : [{ nome: 'FRETE_PESO', valor: parseFloat(cte.valor_total || 0).toFixed(2) }];
+
+        // Tributos — base de cálculo sobre o valor total da prestação
+        const baseCalculo = parseFloat(cte.valor_total || 0);
+        const aliquotaIcms = parseFloat(cte.aliquota_icms || 0);
+        const valorIcms = (baseCalculo * aliquotaIcms) / 100;
+        const aliquotaIbs = parseFloat(cte.aliquota_ibs || 0);
+        const aliquotaCbs = parseFloat(cte.aliquota_cbs || 0);
+
         const payload = {
+            // ── Identificação ──
             natureza_operacao: cte.natureza_operacao || 'PRESTACAO DE SERVICO DE TRANSPORTE',
+            cfop: cte.cfop || '5353',
             tipo_documento: '1',
             modal: cte.modal || '1',
             tipo_servico: cte.tipo_servico || '0',
+            finalidade: cte.finalidade || '1',
+            formato_dacte: cte.formato_dacte || 'retrato',
             data_emissao: new Date().toISOString(),
+
+            // ── Emitente ──
             cnpj_emitente: emitente.cnpj,
+            inscricao_estadual_emitente: cte.emitente_inscricao_estadual,
+            nome_emitente: cte.emitente_razao_social,
+            nome_fantasia_emitente: cte.emitente_nome_fantasia || cte.emitente_razao_social,
+            logradouro_emitente: cte.emitente_logradouro,
+            numero_emitente: cte.emitente_numero,
+            complemento_emitente: cte.emitente_complemento,
+            bairro_emitente: cte.emitente_bairro,
+            codigo_municipio_emitente: emitente.codigo_municipio,
+            municipio_emitente: emitente.municipio,
+            cep_emitente: cte.emitente_cep,
+            uf_emitente: emitente.uf,
+            telefone_emitente: cte.emitente_telefone,
+
+            // ── Percurso ──
             uf_envio: emitente.uf,
             codigo_municipio_envio: emitente.codigo_municipio,
             municipio_envio: emitente.municipio,
@@ -99,16 +143,32 @@ class TransporteService {
             codigo_municipio_fim: cte.codigo_municipio_fim,
             municipio_fim: cte.municipio_fim,
             uf_fim: cte.uf_fim,
-            retirar_mercadoria: '1',
+
+            // ── Retirada (boolean + bloco descritivo) ──
+            retirar_mercadoria: cte.retirar_mercadoria === false || cte.retirar_mercadoria === '0' ? '0' : '1',
+            ...(cte.retirada_descricao ? { descricao_retirada: cte.retirada_descricao } : {}),
+
+            // ── Tomador ──
             indicador_inscricao_estadual_tomador: '9',
             tomador: cte.tomador || '0',
-            valor_total: parseFloat(cte.valor_total || 0).toFixed(2),
+
+            // ── Valores e componentes do frete ──
+            valor_total: baseCalculo.toFixed(2),
             valor_receber: parseFloat(cte.valor_receber || cte.valor_total || 0).toFixed(2),
-            componentes_valor: [
-                { nome: 'FRETE_PESO', valor: parseFloat(cte.valor_total || 0).toFixed(2) }
-            ],
+            componentes_valor: componentesFrete,
+
+            // ── Tributos (ICMS + IBS/CBS — reforma tributária) ──
+            icms_situacao_tributaria: cte.icms_situacao_tributaria || '00',
+            icms_base_calculo: baseCalculo.toFixed(2),
+            icms_aliquota: aliquotaIcms.toFixed(4),
+            icms_valor: valorIcms.toFixed(2),
+            ...(aliquotaIbs > 0 ? { ibs_aliquota: aliquotaIbs.toFixed(4), ibs_valor: ((baseCalculo * aliquotaIbs) / 100).toFixed(2) } : {}),
+            ...(aliquotaCbs > 0 ? { cbs_aliquota: aliquotaCbs.toFixed(4), cbs_valor: ((baseCalculo * aliquotaCbs) / 100).toFixed(2) } : {}),
+
+            // ── Carga ──
             valor_total_carga: parseFloat(cte.valor_carga || 0).toFixed(2),
-            produto_predominante: 'MERCADORIA EM GERAL',
+            produto_predominante: cte.produto_predominante || 'MERCADORIA EM GERAL',
+            outras_caracteristicas_carga: cte.outras_caracteristicas_carga || null,
             quantidades: [
                 {
                     codigo_unidade_medida: '01',
@@ -116,10 +176,28 @@ class TransporteService {
                     quantidade: parseFloat(cte.peso_bruto || 1).toFixed(3)
                 }
             ],
+
+            // ── Documentos vinculados ──
             nfes: nfesPayload,
+
+            // ── Rodoviário (RNTRC é bloqueante) ──
             modal_rodoviario: {
                 rntrc: emitente.rntrc || '00000000'
             },
+
+            // ── Seguro da carga ──
+            ...(cte.seguro_nome ? {
+                seguro_carga: {
+                    responsavel_seguro: cte.seguro_responsavel || '1',
+                    nome_seguradora: cte.seguro_nome,
+                    numero_apolice: cte.seguro_apolice || null,
+                    numero_averbacao: cte.seguro_averbacao || null
+                }
+            } : {}),
+
+            // ── Observações ──
+            ...(cte.observacoes ? { observacao: cte.observacoes } : {}),
+
             // Sobrescreve com quaisquer campos específicos que o operador tenha personalizado
             ...(cte.payload_focus || {})
         };

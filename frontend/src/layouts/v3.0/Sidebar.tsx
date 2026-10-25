@@ -1,9 +1,10 @@
 import { NavLink } from 'react-router-dom'
 import {
   LayoutDashboard, Users, Package, FileText,
-  Layers, Settings, ChevronDown, ChevronUp,
+  Settings, ChevronDown, ChevronUp,
   LogOut, Shield, X, BarChart3, Truck, BrainCircuit,
-  Route, ClipboardList, Building2, Navigation, KeyRound
+  Route, Building2, Navigation, KeyRound,
+  FileStack, BadgeCheck
 } from 'lucide-react'
 import clsx from 'clsx'
 import { useAuthStore } from '../../store/authStore'
@@ -16,8 +17,12 @@ interface Props {
 
 export default function Sidebar({ open, onClose }: Props) {
   // Collapsible groups state
-  const [transporteOpen, setTransporteOpen] = useState(true)
   const [cadastrosOpen, setCadastrosOpen] = useState(true)
+  const [transporteOpen, setTransporteOpen] = useState(true)
+  const [documentosOpen, setDocumentosOpen] = useState(false)
+  const [ciotOpen, setCiotOpen] = useState(false)
+  const [roteiroOpen, setRoteiroOpen] = useState(false)
+  const [cargasOpen, setCargasOpen] = useState(false)
   const [configOpen, setConfigOpen] = useState(false)
   const [biOpen, setBiOpen] = useState(false)
 
@@ -103,29 +108,63 @@ export default function Sidebar({ open, onClose }: Props) {
           {/* Dashboard */}
           {renderLink('/', 'Cockpit de Transporte', LayoutDashboard, true)}
 
-          {/* Grupo: Transporte (CT-e / MDF-e) */}
-          {renderGroupHeader('Transporte', Truck, transporteOpen, () => setTransporteOpen(!transporteOpen))}
-          {transporteOpen && (
-            <div className="space-y-0.5 pl-1">
-              {renderLink('/transporte/cargas', 'Central de Cargas (NF-e)', Package)}
-              {renderLink('/transporte/ctes', 'Conhecimentos (CT-e)', FileText)}
-              {renderLink('/transporte/mdfes', 'Manifestos (MDF-e)', Truck)}
-              {renderLink('/transporte/roteiro', 'Roteiro de Entrega (Mapa)', Navigation)}
-              {renderLink('/transporte/contratos', 'Contratos & CIOT', Route)}
-            </div>
-          )}
-
-          {/* Grupo: Cadastros (ERP Coliseu) */}
-          {renderGroupHeader('Cadastros', ClipboardList, cadastrosOpen, () => setCadastrosOpen(!cadastrosOpen))}
+          {/* 1. Cadastros — primeiro, incorpora Frota e demais cadastros */}
+          {renderGroupHeader('Cadastros', Users, cadastrosOpen, () => setCadastrosOpen(!cadastrosOpen))}
           {cadastrosOpen && (
             <div className="space-y-0.5 pl-1">
               {renderLink('/clientes', 'Clientes (ERP Coliseu)', Users)}
               {renderLink('/regioes', 'Regiões & Cidades', Route)}
-              {renderLink('/transporte/frota', 'Frota & Condutores', Layers)}
+              {renderLink('/transporte/frota', 'Frota & Condutores', Truck)}
+              {renderLink('/transporte/partes', 'Partes do Transporte', Building2)}
             </div>
           )}
 
-          {/* Grupo: Relatórios Fiscais */}
+          {/* 2. Transportes — ações de emissão */}
+          {renderGroupHeader('Transportes', Truck, transporteOpen, () => setTransporteOpen(!transporteOpen))}
+          {transporteOpen && (
+            <div className="space-y-0.5 pl-1">
+              {renderLink('/transporte/ctes', 'Emitir CT-e', FileText)}
+              {renderLink('/transporte/mdfes', 'Emitir MDF-e', Truck)}
+              {renderLink('/transporte/documentos', 'Consultar Documentos', FileStack)}
+            </div>
+          )}
+
+          {/* 3. Documentos Emitidos — listagem unificada */}
+          {renderGroupHeader('Documentos Emitidos', FileStack, documentosOpen, () => setDocumentosOpen(!documentosOpen))}
+          {documentosOpen && (
+            <div className="space-y-0.5 pl-1">
+              {renderLink('/transporte/documentos', 'Todos os Documentos', FileStack)}
+              {renderLink('/transporte/documentos?tipo=cte', 'Somente CT-e', FileText)}
+              {renderLink('/transporte/documentos?tipo=mdfe', 'Somente MDF-e', Truck)}
+            </div>
+          )}
+
+          {/* 4. CIOT — botão individual */}
+          {renderGroupHeader('CIOT', BadgeCheck, ciotOpen, () => setCiotOpen(!ciotOpen))}
+          {ciotOpen && (
+            <div className="space-y-0.5 pl-1">
+              {renderLink('/transporte/contratos', 'Contratos de Transporte', FileText)}
+              {renderLink('/transporte/contratos?acao=ciot', 'Gerar Payload do CIOT', BadgeCheck)}
+            </div>
+          )}
+
+          {/* 5. Roteiro de Entrega — botão individual */}
+          {renderGroupHeader('Roteiro de Entrega', Navigation, roteiroOpen, () => setRoteiroOpen(!roteiroOpen))}
+          {roteiroOpen && (
+            <div className="space-y-0.5 pl-1">
+              {renderLink('/transporte/roteiro', 'Roteiro com Mapa', Navigation)}
+            </div>
+          )}
+
+          {/* 6. Central de Cargas — botão individual */}
+          {renderGroupHeader('Central de Cargas', Package, cargasOpen, () => setCargasOpen(!cargasOpen))}
+          {cargasOpen && (
+            <div className="space-y-0.5 pl-1">
+              {renderLink('/transporte/cargas', 'Notas Fiscais do ERP', Package)}
+            </div>
+          )}
+
+          {/* 7. Relatórios — botão individual */}
           {renderGroupHeader('Relatórios', BarChart3, biOpen, () => setBiOpen(!biOpen))}
           {biOpen && (
             <div className="space-y-0.5 pl-1">
@@ -135,7 +174,7 @@ export default function Sidebar({ open, onClose }: Props) {
             </div>
           )}
 
-          {/* Grupo: Configurações */}
+          {/* 8. Configurações — botão individual */}
           {renderGroupHeader('Configurações', Settings, configOpen, () => setConfigOpen(!configOpen))}
           {configOpen && (
             <div className="space-y-0.5 pl-1">

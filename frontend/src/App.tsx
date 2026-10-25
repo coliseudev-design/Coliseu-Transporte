@@ -29,6 +29,7 @@ import CamposDinamicosPage from './pages/transporte/CamposDinamicosPage'
 import RoteiroEntregaPage from './pages/transporte/RoteiroEntregaPage'
 import CertificadosPage from './pages/transporte/CertificadosPage'
 import DadosEmpresaPage from './pages/transporte/DadosEmpresaPage'
+import DocumentosEmitidosPage from './pages/transporte/DocumentosEmitidosPage'
 
 function Protected({ children }: { children: JSX.Element }) {
   const user = useAuthStore((s) => s.user)
@@ -126,6 +127,7 @@ export default function App() {
         <Route path="transporte/campos" element={<CamposDinamicosPage />} />
         <Route path="transporte/roteiro" element={<RoteiroEntregaPage />} />
         <Route path="transporte/certificados" element={<CertificadosPage />} />
+        <Route path="transporte/documentos" element={<DocumentosEmitidosPage />} />
 
         {/* ── Cadastros do ERP Sincronizados ── */}
         <Route path="clientes" element={<Clientes />} />
