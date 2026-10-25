@@ -9,10 +9,8 @@ import {
 } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
 import { useSyncStatus } from '../../hooks/useSync'
-import { formatDateTime } from '../../utils/format'
 import BranchSelector from '../../components/BranchSelector'
 import ModalAlterarSenha from '../../components/ModalAlterarSenha'
-import api from '../../services/api'
 import clsx from 'clsx'
 
 export default function Header() {
@@ -41,8 +39,24 @@ export default function Header() {
     return () => document.removeEventListener('click', handleClickOutside)
   }, [])
 
-  // Definição dos links do menu horizontal superior estruturados com dropdowns e cores específicas por módulo
+  // Menus do módulo Coliseu Transporte — CT-e, MDF-e, Cargas, Frota e CIOT
   const navigationGroups = [
+    {
+      label: 'Transporte',
+      icon: Truck,
+      hexColor: '#0284C7',
+      textColor: 'text-[#0284C7]',
+      hoverBg: 'hover:bg-[#0284C7]/10',
+      activeBg: 'bg-[#E0F2FE] text-[#0284C7] border-[#7DD3FC]',
+      hoverBorderLeft: 'hover:border-l-[#0284C7]',
+      items: [
+        { to: '/transporte/cargas', label: 'Central de Cargas (NF-e)', icon: Package },
+        { to: '/transporte/ctes', label: 'Conhecimentos (CT-e)', icon: FileText },
+        { to: '/transporte/mdfes', label: 'Manifestos (MDF-e)', icon: Truck },
+        { to: '/transporte/contratos', label: 'Contratos & CIOT', icon: FileText },
+        { to: '/transporte/frota', label: 'Frota & Condutores', icon: Layers },
+      ]
+    },
     {
       label: 'Cadastros',
       icon: ClipboardList,
@@ -52,93 +66,37 @@ export default function Header() {
       activeBg: 'bg-[#6366F1]/10 text-[#6366F1] border-[#6366F1]/30',
       hoverBorderLeft: 'hover:border-l-[#6366F1]',
       items: [
-        { to: '/clientes', label: 'Clientes & Fornecedores', icon: Users },
-        { to: '/produtos', label: 'Produtos & Serviços', icon: Package },
-        { to: '/clientes?tab=classes', label: 'Classes', icon: Layers },
-        { to: '/regioes', label: 'Regiões', icon: Network },
-        { to: '/departamentos', label: 'Departamentos & Categorias', icon: Layers },
-        { to: '/marcas', label: 'Marcas & Fabricantes', icon: Package },
-        { to: '/tabela-precos', label: 'Tabela de Preços', icon: Receipt },
-        { to: '/especies-pagamento', label: 'Espécie de Pagamento', icon: DollarSign },
-        { to: '/formas-pagamento', label: 'Forma de Pagamento', icon: DollarSign },
-        { to: '/fluxo-caixa?tab=caixa', label: 'Caixas', icon: Wallet },
-        { to: '/fluxo-caixa?tab=portador', label: 'Portador', icon: DollarSign },
-        { to: '/centro-custos', label: 'Centro de Custos', icon: Layers },
-        { to: '/fluxo-caixa?tab=plano-contas', label: 'Plano de Contas', icon: FileText },
-        { to: '/bancos', label: 'Bancos & Contas Bancárias', icon: Building2 },
-        { to: '/usuarios?tab=grupos', label: 'Grupos de Acesso', icon: Shield },
-        { to: '/natureza-operacao', label: 'Natureza de Operação', icon: FileText },
+        { to: '/transporte/emitentes', label: 'Transportadoras (Emitentes)', icon: Building2 },
+        { to: '/transporte/partes', label: 'Clientes & Destinatários', icon: Users },
+        { to: '/clientes', label: 'Cadastro do ERP', icon: Network },
       ]
     },
     {
-      label: 'Consultas',
-      icon: Search,
-      hexColor: '#1E3A8A',
-      textColor: 'text-[#1E3A8A]',
-      hoverBg: 'hover:bg-[#1E3A8A]/10',
-      activeBg: 'bg-[#EFF6FF] text-[#1E3A8A] border-[#BFDBFE] font-extrabold',
-      hoverBorderLeft: 'hover:border-l-[#1E3A8A]',
-      items: [
-        { to: '/clientes', label: 'Clientes & Parceiros', icon: Users },
-        { to: '/produtos', label: 'Catálogo de Produtos', icon: Package },
-        { to: '/estoque', label: 'Controle de Estoque', icon: Layers },
-      ]
-    },
-    {
-      label: 'Comercial',
-      icon: Trophy,
-      hexColor: '#F97316',
-      textColor: 'text-[#F97316]',
-      hoverBg: 'hover:bg-[#F97316]/10',
-      activeBg: 'bg-[#F97316]/10 text-[#F97316] border-[#F97316]/30',
-      hoverBorderLeft: 'hover:border-l-[#F97316]',
-      items: [
-        { to: '/crm', label: 'Kanban de Vendas', icon: Trophy },
-        { to: '/vendas', label: 'Histórico de Vendas', icon: Receipt },
-        { to: '/contratos', label: 'Gestão de Contratos', icon: FileText },
-        { to: '/pedidos', label: 'Pedidos Faturados', icon: ClipboardList },
-      ]
-    },
-    {
-      label: 'Financeira',
-      icon: DollarSign,
-      hexColor: '#16A34A',
-      textColor: 'text-[#16A34A]',
-      hoverBg: 'hover:bg-[#16A34A]/10',
-      activeBg: 'bg-[#16A34A]/10 text-[#16A34A] border-[#16A34A]/30',
-      hoverBorderLeft: 'hover:border-l-[#16A34A]',
-      items: [
-        { to: '/fluxo-caixa', label: 'Financeiro & Lançamentos', icon: DollarSign },
-        { to: '/kanban-cobranca', label: 'Régua de Cobrança (CRM)', icon: Layers },
-        { to: '/motores-cobranca', label: 'Motores de Cobrança', icon: RefreshCw },
-      ]
-    },
-    {
-      label: 'Marketing',
-      icon: Megaphone,
-      hexColor: '#0284C7',
-      textColor: 'text-[#0284C7]',
-      hoverBg: 'hover:bg-[#0284C7]/10',
-      activeBg: 'bg-[#E0F2FE] text-[#0284C7] border-[#7DD3FC]',
-      hoverBorderLeft: 'hover:border-l-[#0284C7]',
-      items: [
-        { to: '/marketing', label: 'Marketing em Massa', icon: Megaphone },
-        { to: '/templates', label: 'Modelos & Acervos', icon: FileText },
-      ]
-    },
-    {
-      label: 'Gerência',
-      icon: LayoutDashboard,
+      label: 'Relatórios',
+      icon: BarChart3,
       hexColor: '#0D9488',
       textColor: 'text-[#0D9488]',
       hoverBg: 'hover:bg-[#0D9488]/10',
       activeBg: 'bg-[#0D9488]/10 text-[#0D9488] border-[#0D9488]/30',
       hoverBorderLeft: 'hover:border-l-[#0D9488]',
       items: [
-        { to: '/gerencia-financeiro', label: 'Dashboard Financeiro', icon: DollarSign },
-        { to: '/estatisticas', label: 'Estatísticas & Consultas', icon: BarChart3 },
-        { to: '/comissoes', label: 'Comissões & Metas', icon: DollarSign },
-        { to: '/ranking', label: 'Ranking de Vendedores', icon: Trophy },
+        { to: '/transporte/relatorios', label: 'Desempenho Fiscal', icon: BarChart3 },
+        { to: '/transporte/relatorios?tipo=cte', label: 'Relatório de CT-e', icon: FileText },
+        { to: '/transporte/relatorios?tipo=mdfe', label: 'Relatório de MDF-e', icon: Truck },
+      ]
+    },
+    {
+      label: 'Configurações',
+      icon: Settings,
+      hexColor: '#64748B',
+      textColor: 'text-[#64748B]',
+      hoverBg: 'hover:bg-[#64748B]/10',
+      activeBg: 'bg-slate-100 text-[#475569] border-[#CBD5E1]',
+      hoverBorderLeft: 'hover:border-l-[#64748B]',
+      items: [
+        { to: '/transporte/config', label: 'Regras Fiscais & UF', icon: Settings },
+        { to: '/transporte/campos', label: 'Campos Dinâmicos', icon: BrainCircuit },
+        { to: '/usuarios', label: 'Usuários & Permissões', icon: Shield },
       ]
     }
   ]
@@ -164,9 +122,9 @@ export default function Header() {
             className="flex items-center group transition-transform duration-250 hover:scale-105"
           >
             <img
-              src="/assets/nexus-logo-horizontal.png"
+              src="/assets/logo-coliseu-transporte.svg"
               alt="Coliseu Transporte"
-              className="h-[52px] sm:h-[60px] w-auto object-contain filter drop-shadow-[0_4px_14px_rgba(30,58,138,0.20)] brightness-105 contrast-105"
+              className="h-[42px] sm:h-[46px] w-auto object-contain filter drop-shadow-[0_2px_8px_rgba(30,58,138,0.14)]"
             />
           </Link>
 
@@ -384,9 +342,9 @@ export default function Header() {
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <img
-                    src="/assets/nexus-logo-horizontal.png"
+                    src="/assets/logo-coliseu-transporte.svg"
                     alt="Coliseu Transporte"
-                    className="h-8 w-auto object-contain"
+                    className="h-7 w-auto object-contain"
                   />
                 </div>
                 <button

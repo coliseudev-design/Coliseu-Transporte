@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import api from '../../services/api';
 import {
@@ -33,6 +33,11 @@ export default function CargasPage() {
   const [valorFrete, setValorFrete] = useState('');
   const [naturezaOperacao, setNaturezaOperacao] = useState('PRESTACAO DE SERVICO DE TRANSPORTE');
   const [tomador, setTomador] = useState('0'); // 0=Remetente, 3=Destinatário
+  const [emitenteId, setEmitenteId] = useState('');
+  const [municipioInicio, setMunicipioInicio] = useState('');
+  const [municipioFim, setMunicipioFim] = useState('');
+  const [codigoMunInicio, setCodigoMunInicio] = useState('');
+  const [codigoMunFim, setCodigoMunFim] = useState('');
 
   const { data, isLoading, refetch } = useQuery({
     queryKey: ['cargas', search],
@@ -41,6 +46,25 @@ export default function CargasPage() {
       return res.data;
     }
   });
+
+  // Emitentes (transportadoras) cadastrados
+  const { data: emitentesData } = useQuery({
+    queryKey: ['emitentes-cargas'],
+    queryFn: async () => (await api.get('/transporte/emitentes')).data
+  });
+  const emitentes = emitentesData?.data || [];
+
+  // Pré-preenche o emitente e o município de origem com a 1ª carga selecionada
+  useEffect(() => {
+    if (selecionadas.length === 0) return;
+    const c = selecionadas[0];
+    setMunicipioInicio(c.remetente_municipio || '');
+    setMunicipioFim(c.destinatario_municipio || '');
+    if (!emitenteId && emitentes.length > 0) {
+      setEmitenteId(String(emitentes[0].id));
+      setCodigoMunInicio(emitentes[0].codigo_municipio || '');
+    }
+  }, [selectedIds.length, emitentes.length]);
 
   const cargas: Carga[] = data?.data || [];
 
@@ -70,16 +94,16 @@ export default function CargasPage() {
     try {
       const primeiraCarga = selecionadas[0];
       await api.post('/transporte/ctes', {
-        emitente_id: 1, // Pega o emitente padrão
+        emitente_id: emitenteId ? Number(emitenteId) : undefined,
         cargas_ids: selectedIds,
         natureza_operacao: naturezaOperacao,
         tomador,
         uf_inicio: primeiraCarga.remetente_uf,
-        municipio_inicio: primeiraCarga.remetente_municipio,
-        codigo_municipio_inicio: '5107875', // Default Cuiabá/MT ou dinâmico
+        municipio_inicio: municipioInicio || primeiraCarga.remetente_municipio,
+        codigo_municipio_inicio: codigoMunInicio,
         uf_fim: primeiraCarga.destinatario_uf,
-        municipio_fim: primeiraCarga.destinatario_municipio,
-        codigo_municipio_fim: '3550308', // Default SP ou dinâmico
+        municipio_fim: municipioFim || primeiraCarga.destinatario_municipio,
+        codigo_municipio_fim: codigoMunFim,
         valor_total: parseFloat(valorFrete || '0'),
         peso_bruto: totalPeso,
         valor_carga: totalValorCarga
@@ -234,7 +258,35 @@ export default function CargasPage() {
             <form onSubmit={handleCriarCte} className="space-y-4 text-sm">
               <div>
                 <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1">
-                  Valor do Frete da Prestação (R$)
+                  Transportadora Emitente (CNPJ) *
+                </label>
+                <select
+                  required
+                  value={emitenteId}
+                  onChange={e => {
+                    setEmitenteId(e.target.value);
+                    const em = emitentes.find((x: any) => String(x.id) === e.target.value);
+                    if (em?.codigo_municipio) setCodigoMunInicio(em.codigo_municipio);
+                  }}
+                  className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:ring-2 focus:ring-brand-500"
+                >
+                  <option value="">Selecione a transportadora...</option>
+                  {emitentes.map((em: any) => (
+                    <option key={em.id} value={em.id}>
+                      {em.razao_social} — {em.cnpj}
+                    </option>
+                  ))}
+                </select>
+                {emitentes.length === 0 && (
+                  <p className="text-[11px] text-amber-600 dark:text-amber-400 mt-1">
+                    Nenhuma transportadora cadastrada. Acesse Cadastros Fiscais → Transportadoras.
+                  </p>
+                )}
+              </div>
+
+              <div>
+                <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1">
+                  Valor do Frete da Prestação (R$) *
                 </label>
                 <input
                   type="number"
@@ -245,6 +297,33 @@ export default function CargasPage() {
                   onChange={e => setValorFrete(e.target.value)}
                   className="w-full px-3.5 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:ring-2 focus:ring-brand-500"
                 />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1">
+                    IBGE Município de Início *
+                  </label>
+                  <input
+                    type="text" required placeholder="5107875"
+                    value={codigoMunInicio}
+                    onChange={e => setCodigoMunInicio(e.target.value)}
+                    className="w-full px-3.5 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white font-mono focus:ring-2 focus:ring-brand-500"
+                  />
+                  <p className="text-[10px] text-slate-400 mt-1">{municipioInicio}</p>
+                </div>
+                <div>
+                  <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1">
+                    IBGE Município de Fim *
+                  </label>
+                  <input
+                    type="text" required placeholder="3550308"
+                    value={codigoMunFim}
+                    onChange={e => setCodigoMunFim(e.target.value)}
+                    className="w-full px-3.5 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white font-mono focus:ring-2 focus:ring-brand-500"
+                  />
+                  <p className="text-[10px] text-slate-400 mt-1">{municipioFim}</p>
+                </div>
               </div>
 
               <div>

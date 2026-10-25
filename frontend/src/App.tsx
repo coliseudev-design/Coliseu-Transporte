@@ -9,50 +9,21 @@ import Register from './pages/Register'
 import DashboardLayout from './components/DashboardLayout'
 
 import Home from './pages/Home'
-import FinanceiroEmDesenvolvimento from './pages/FinanceiroEmDesenvolvimento'
-import FluxoCaixa from './pages/Financeiro' // Usaremos a mesma página por enquanto ou podemos separar futuramente
-import Comissoes from './pages/Comissoes'
-import Ranking from './pages/Ranking'
-import Estatisticas from './pages/Estatisticas'
-import InteligenciaDashboard from './pages/inteligencia/InteligenciaDashboard'
-import Produtos from './pages/Produtos'
-import Clientes from './pages/Clientes'
-import Estoque from './pages/Estoque'
-import Vendas from './pages/Vendas'
 import Usuarios from './pages/Usuarios'
-import GerenciaFinanceiro from './pages/GerenciaFinanceiro'
-import ContasBancarias from './pages/ContasBancarias'
 
-import KanbanCRM from './pages/KanbanCRM'
-import Contratos from './pages/Contratos'
-import Pedidos from './pages/Pedidos'
-import KanbanCobranca from './pages/KanbanCobranca'
-import ReguaCobranca from './pages/ReguaCobranca'
-import Acervos from './pages/Acervos'
-import MarketingMassa from './pages/MarketingMassa'
-import ConfigIntegracoes from './pages/ConfigIntegracoes'
-import CadastrosPage from './pages/CadastrosPage'
-import MotoresCobranca from './pages/MotoresCobranca'
-
-// Módulo de Transporte
+// ─────────────────────────────────────────────────────────────
+// Módulo Coliseu Transporte
+// ─────────────────────────────────────────────────────────────
 import CargasPage from './pages/transporte/CargasPage'
 import CtesPage from './pages/transporte/CtesPage'
 import MdfesPage from './pages/transporte/MdfesPage'
 import FrotaPage from './pages/transporte/FrotaPage'
-
-// BI Modules
-import BiDashboard from './pages/bi/BiDashboard'
-import SalesIntelligenceDashboard from './pages/bi/SalesIntelligenceDashboard'
-import SalesHubDashboard from './pages/bi/SalesHubDashboard'
-import ABCAnalysisDashboard from './pages/bi/ABCAnalysisDashboard'
-import FinancialIntelligenceDashboard from './pages/bi/FinancialIntelligenceDashboard'
-import Radar360Dashboard from './pages/bi/Radar360Dashboard'
-import ComparativeAnalysisDashboard from './pages/bi/ComparativeAnalysisDashboard'
-import CustomerAnalyticsDashboard from './pages/bi/CustomerAnalyticsDashboard'
-import GoalsPerformanceDashboard from './pages/bi/GoalsPerformanceDashboard'
-import SupplierAnalyticsDashboard from './pages/bi/SupplierAnalyticsDashboard'
-import HeatmapDashboard from './pages/bi/HeatmapDashboard'
-import AIInsightsDashboard from './pages/bi/AIInsightsDashboard'
+import ContratosCiotPage from './pages/transporte/ContratosCiotPage'
+import EmitentesPage from './pages/transporte/EmitentesPage'
+import PartesPage from './pages/transporte/PartesPage'
+import RelatoriosPage from './pages/transporte/RelatoriosPage'
+import RegrasFiscaisPage from './pages/transporte/RegrasFiscaisPage'
+import CamposDinamicosPage from './pages/transporte/CamposDinamicosPage'
 
 function Protected({ children }: { children: JSX.Element }) {
   const user = useAuthStore((s) => s.user)
@@ -69,13 +40,13 @@ function RequirePermission({ module, submenu, children }: { module?: string; sub
   if (module && user.permissoes_menus && typeof user.permissoes_menus === 'object' && Object.keys(user.permissoes_menus).length > 0) {
     const moduleConf = user.permissoes_menus[module]
     if (!moduleConf || moduleConf.acesso === false) {
-      return <Navigate to="/fluxo-caixa" replace />
+      return <Navigate to="/" replace />
     }
     if (submenu && moduleConf.submenus && moduleConf.submenus[submenu] === false) {
-      return <Navigate to="/fluxo-caixa" replace />
+      return <Navigate to="/" replace />
     }
   } else if (module && (user.grupo_id || user.grupo_nome)) {
-    return <Navigate to="/fluxo-caixa" replace />
+    return <Navigate to="/" replace />
   }
   return children
 }
@@ -135,60 +106,21 @@ export default function App() {
         }
       >
         <Route index element={<Home />} />
-        <Route path="financeiro" element={<FinanceiroEmDesenvolvimento />} />
-        <Route path="fluxo-caixa" element={<FluxoCaixa />} />
-        <Route path="estoque" element={<Estoque />} />
-        <Route path="comissoes" element={<Comissoes />} />
-        <Route path="ranking" element={<Ranking />} />
-        <Route path="estatisticas" element={<Estatisticas />} />
-        <Route path="inteligencia" element={<InteligenciaDashboard />} />
-        <Route path="produtos" element={<Produtos />} />
-        <Route path="clientes" element={<Clientes />} />
-        <Route path="vendas" element={<Vendas />} />
-        <Route path="usuarios" element={<RequirePermission module="configuracoes" submenu="usuarios"><Usuarios /></RequirePermission>} />
-        <Route path="bancos" element={<ContasBancarias />} />
-        <Route path="gerencia-financeiro" element={<RequirePermission module="gerencia" submenu="gerencia_financeira"><GerenciaFinanceiro /></RequirePermission>} />
-        
-        {/* Módulo Coliseu Transporte */}
+
+        {/* ── Módulo Coliseu Transporte ── */}
         <Route path="transporte/cargas" element={<CargasPage />} />
         <Route path="transporte/ctes" element={<CtesPage />} />
         <Route path="transporte/mdfes" element={<MdfesPage />} />
+        <Route path="transporte/contratos" element={<ContratosCiotPage />} />
         <Route path="transporte/frota" element={<FrotaPage />} />
+        <Route path="transporte/emitentes" element={<EmitentesPage />} />
+        <Route path="transporte/partes" element={<PartesPage />} />
+        <Route path="transporte/relatorios" element={<RelatoriosPage />} />
+        <Route path="transporte/config" element={<RegrasFiscaisPage />} />
+        <Route path="transporte/campos" element={<CamposDinamicosPage />} />
 
-        {/* Novas Rotas NEXOS */}
-        <Route path="crm" element={<RequirePermission module="crm"><KanbanCRM /></RequirePermission>} />
-        <Route path="contratos" element={<RequirePermission module="crm" submenu="contratos"><Contratos /></RequirePermission>} />
-        <Route path="pedidos" element={<RequirePermission module="crm" submenu="pedidos"><Pedidos /></RequirePermission>} />
-        <Route path="kanban-cobranca" element={<RequirePermission module="cobranca" submenu="kanban"><KanbanCobranca /></RequirePermission>} />
-        <Route path="regua-cobranca" element={<RequirePermission module="cobranca" submenu="regua"><ReguaCobranca /></RequirePermission>} />
-        <Route path="motores-cobranca" element={<RequirePermission module="cobranca"><MotoresCobranca /></RequirePermission>} />
-        <Route path="templates" element={<RequirePermission module="marketing" submenu="acervos"><Acervos /></RequirePermission>} />
-        <Route path="marketing" element={<RequirePermission module="marketing" submenu="marketing_massa"><MarketingMassa /></RequirePermission>} />
-        <Route path="config-integracoes" element={<RequirePermission module="configuracoes"><ConfigIntegracoes /></RequirePermission>} />
-        
-        {/* Rotas de Cadastros Coliseu */}
-        <Route path="departamentos" element={<CadastrosPage type="departamentos" />} />
-        <Route path="centro-custos" element={<CadastrosPage type="centro-custos" />} />
-        <Route path="regioes" element={<CadastrosPage type="regioes" />} />
-        <Route path="formas-pagamento" element={<CadastrosPage type="formas-pagamento" />} />
-        <Route path="especies-pagamento" element={<CadastrosPage type="especies-pagamento" />} />
-        
-        {/* Novas Rotas de BI */}
-        <Route path="bi" element={<BiDashboard />}>
-          <Route index element={<SalesIntelligenceDashboard />} />
-          <Route path="sales" element={<SalesIntelligenceDashboard />} />
-          <Route path="hub" element={<SalesHubDashboard />} />
-          <Route path="abc" element={<ABCAnalysisDashboard />} />
-          <Route path="finance" element={<FinancialIntelligenceDashboard />} />
-          <Route path="customer" element={<Radar360Dashboard />} />
-          <Route path="comparative" element={<ComparativeAnalysisDashboard />} />
-          <Route path="customer-analytics" element={<CustomerAnalyticsDashboard />} />
-          <Route path="goals" element={<GoalsPerformanceDashboard />} />
-          <Route path="supplier" element={<SupplierAnalyticsDashboard />} />
-          <Route path="heatmap" element={<HeatmapDashboard />} />
-          <Route path="ai-insights" element={<AIInsightsDashboard />} />
-          {/* Adicionaremos as sub-rotas nas Fases futuras */}
-        </Route>
+        {/* Administração (mantida do sistema base) */}
+        <Route path="usuarios" element={<RequirePermission module="configuracoes" submenu="usuarios"><Usuarios /></RequirePermission>} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

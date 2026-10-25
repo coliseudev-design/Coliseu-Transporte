@@ -1,8 +1,9 @@
 import { NavLink } from 'react-router-dom'
 import {
-  LayoutDashboard, Users, Package, Trophy, FileText,
-  Layers, Wallet, Megaphone, Settings, ChevronDown, ChevronUp,
-  LogOut, Shield, X, HelpCircle, BarChart3, ShoppingCart, Truck, Map, BrainCircuit, RefreshCw
+  LayoutDashboard, Users, Package, FileText,
+  Layers, Settings, ChevronDown, ChevronUp,
+  LogOut, Shield, X, BarChart3, Truck, BrainCircuit,
+  Route, ClipboardList, Building2
 } from 'lucide-react'
 import clsx from 'clsx'
 import { useAuthStore } from '../../store/authStore'
@@ -14,44 +15,11 @@ interface Props {
 }
 
 export default function Sidebar({ open, onClose }: Props) {
-  const user = useAuthStore((s) => s.user)
-  
   // Collapsible groups state
   const [transporteOpen, setTransporteOpen] = useState(true)
   const [cadastrosOpen, setCadastrosOpen] = useState(true)
-  const [crmOpen, setCrmOpen] = useState(true)
-  const [faturamentoOpen, setFaturamentoOpen] = useState(true)
-  const [cobrancaOpen, setCobrancaOpen] = useState(true)
-  const [financeiroOpen, setFinanceiroOpen] = useState(true)
-  const [marketingOpen, setMarketingOpen] = useState(true)
   const [configOpen, setConfigOpen] = useState(false)
   const [biOpen, setBiOpen] = useState(false)
-
-  // Auth permissions helper para menus e submenus
-  const hasAccess = (moduleId: string, submenuId?: string) => {
-    if (!user) return false
-    if (user.role === 'master' || (user.grupo_nome && user.grupo_nome.toLowerCase() === 'master')) return true
-
-    // Validação por Grupos de Acesso Estruturados
-    if (user.permissoes_menus && typeof user.permissoes_menus === 'object' && Object.keys(user.permissoes_menus).length > 0) {
-      const moduleConf = user.permissoes_menus[moduleId]
-      if (!moduleConf || moduleConf.acesso === false) return false
-      if (submenuId && moduleConf.submenus && moduleConf.submenus[submenuId] === false) return false
-      return true
-    }
-
-    // Se possui um grupo de acesso associado mas permissoes_menus está vazio/bloqueado, negar acesso
-    if (user.grupo_id || user.grupo_nome) {
-      return false
-    }
-
-    // Fallback legado apenas se o usuário não possuir grupo associado
-    if (Array.isArray(user.permissions)) {
-      return user.permissions.includes(moduleId)
-    }
-
-    return user.role === 'admin'
-  }
 
   const renderGroupHeader = (label: string, icon: any, isOpen: boolean, toggleFn: () => void) => {
     const Icon = icon
@@ -131,115 +99,49 @@ export default function Sidebar({ open, onClose }: Props) {
 
         {/* Navigation list */}
         <nav className="flex-1 overflow-y-auto py-4 px-3 flex flex-col space-y-1">
-          
-          {/* Dashboard Executivo */}
-          {renderLink('/', 'Dashboard Executivo', LayoutDashboard, true)}
 
-          {/* Grupo: Transporte & Frotas (CT-e / MDF-e) */}
-          {renderGroupHeader('Transporte & Frotas', Truck, transporteOpen, () => setTransporteOpen(!transporteOpen))}
+          {/* Dashboard */}
+          {renderLink('/', 'Cockpit de Transporte', LayoutDashboard, true)}
+
+          {/* Grupo: Transporte (CT-e / MDF-e) */}
+          {renderGroupHeader('Transporte', Truck, transporteOpen, () => setTransporteOpen(!transporteOpen))}
           {transporteOpen && (
             <div className="space-y-0.5 pl-1">
               {renderLink('/transporte/cargas', 'Central de Cargas (NF-e)', Package)}
               {renderLink('/transporte/ctes', 'Conhecimentos (CT-e)', FileText)}
               {renderLink('/transporte/mdfes', 'Manifestos (MDF-e)', Truck)}
-              {renderLink('/transporte/frota', 'Gestão de Frota', Layers)}
+              {renderLink('/transporte/contratos', 'Contratos & CIOT', Route)}
             </div>
           )}
 
-          {/* Grupo: Cadastros */}
-          {(hasAccess('cadastros') || hasAccess('clientes')) && (
-            <>
-              {renderGroupHeader('Cadastros', Users, cadastrosOpen, () => setCadastrosOpen(!cadastrosOpen))}
-              {cadastrosOpen && (
-                <div className="space-y-0.5 pl-1">
-                  {hasAccess('cadastros', 'clientes') && renderLink('/clientes', 'Clientes', Users)}
-                  {hasAccess('cadastros', 'produtos') && renderLink('/produtos', 'Catálogo Comercial', Package)}
-                </div>
-              )}
-            </>
+          {/* Grupo: Cadastros Fiscais */}
+          {renderGroupHeader('Cadastros Fiscais', ClipboardList, cadastrosOpen, () => setCadastrosOpen(!cadastrosOpen))}
+          {cadastrosOpen && (
+            <div className="space-y-0.5 pl-1">
+              {renderLink('/transporte/emitentes', 'Transportadoras (Emitentes)', Building2)}
+              {renderLink('/transporte/partes', 'Clientes & Destinatários', Users)}
+              {renderLink('/transporte/frota', 'Frota & Condutores', Layers)}
+            </div>
           )}
 
-          {/* Grupo: CRM e Vendas */}
-          {(hasAccess('crm') || hasAccess('contratos')) && (
-            <>
-              {renderGroupHeader('CRM e Vendas', Trophy, crmOpen, () => setCrmOpen(!crmOpen))}
-              {crmOpen && (
-                <div className="space-y-0.5 pl-1">
-                  {hasAccess('crm', 'kanban') && renderLink('/crm', 'Kanban de Vendas', Trophy)}
-                  {hasAccess('crm', 'contratos') && renderLink('/contratos', 'Gestão de Contratos', FileText)}
-                  {hasAccess('crm', 'pedidos') && renderLink('/pedidos', 'Pedidos Faturados', FileText)}
-                </div>
-              )}
-            </>
-          )}
-
-          {/* Grupo: Cobrança */}
-          {hasAccess('cobranca') && (
-            <>
-              {renderGroupHeader('Cobrança', Layers, cobrancaOpen, () => setCobrancaOpen(!cobrancaOpen))}
-              {cobrancaOpen && (
-                <div className="space-y-0.5 pl-1">
-                  {hasAccess('cobranca', 'kanban') && renderLink('/kanban-cobranca', 'Kanban Operacional', Layers)}
-                  {hasAccess('cobranca', 'regua') && renderLink('/regua-cobranca', 'Régua de Cobrança', HelpCircle)}
-                  {hasAccess('cobranca', 'motores') && renderLink('/motores-cobranca', 'Motores de Cobrança', RefreshCw)}
-                </div>
-              )}
-            </>
-          )}
-
-          {/* Grupo: Financeiro */}
-          {hasAccess('financeiro') && (
-            <>
-              {renderGroupHeader('Financeiro', Wallet, financeiroOpen, () => setFinanceiroOpen(!financeiroOpen))}
-              {financeiroOpen && (
-                <div className="space-y-0.5 pl-1">
-                  {hasAccess('financeiro', 'fluxo_caixa') && renderLink('/fluxo-caixa', 'Tesouraria & Caixa', Wallet)}
-                </div>
-              )}
-            </>
-          )}
-
-          {/* Grupo: Campanhas e Marketing */}
-          {hasAccess('marketing') && (
-            <>
-              {renderGroupHeader('Marketing', Megaphone, marketingOpen, () => setMarketingOpen(!marketingOpen))}
-              {marketingOpen && (
-                <div className="space-y-0.5 pl-1">
-                  {hasAccess('marketing', 'massa') && renderLink('/marketing', 'Marketing em Massa', Megaphone)}
-                  {hasAccess('marketing', 'templates') && renderLink('/templates', 'Templates / Acervos', FileText)}
-                </div>
-              )}
-            </>
-          )}
-
-          {/* Grupo: Business Intelligence */}
-          {hasAccess('bi') && (
-            <>
-              {renderGroupHeader('Business Intel', BarChart3, biOpen, () => setBiOpen(!biOpen))}
-              {biOpen && (
-                <div className="space-y-0.5 pl-1">
-                  {renderLink('/bi/sales', 'Inteligência de Vendas', BarChart3)}
-                  {renderLink('/bi/hub', 'Hub de Vendas', ShoppingCart)}
-                  {renderLink('/bi/supplier', 'Hub do Fornecedor', Truck)}
-                  {renderLink('/bi/abc', 'Gestão de Inventário', Package)}
-                  {renderLink('/bi/finance', 'Financeiro BI', Wallet)}
-                  {renderLink('/bi/heatmap', 'Mapa de Calor', Map)}
-                </div>
-              )}
-            </>
+          {/* Grupo: Relatórios Fiscais */}
+          {renderGroupHeader('Relatórios', BarChart3, biOpen, () => setBiOpen(!biOpen))}
+          {biOpen && (
+            <div className="space-y-0.5 pl-1">
+              {renderLink('/transporte/relatorios', 'Desempenho Fiscal', BarChart3)}
+              {renderLink('/transporte/relatorios?tipo=cte', 'Detalhado de CT-e', FileText)}
+              {renderLink('/transporte/relatorios?tipo=mdfe', 'Detalhado de MDF-e', Truck)}
+            </div>
           )}
 
           {/* Grupo: Configurações */}
-          {(hasAccess('configuracoes') || hasAccess('usuarios')) && (
-            <>
-              {renderGroupHeader('Configurações', Settings, configOpen, () => setConfigOpen(!configOpen))}
-              {configOpen && (
-                <div className="space-y-0.5 pl-1">
-                  {hasAccess('configuracoes', 'integracoes') && renderLink('/config-integracoes', 'Chaves e Integrações', Settings)}
-                  {(hasAccess('configuracoes', 'usuarios') || hasAccess('configuracoes', 'grupos')) && renderLink('/usuarios', 'Usuários & Perfis', Shield)}
-                </div>
-              )}
-            </>
+          {renderGroupHeader('Configurações', Settings, configOpen, () => setConfigOpen(!configOpen))}
+          {configOpen && (
+            <div className="space-y-0.5 pl-1">
+              {renderLink('/transporte/config', 'Regras Fiscais por UF', Settings)}
+              {renderLink('/transporte/campos', 'Campos Dinâmicos', BrainCircuit)}
+              {renderLink('/usuarios', 'Usuários & Permissões', Shield)}
+            </div>
           )}
 
         </nav>

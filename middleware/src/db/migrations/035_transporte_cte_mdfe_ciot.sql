@@ -306,6 +306,8 @@ CREATE TABLE IF NOT EXISTS dash_campos_dinamicos (
     caminho_focus VARCHAR(120),
     obrigatorio BOOLEAN NOT NULL DEFAULT FALSE,
     ordem INTEGER NOT NULL DEFAULT 0,
+    escopo VARCHAR(20) NOT NULL DEFAULT 'GLOBAL', -- GLOBAL | UF_ORIGEM | UF_DESTINO | TIPO_SERVICO
+    escopo_valores JSONB DEFAULT '[]'::jsonb,
     ativo BOOLEAN NOT NULL DEFAULT TRUE,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE(tenant_id, documento, chave_campo)
