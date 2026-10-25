@@ -105,7 +105,7 @@ export default function CtesPage() {
                       <p className="text-xs text-slate-400 font-mono mt-0.5 truncate max-w-xs">
                         {cte.chave_cte || cte.ref}
                       </p>
-                    <td>
+                    </td>
                     <td className="px-6 py-4">
                       <p className="font-medium text-slate-800 dark:text-slate-200">
                         {cte.municipio_inicio}/{cte.uf_inicio} ➔ {cte.municipio_fim}/{cte.uf_fim}
