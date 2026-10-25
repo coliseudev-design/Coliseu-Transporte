@@ -2,9 +2,8 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import api from '../../services/api';
 import {
-  Package, Truck, ArrowRight, CheckCircle2, Clock,
-  Search, Filter, AlertCircle, FileText, ChevronRight,
-  List, LayoutGrid, Calendar, User, Printer, Eye, Copy, X
+  Package, Truck, FileText, ChevronRight,
+  Search, List, LayoutGrid, Calendar, User, Printer, Copy, X, MapPin
 } from 'lucide-react';
 
 interface CargaItem {
@@ -319,21 +318,48 @@ export default function CargasPage() {
   };
 
   return (
-    <div className="space-y-6 pb-20">
-      {/* Top Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white dark:bg-slate-800 p-6 rounded-2xl shadow-sm border border-slate-200/80 dark:border-slate-700/80">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-white flex items-center gap-3">
-            <Package className="w-7 h-7 text-brand-600 dark:text-brand-500" />
-            Central de Cargas & NF-e (ERP Coliseu)
-          </h1>
-          <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
-            Notas fiscais sincronizadas do Firebird (com Chave XML e Itens da Nota) aguardando despacho em CT-e/MDF-e.
-          </p>
+    <div className="space-y-4 pb-20">
+      {/* Top Header Compacto */}
+      <div className="bg-white dark:bg-slate-800 px-6 py-5 rounded-2xl border border-slate-200/80 dark:border-slate-700/80 flex flex-col xl:flex-row xl:items-center justify-between gap-4">
+        <div className="flex items-center gap-5">
+          <div>
+            <h1 className="text-xl font-bold tracking-tight text-slate-900 dark:text-white flex items-center gap-2.5">
+              <Package className="w-6 h-6 text-brand-600 dark:text-brand-500" />
+              Central de Cargas & NF-e
+            </h1>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+              Notas fiscais do ERP Coliseu prontas para despacho em CT-e ou MDF-e
+            </p>
+          </div>
+
+          {/* Status inline do Worker */}
+          <div className="hidden lg:flex items-center gap-4 pl-5 border-l border-slate-200 dark:border-slate-700">
+            <div>
+              <span className="text-[10px] font-medium text-slate-400 uppercase block leading-none">ERP</span>
+              <span className={`text-xs font-bold mt-0.5 inline-flex items-center gap-1.5 ${
+                hbInfo?.status === 'OK' ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'
+              }`}>
+                <span className={`w-1.5 h-1.5 rounded-full ${hbInfo?.status === 'OK' ? 'bg-emerald-500' : 'bg-amber-500'}`} />
+                {hbInfo?.status === 'OK' ? 'Online' : 'Aguardando'}
+              </span>
+            </div>
+            <div>
+              <span className="text-[10px] font-medium text-slate-400 uppercase block leading-none">Notas Sync</span>
+              <span className="text-xs font-bold text-slate-900 dark:text-white mt-0.5 block tabular-nums">
+                {(getSyncInfo('dash_cargas')?.registros || cargas.length || 0).toLocaleString('pt-BR')}
+              </span>
+            </div>
+            <div>
+              <span className="text-[10px] font-medium text-slate-400 uppercase block leading-none">Clientes Sync</span>
+              <span className="text-xs font-bold text-slate-900 dark:text-white mt-0.5 block tabular-nums">
+                {(getSyncInfo('dash_clientes')?.registros || 0).toLocaleString('pt-BR')}
+              </span>
+            </div>
+          </div>
         </div>
 
         {selectedIds.length > 0 && (
-          <div className="flex flex-wrap items-center gap-2.5">
+          <div className="flex flex-wrap items-center gap-2.5 shrink-0">
             <button
               onClick={() => setModalOpen(true)}
               className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-xs sm:text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 shadow-sm transition-all"
@@ -352,47 +378,6 @@ export default function CargasPage() {
             </button>
           </div>
         )}
-      </div>
-
-      {/* Quadro de Sincronismo do Transporte */}
-      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
-        <div className="bg-white dark:bg-slate-800 p-3.5 rounded-xl border border-slate-200/80 dark:border-slate-700/80 flex items-center justify-between">
-          <div>
-            <span className="text-[11px] font-medium text-slate-400 uppercase block">Worker ERP</span>
-            <span className={`text-sm font-bold ${hbInfo?.status === 'OK' ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'}`}>
-              {hbInfo?.status === 'OK' ? '🟢 Online' : '🟡 Aguardando'}
-            </span>
-          </div>
-          <CheckCircle2 className={`w-5 h-5 ${hbInfo?.status === 'OK' ? 'text-emerald-500' : 'text-slate-300'}`} />
-        </div>
-
-        <div className="bg-white dark:bg-slate-800 p-3.5 rounded-xl border border-slate-200/80 dark:border-slate-700/80">
-          <span className="text-[11px] font-medium text-slate-400 uppercase block">Clientes Sync</span>
-          <span className="text-base font-bold text-slate-900 dark:text-white">
-            {(getSyncInfo('dash_clientes')?.registros || 0).toLocaleString('pt-BR')}
-          </span>
-        </div>
-
-        <div className="bg-white dark:bg-slate-800 p-3.5 rounded-xl border border-slate-200/80 dark:border-slate-700/80">
-          <span className="text-[11px] font-medium text-slate-400 uppercase block">Produtos Sync</span>
-          <span className="text-base font-bold text-slate-900 dark:text-white">
-            {(getSyncInfo('dash_produtos')?.registros || 0).toLocaleString('pt-BR')}
-          </span>
-        </div>
-
-        <div className="bg-white dark:bg-slate-800 p-3.5 rounded-xl border border-slate-200/80 dark:border-slate-700/80">
-          <span className="text-[11px] font-medium text-slate-400 uppercase block">Notas Fiscais (NF-e)</span>
-          <span className="text-base font-bold text-brand-600 dark:text-brand-400">
-            {(getSyncInfo('dash_cargas')?.registros || cargas.length || 0).toLocaleString('pt-BR')}
-          </span>
-        </div>
-
-        <div className="bg-white dark:bg-slate-800 p-3.5 rounded-xl border border-slate-200/80 dark:border-slate-700/80">
-          <span className="text-[11px] font-medium text-slate-400 uppercase block">Itens de Nota Sync</span>
-          <span className="text-base font-bold text-slate-900 dark:text-white">
-            {(getSyncInfo('dash_vendas_itens')?.registros || 0).toLocaleString('pt-BR')}
-          </span>
-        </div>
       </div>
 
       {/* Barra de Filtros e Busca */}
@@ -515,15 +500,16 @@ export default function CargasPage() {
                       className="w-4 h-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500"
                     />
                   </th>
-                  <th className="px-4 py-3.5">NF-e / Série</th>
-                  <th className="px-4 py-3.5">Chave XML</th>
-                  <th className="px-4 py-3.5">Data Emissão</th>
-                  <th className="px-4 py-3.5">Destinatário (Cliente)</th>
-                  <th className="px-4 py-3.5">Destino (Cidade/UF)</th>
-                  <th className="px-4 py-3.5">Peso</th>
-                  <th className="px-4 py-3.5">Valor da NF</th>
-                  <th className="px-4 py-3.5">Status</th>
-                  <th className="px-4 py-3.5 text-right">Ações</th>
+                  <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60">NF-e / Série</th>
+                  <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60">Chave XML</th>
+                  <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60">Data Emissão</th>
+                  <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60">Origem</th>
+                  <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60">Destinatário (Cliente)</th>
+                  <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60">Destino (Cidade/UF)</th>
+                  <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60 text-right">Peso</th>
+                  <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60 text-right">Valor da NF</th>
+                  <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60">Status</th>
+                  <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60 text-right">Ações</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-700/60 text-xs">
@@ -549,11 +535,11 @@ export default function CargasPage() {
                             className="w-4 h-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500"
                           />
                         </td>
-                        <td className="px-4 py-3 font-semibold text-slate-900 dark:text-white whitespace-nowrap">
+                        <td className="px-4 py-3 font-semibold text-slate-900 dark:text-white whitespace-nowrap border-l border-slate-200 dark:border-slate-700/60">
                           NF-e {carga.numero || 'S/N'}
                           {carga.serie && <span className="text-[10px] text-slate-400 font-normal ml-1">(Série {carga.serie})</span>}
                         </td>
-                        <td className="px-4 py-3 font-mono text-[11px] text-slate-500 dark:text-slate-400 max-w-[200px]">
+                        <td className="px-4 py-3 font-mono text-[11px] text-slate-500 dark:text-slate-400 max-w-[200px] border-l border-slate-200 dark:border-slate-700/60">
                           <div className="flex items-center gap-1.5">
                             <span className="truncate" title={carga.chave_acesso}>
                               {carga.chave_acesso || '—'}
@@ -569,22 +555,25 @@ export default function CargasPage() {
                             )}
                           </div>
                         </td>
-                        <td className="px-4 py-3 text-slate-600 dark:text-slate-400 whitespace-nowrap">
+                        <td className="px-4 py-3 text-slate-600 dark:text-slate-400 whitespace-nowrap border-l border-slate-200 dark:border-slate-700/60">
                           {carga.data_emissao ? new Date(carga.data_emissao).toLocaleDateString('pt-BR') : '—'}
                         </td>
-                        <td className="px-4 py-3 text-slate-900 dark:text-white font-medium max-w-[200px] truncate" title={carga.destinatario_nome}>
+                        <td className="px-4 py-3 text-slate-600 dark:text-slate-400 whitespace-nowrap border-l border-slate-200 dark:border-slate-700/60">
+                          {carga.remetente_municipio || '—'}/{carga.remetente_uf || ''}
+                        </td>
+                        <td className="px-4 py-3 text-slate-900 dark:text-white font-medium max-w-[200px] truncate border-l border-slate-200 dark:border-slate-700/60" title={carga.destinatario_nome}>
                           {carga.destinatario_nome || 'Consumidor'}
                         </td>
-                        <td className="px-4 py-3 text-slate-600 dark:text-slate-400 whitespace-nowrap">
+                        <td className="px-4 py-3 text-slate-600 dark:text-slate-400 whitespace-nowrap border-l border-slate-200 dark:border-slate-700/60">
                           {carga.destinatario_municipio || '—'}/{carga.destinatario_uf || ''}
                         </td>
-                        <td className="px-4 py-3 text-slate-700 dark:text-slate-300 tabular-nums whitespace-nowrap">
+                        <td className="px-4 py-3 text-slate-700 dark:text-slate-300 tabular-nums whitespace-nowrap text-right border-l border-slate-200 dark:border-slate-700/60">
                           {Number(carga.peso_bruto || 0).toLocaleString('pt-BR')} kg
                         </td>
-                        <td className="px-4 py-3 font-semibold text-slate-900 dark:text-white tabular-nums whitespace-nowrap">
+                        <td className="px-4 py-3 font-semibold text-slate-900 dark:text-white tabular-nums whitespace-nowrap text-right border-l border-slate-200 dark:border-slate-700/60">
                           R$ {Number(carga.valor_total || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
                         </td>
-                        <td className="px-4 py-3 whitespace-nowrap">
+                        <td className="px-4 py-3 whitespace-nowrap border-l border-slate-200 dark:border-slate-700/60">
                           <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
                             carga.status === 'PENDENTE'
                               ? 'bg-amber-100 text-amber-800 dark:bg-amber-950/50 dark:text-amber-300'
@@ -593,7 +582,7 @@ export default function CargasPage() {
                             {carga.status}
                           </span>
                         </td>
-                        <td className="px-4 py-3 text-right whitespace-nowrap space-x-1.5" onClick={e => e.stopPropagation()}>
+                        <td className="px-4 py-3 text-right whitespace-nowrap space-x-1.5 border-l border-slate-200 dark:border-slate-700/60" onClick={e => e.stopPropagation()}>
                           {itens.length > 0 && (
                             <button
                               onClick={e => toggleExpandItems(e, carga.id)}
@@ -618,7 +607,7 @@ export default function CargasPage() {
                       {/* Linha expansível com itens da nota fiscal */}
                       {isExpanded && (
                         <tr className="bg-slate-50/70 dark:bg-slate-900/40">
-                          <td colSpan={10} className="px-6 py-3 border-t border-slate-100 dark:border-slate-800">
+                          <td colSpan={11} className="px-6 py-3 border-t border-slate-100 dark:border-slate-800">
                             <div className="text-xs font-semibold text-slate-500 mb-2 flex items-center gap-1.5">
                               <Package className="w-3.5 h-3.5 text-brand-600" />
                               Itens da NF-e {carga.numero}: {itens.length} produto(s) sincronizado(s)
@@ -759,26 +748,88 @@ export default function CargasPage() {
         </div>
       )}
 
-      {/* Modal de Criação de CT-e em Lote */}
+      {/* Modal de Criação de CT-e em Lote - Amplo com Conferência das Notas */}
       {modalOpen && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-white dark:bg-slate-800 w-full max-w-lg rounded-2xl p-6 shadow-xl border border-slate-200 dark:border-slate-700">
-            <h2 className="text-lg font-bold text-slate-900 dark:text-white flex items-center gap-2">
-              <Truck className="w-5 h-5 text-brand-600" />
-              Emitir Conhecimento de Transporte (CT-e)
-            </h2>
-            <p className="text-xs text-slate-500 mt-1">
-              Agrupando {selecionadas.length} nota(s) fiscal(is) selecionada(s).
-            </p>
-
-            <div className="my-4 p-4 rounded-xl bg-slate-50 dark:bg-slate-900/50 border border-slate-200/80 dark:border-slate-700/80 text-xs space-y-1.5">
-              <div className="flex justify-between">
-                <span className="text-slate-500">Valor Total da Carga:</span>
-                <span className="font-semibold text-slate-900 dark:text-white">R$ {totalValorCarga.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</span>
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white dark:bg-slate-800 w-full max-w-4xl rounded-3xl p-6 sm:p-8 shadow-2xl border border-slate-200 dark:border-slate-700 my-8 max-h-[92vh] flex flex-col">
+            <div className="flex items-start justify-between pb-4 border-b border-slate-100 dark:border-slate-700/60 shrink-0">
+              <div>
+                <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-blue-50 dark:bg-blue-950/50 text-blue-700 dark:text-blue-300 text-xs font-semibold mb-1.5 border border-blue-200 dark:border-blue-800/40">
+                  <FileText className="w-3.5 h-3.5 text-blue-600" />
+                  Conhecimento de Transporte Eletrônico (CT-e 4.00)
+                </div>
+                <h2 className="text-2xl font-bold text-slate-900 dark:text-white tracking-tight">
+                  Conferência e Emissão de CT-e
+                </h2>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                  Confira as notas fiscais selecionadas do lote antes de transmitir para a SEFAZ.
+                </p>
               </div>
-              <div className="flex justify-between">
-                <span className="text-slate-500">Peso Total Consolidado:</span>
-                <span className="font-semibold text-slate-900 dark:text-white">{totalPeso.toLocaleString('pt-BR')} kg</span>
+              <button
+                onClick={() => setModalOpen(false)}
+                className="p-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Resumo Analítico do Lote de CT-e */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 bg-slate-50 dark:bg-slate-900/40 p-4 rounded-2xl border border-slate-100 dark:border-slate-800 my-4 shrink-0">
+              <div>
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Notas no Conhecimento</span>
+                <p className="text-xl font-black text-slate-900 dark:text-white mt-0.5">
+                  {selecionadas.length} NF-e selecionada(s)
+                </p>
+              </div>
+              <div>
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Valor Total da Carga</span>
+                <p className="text-xl font-black text-emerald-600 dark:text-emerald-400 mt-0.5 tabular-nums">
+                  R$ {totalValorCarga.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                </p>
+              </div>
+              <div>
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Peso Total Consolidado</span>
+                <p className="text-xl font-black text-blue-600 dark:text-blue-400 mt-0.5 tabular-nums">
+                  {totalPeso.toLocaleString('pt-BR')} kg
+                </p>
+              </div>
+            </div>
+
+            {/* Tabela de Conferência das Notas Fiscais no CT-e */}
+            <div className="border border-slate-200/80 dark:border-slate-700 rounded-2xl overflow-hidden mb-4 shrink-0">
+              <div className="px-4 py-2 bg-slate-50 dark:bg-slate-900 text-xs font-bold text-slate-700 dark:text-slate-300 flex items-center justify-between border-b border-slate-200/60 dark:border-slate-700">
+                <span>Notas Fiscais Vinculadas a este CT-e ({selecionadas.length})</span>
+                <span className="text-[11px] text-slate-400 font-normal">Clique no X para retirar alguma nota antes de emitir</span>
+              </div>
+              <div className="max-h-36 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800 text-xs">
+                {selecionadas.map(c => (
+                  <div key={c.id} className="p-2.5 flex items-center justify-between gap-3 hover:bg-slate-50/50 dark:hover:bg-slate-800/40">
+                    <div className="min-w-0 flex-1">
+                      <p className="font-bold text-slate-900 dark:text-white truncate">
+                        NF-e nº {c.numero} (Série {c.serie}) · {c.destinatario_nome}
+                      </p>
+                      <p className="text-[10px] font-mono text-slate-400 truncate">
+                        {c.destinatario_municipio}/{c.destinatario_uf} · Chave: {c.chave_acesso}
+                      </p>
+                    </div>
+                    <div className="text-right shrink-0 pr-2">
+                      <p className="font-bold text-slate-900 dark:text-white">
+                        R$ {Number(c.valor_total || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                      </p>
+                      <p className="text-[10px] text-slate-400">
+                        {Number(c.peso_bruto || 0).toLocaleString('pt-BR')} kg
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => toggleSelect(c.id)}
+                      className="p-1 text-slate-400 hover:text-red-600 rounded-lg transition-colors"
+                      title="Remover deste CT-e"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                ))}
               </div>
             </div>
 

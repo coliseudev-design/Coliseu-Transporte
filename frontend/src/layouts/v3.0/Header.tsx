@@ -163,7 +163,7 @@ export default function Header() {
                       ? 'bg-white text-[#1E3A8A] border-2 border-[#1E3A8A] shadow-md font-black'
                       : isOpen
                       ? 'bg-white text-slate-900 border-slate-300 shadow-sm'
-                      : 'bg-slate-50/80 text-slate-700 border-slate-200/80 hover:bg-white hover:text-slate-900 hover:border-slate-300 hover:shadow-md hover:-translate-y-0.5'
+                      : 'bg-white text-slate-700 border border-slate-200 hover:border-slate-300 hover:text-slate-900 hover:shadow-sm hover:-translate-y-0.5'
                   )}
                 >
                   {/* Ícone colorido em um badge suave */}
