@@ -12,27 +12,45 @@ const TransporteService = require('../services/transporteService');
 
 router.get('/cargas', async (req, res) => {
     const tenantId = req.tenant.id;
-    const { status, search, limit = 50, offset = 0 } = req.query;
+    const { status, search, cliente, data_inicio, data_fim, limit = 200, offset = 0 } = req.query;
 
     try {
         let sql = `SELECT * FROM dash_cargas WHERE tenant_id = $1`;
         const params = [tenantId];
 
-        if (status) {
+        if (status && status !== 'TODAS') {
             params.push(status.toUpperCase());
             sql += ` AND status = $${params.length}`;
         }
 
+        if (cliente) {
+            params.push(`%${cliente}%`);
+            sql += ` AND (destinatario_nome ILIKE $${params.length} OR destinatario_documento ILIKE $${params.length})`;
+        }
+
+        if (data_inicio) {
+            params.push(`${data_inicio} 00:00:00`);
+            sql += ` AND data_emissao >= $${params.length}::timestamptz`;
+        }
+
+        if (data_fim) {
+            params.push(`${data_fim} 23:59:59`);
+            sql += ` AND data_emissao <= $${params.length}::timestamptz`;
+        }
+
         if (search) {
-            params.push(`%${search}%`);
+            params.push(`%${search.trim()}%`);
             sql += ` AND (chave_acesso ILIKE $${params.length} OR numero ILIKE $${params.length} OR remetente_nome ILIKE $${params.length} OR destinatario_nome ILIKE $${params.length})`;
         }
+
+        // Contagem filtrada
+        const countSql = sql.replace('SELECT *', 'SELECT COUNT(*)::int as total');
+        const countRes = await db.query(countSql, params);
 
         sql += ` ORDER BY data_emissao DESC, id DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
         params.push(parseInt(limit, 10), parseInt(offset, 10));
 
         const { rows } = await db.query(sql, params);
-        const countRes = await db.query(`SELECT COUNT(*)::int as total FROM dash_cargas WHERE tenant_id = $1`, [tenantId]);
 
         return res.json({
             success: true,
@@ -42,6 +60,43 @@ router.get('/cargas', async (req, res) => {
     } catch (err) {
         logger.error('[Transporte API] Erro ao listar cargas:', err.message);
         return res.status(500).json({ error: 'Erro ao buscar cargas' });
+    }
+});
+
+/**
+ * Endpoint para gerar/redirecionar para o DANFE da NF-e com base na Chave de Acesso.
+ * Usa provedor seguro de DANFE ou URL homologada.
+ */
+router.get('/cargas/:id/danfe', async (req, res) => {
+    const tenantId = req.tenant.id;
+    const id = req.params.id;
+
+    try {
+        const { rows } = await db.query(
+            `SELECT chave_acesso, numero, serie, dados_nfe FROM dash_cargas WHERE id = $1 AND tenant_id = $2`,
+            [id, tenantId]
+        );
+
+        if (rows.length === 0) {
+            return res.status(404).json({ error: 'Carga/NF-e não encontrada' });
+        }
+
+        const chave = rows[0].chave_acesso;
+        if (!chave || chave.length < 44) {
+            return res.status(400).json({ error: 'Chave de acesso inválida ou ausente para esta nota' });
+        }
+
+        // URL oficial de consulta/impressão de DANFE direto por chave de 44 dígitos
+        const danfeUrl = `https://meudanfe.com.br/danfe?chave=${chave}`;
+
+        return res.json({
+            success: true,
+            chave,
+            numero: rows[0].numero,
+            danfe_url: danfeUrl
+        });
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
     }
 });
 

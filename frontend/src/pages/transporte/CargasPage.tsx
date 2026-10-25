@@ -1,9 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import api from '../../services/api';
 import {
   Package, Truck, ArrowRight, CheckCircle2, Clock,
-  Search, Filter, AlertCircle, FileText, ChevronRight
+  Search, Filter, AlertCircle, FileText, ChevronRight,
+  List, LayoutGrid, Calendar, User, Printer, Eye, Copy, X
 } from 'lucide-react';
 
 interface CargaItem {
@@ -44,10 +45,20 @@ interface Carga {
 
 export default function CargasPage() {
   const [search, setSearch] = useState('');
+  const [cliente, setCliente] = useState('');
+  const [dataInicio, setDataInicio] = useState('');
+  const [dataFim, setDataFim] = useState('');
+  const [statusFiltro, setStatusFiltro] = useState('TODAS');
+  const [viewMode, setViewMode] = useState<'lista' | 'cards'>('lista');
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
   const [expandedItemsIds, setExpandedItemsIds] = useState<number[]>([]);
   const [modalOpen, setModalOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+
+  // Modal de DANFE
+  const [danfeUrl, setDanfeUrl] = useState<string | null>(null);
+  const [danfeChave, setDanfeChave] = useState('');
+  const [danfeNumero, setDanfeNumero] = useState('');
 
   // Formulário de rateio/emissão rápida de CT-e
   const [valorFrete, setValorFrete] = useState('');
@@ -60,9 +71,18 @@ export default function CargasPage() {
   const [codigoMunFim, setCodigoMunFim] = useState('');
 
   const { data, isLoading, refetch } = useQuery({
-    queryKey: ['cargas', search],
+    queryKey: ['cargas', search, cliente, dataInicio, dataFim, statusFiltro],
     queryFn: async () => {
-      const res = await api.get('/transporte/cargas', { params: { search } });
+      const res = await api.get('/transporte/cargas', {
+        params: {
+          search: search || undefined,
+          cliente: cliente || undefined,
+          data_inicio: dataInicio || undefined,
+          data_fim: dataFim || undefined,
+          status: statusFiltro && statusFiltro !== 'TODAS' ? statusFiltro : undefined,
+          limit: 500
+        }
+      });
       return res.data;
     }
   });
@@ -122,6 +142,30 @@ export default function CargasPage() {
     } else {
       setSelectedIds(cargas.map(c => c.id));
     }
+  };
+
+  const handleVisualizarDanfe = async (carga: Carga) => {
+    if (!carga.chave_acesso || carga.chave_acesso.length < 44) {
+      alert('Chave XML da NF-e inválida ou ausente para gerar o DANFE.');
+      return;
+    }
+    try {
+      const res = await api.get(`/transporte/cargas/${carga.id}/danfe`);
+      if (res.data?.danfe_url) {
+        window.open(res.data.danfe_url, '_blank', 'noopener,noreferrer');
+      } else {
+        window.open(`https://meudanfe.com.br/danfe?chave=${carga.chave_acesso}`, '_blank');
+      }
+    } catch {
+      // Fallback direto por chave oficial
+      window.open(`https://meudanfe.com.br/danfe?chave=${carga.chave_acesso}`, '_blank');
+    }
+  };
+
+  const handleCopiarChave = (e: React.MouseEvent, chave: string) => {
+    e.stopPropagation();
+    navigator.clipboard.writeText(chave);
+    alert('Chave XML copiada para a área de transferência!');
   };
 
   const handleCriarCte = async (e: React.FormEvent) => {
@@ -224,26 +268,98 @@ export default function CargasPage() {
       </div>
 
       {/* Barra de Filtros e Busca */}
-      <div className="flex flex-col sm:flex-row gap-3">
-        <div className="relative flex-1">
-          <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
-          <input
-            type="text"
-            placeholder="Buscar por chave XML da NF-e, número, remetente ou destinatário..."
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-            className="w-full pl-10 pr-4 py-2 text-sm bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-brand-500 text-slate-900 dark:text-white"
-          />
+      <div className="bg-white dark:bg-slate-800 p-4 rounded-2xl border border-slate-200/80 dark:border-slate-700/80 space-y-3">
+        <div className="flex flex-col lg:flex-row gap-3">
+          <div className="relative flex-1">
+            <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+            <input
+              type="text"
+              placeholder="Buscar por chave XML da NF-e, número, remetente ou destinatário..."
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              className="w-full pl-10 pr-4 py-2 text-sm bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-brand-500 text-slate-900 dark:text-white"
+            />
+          </div>
+
+          <div className="relative">
+            <User className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+            <input
+              type="text"
+              placeholder="Filtrar por cliente / destinatário..."
+              value={cliente}
+              onChange={e => setCliente(e.target.value)}
+              className="w-full lg:w-64 pl-10 pr-4 py-2 text-sm bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-brand-500 text-slate-900 dark:text-white"
+            />
+          </div>
         </div>
-        <button
-          onClick={selectAll}
-          className="px-4 py-2 text-sm font-medium border border-slate-200 dark:border-slate-700 rounded-xl bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 transition-colors"
-        >
-          {selectedIds.length === cargas.length && cargas.length > 0 ? 'Desmarcar Todas' : 'Selecionar Todas'}
-        </button>
+
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-2">
+            <Calendar className="w-4 h-4 text-slate-400" />
+            <input
+              type="date"
+              value={dataInicio}
+              onChange={e => setDataInicio(e.target.value)}
+              className="px-3 py-2 text-xs bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-700 dark:text-slate-300"
+            />
+            <span className="text-xs text-slate-400">até</span>
+            <input
+              type="date"
+              value={dataFim}
+              onChange={e => setDataFim(e.target.value)}
+              className="px-3 py-2 text-xs bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-700 dark:text-slate-300"
+            />
+          </div>
+
+          <select
+            value={statusFiltro}
+            onChange={e => setStatusFiltro(e.target.value)}
+            className="px-3 py-2 text-xs bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-700 dark:text-slate-300"
+          >
+            <option value="TODAS">Todos os Status</option>
+            <option value="PENDENTE">Pendentes</option>
+            <option value="EM_CTE">Em CT-e</option>
+            <option value="EM_MDFE">Em MDF-e</option>
+            <option value="DESPACHADA">Despachadas</option>
+          </select>
+
+          <button
+            onClick={() => { setSearch(''); setCliente(''); setDataInicio(''); setDataFim(''); setStatusFiltro('TODAS'); }}
+            className="px-3 py-2 text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-xl transition-colors flex items-center gap-1.5"
+          >
+            <X className="w-3.5 h-3.5" />
+            Limpar Filtros
+          </button>
+
+          <div className="flex-1" />
+
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setViewMode('lista')}
+              className={`p-2 rounded-xl transition-colors ${viewMode === 'lista' ? 'bg-brand-600 text-white' : 'bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300'}`}
+              title="Visualizar em Lista (tabela)"
+            >
+              <List className="w-4 h-4" />
+            </button>
+            <button
+              onClick={() => setViewMode('cards')}
+              className={`p-2 rounded-xl transition-colors ${viewMode === 'cards' ? 'bg-brand-600 text-white' : 'bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300'}`}
+              title="Visualizar em Cards"
+            >
+              <LayoutGrid className="w-4 h-4" />
+            </button>
+
+            <button
+              onClick={selectAll}
+              className="px-4 py-2 text-sm font-medium border border-slate-200 dark:border-slate-700 rounded-xl bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 transition-colors"
+            >
+              {selectedIds.length === cargas.length && cargas.length > 0 ? 'Desmarcar Todas' : 'Selecionar Todas'}
+            </button>
+          </div>
+        </div>
       </div>
 
-      {/* Lista de Cargas em Cards Modernos */}
+      {/* Lista de Cargas */}
       {isLoading ? (
         <div className="p-12 text-center text-slate-400 dark:text-slate-500 text-sm">
           Carregando notas fiscais do ERP...
@@ -251,12 +367,159 @@ export default function CargasPage() {
       ) : cargas.length === 0 ? (
         <div className="bg-white dark:bg-slate-800 p-12 text-center rounded-2xl border border-dashed border-slate-200 dark:border-slate-700">
           <Package className="w-12 h-12 mx-auto text-slate-400 mb-3" />
-          <h3 className="text-base font-semibold text-slate-800 dark:text-slate-200">Nenhuma carga aguardando emissão</h3>
+          <h3 className="text-base font-semibold text-slate-800 dark:text-slate-200">Nenhuma nota fiscal encontrada</h3>
           <p className="text-sm text-slate-500 dark:text-slate-400 mt-1 max-w-sm mx-auto">
-            Assim que o Worker sincronizar as notas do ERP Firebird, elas aparecerão listadas aqui para emissão rápida.
+            Tente ajustar os filtros de período, cliente ou busca. O Worker continuará sincronizando novas notas automaticamente.
           </p>
         </div>
+      ) : viewMode === 'lista' ? (
+        /* MODO LISTA (TABELA OPERACIONAL DENSIDADE PRO - PADRÃO) */
+        <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200/80 dark:border-slate-700/80 overflow-hidden shadow-sm">
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-sm">
+              <thead className="bg-slate-50 dark:bg-slate-900/50 text-[11px] font-semibold text-slate-500 border-b border-slate-100 dark:border-slate-700/60 uppercase tracking-wider">
+                <tr>
+                  <th className="px-4 py-3.5 w-10 text-center">
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.length === cargas.length && cargas.length > 0}
+                      onChange={selectAll}
+                      className="w-4 h-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500"
+                    />
+                  </th>
+                  <th className="px-4 py-3.5">NF-e / Série</th>
+                  <th className="px-4 py-3.5">Chave XML</th>
+                  <th className="px-4 py-3.5">Data Emissão</th>
+                  <th className="px-4 py-3.5">Destinatário (Cliente)</th>
+                  <th className="px-4 py-3.5">Destino (Cidade/UF)</th>
+                  <th className="px-4 py-3.5">Peso</th>
+                  <th className="px-4 py-3.5">Valor da NF</th>
+                  <th className="px-4 py-3.5">Status</th>
+                  <th className="px-4 py-3.5 text-right">Ações</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-700/60 text-xs">
+                {cargas.map(carga => {
+                  const isSelected = selectedIds.includes(carga.id);
+                  const itens = carga.dados_nfe?.itens || [];
+                  const isExpanded = expandedItemsIds.includes(carga.id);
+                  return (
+                    <React.Fragment key={carga.id}>
+                      <tr
+                        onClick={() => toggleSelect(carga.id)}
+                        className={`cursor-pointer transition-colors ${
+                          isSelected
+                            ? 'bg-brand-50/60 dark:bg-brand-950/30'
+                            : 'hover:bg-slate-50/70 dark:hover:bg-slate-700/30'
+                        }`}
+                      >
+                        <td className="px-4 py-3 text-center" onClick={e => e.stopPropagation()}>
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => toggleSelect(carga.id)}
+                            className="w-4 h-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500"
+                          />
+                        </td>
+                        <td className="px-4 py-3 font-semibold text-slate-900 dark:text-white whitespace-nowrap">
+                          NF-e {carga.numero || 'S/N'}
+                          {carga.serie && <span className="text-[10px] text-slate-400 font-normal ml-1">(Série {carga.serie})</span>}
+                        </td>
+                        <td className="px-4 py-3 font-mono text-[11px] text-slate-500 dark:text-slate-400 max-w-[200px]">
+                          <div className="flex items-center gap-1.5">
+                            <span className="truncate" title={carga.chave_acesso}>
+                              {carga.chave_acesso || '—'}
+                            </span>
+                            {carga.chave_acesso && (
+                              <button
+                                onClick={e => handleCopiarChave(e, carga.chave_acesso)}
+                                title="Copiar Chave"
+                                className="p-1 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 shrink-0"
+                              >
+                                <Copy className="w-3 h-3" />
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                        <td className="px-4 py-3 text-slate-600 dark:text-slate-400 whitespace-nowrap">
+                          {carga.data_emissao ? new Date(carga.data_emissao).toLocaleDateString('pt-BR') : '—'}
+                        </td>
+                        <td className="px-4 py-3 text-slate-900 dark:text-white font-medium max-w-[200px] truncate" title={carga.destinatario_nome}>
+                          {carga.destinatario_nome || 'Consumidor'}
+                        </td>
+                        <td className="px-4 py-3 text-slate-600 dark:text-slate-400 whitespace-nowrap">
+                          {carga.destinatario_municipio || '—'}/{carga.destinatario_uf || ''}
+                        </td>
+                        <td className="px-4 py-3 text-slate-700 dark:text-slate-300 tabular-nums whitespace-nowrap">
+                          {Number(carga.peso_bruto || 0).toLocaleString('pt-BR')} kg
+                        </td>
+                        <td className="px-4 py-3 font-semibold text-slate-900 dark:text-white tabular-nums whitespace-nowrap">
+                          R$ {Number(carga.valor_total || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                        </td>
+                        <td className="px-4 py-3 whitespace-nowrap">
+                          <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
+                            carga.status === 'PENDENTE'
+                              ? 'bg-amber-100 text-amber-800 dark:bg-amber-950/50 dark:text-amber-300'
+                              : 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-300'
+                          }`}>
+                            {carga.status}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 text-right whitespace-nowrap space-x-1.5" onClick={e => e.stopPropagation()}>
+                          {itens.length > 0 && (
+                            <button
+                              onClick={e => toggleExpandItems(e, carga.id)}
+                              title="Ver itens da nota"
+                              className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-200 text-[11px] font-medium transition-colors"
+                            >
+                              <Package className="w-3 h-3" />
+                              {itens.length} itens
+                            </button>
+                          )}
+                          <button
+                            onClick={() => handleVisualizarDanfe(carga)}
+                            title="Visualizar / Imprimir DANFE oficial"
+                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-brand-50 dark:bg-brand-950/50 text-brand-700 dark:text-brand-300 border border-brand-200 dark:border-brand-800 hover:bg-brand-100 text-[11px] font-semibold transition-colors"
+                          >
+                            <Printer className="w-3 h-3" />
+                            DANFE
+                          </button>
+                        </td>
+                      </tr>
+
+                      {/* Linha expansível com itens da nota fiscal */}
+                      {isExpanded && (
+                        <tr className="bg-slate-50/70 dark:bg-slate-900/40">
+                          <td colSpan={10} className="px-6 py-3 border-t border-slate-100 dark:border-slate-800">
+                            <div className="text-xs font-semibold text-slate-500 mb-2 flex items-center gap-1.5">
+                              <Package className="w-3.5 h-3.5 text-brand-600" />
+                              Itens da NF-e {carga.numero}: {itens.length} produto(s) sincronizado(s)
+                            </div>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 max-h-40 overflow-y-auto pr-1">
+                              {itens.map((it, idx) => (
+                                <div key={idx} className="p-2 rounded-lg bg-white dark:bg-slate-800 border border-slate-200/60 dark:border-slate-700/60 flex justify-between items-center text-[11px]">
+                                  <div className="truncate mr-2">
+                                    <p className="font-medium text-slate-900 dark:text-slate-100 truncate">{it.descricao}</p>
+                                    <p className="text-[10px] text-slate-400 font-mono">Qtd: {Number(it.quantidade || 0)} {it.unidade || 'UN'}</p>
+                                  </div>
+                                  <span className="font-semibold text-slate-900 dark:text-white shrink-0 tabular-nums">
+                                    R$ {Number(it.valor_total || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
       ) : (
+        /* MODO CARDS */
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {cargas.map(carga => {
             const isSelected = selectedIds.includes(carga.id);
@@ -288,11 +551,20 @@ export default function CargasPage() {
 
                 {/* Chave de Acesso XML 44 dígitos */}
                 {carga.chave_acesso && (
-                  <div className="mt-2.5 px-2.5 py-1.5 rounded-lg bg-slate-50 dark:bg-slate-900/60 border border-slate-200/60 dark:border-slate-700/60">
-                    <span className="text-[10px] uppercase tracking-wider text-slate-400 block">Chave XML NF-e</span>
-                    <span className="font-mono text-[11px] text-slate-700 dark:text-slate-300 break-all select-all">
-                      {carga.chave_acesso}
-                    </span>
+                  <div className="mt-2.5 px-2.5 py-1.5 rounded-lg bg-slate-50 dark:bg-slate-900/60 border border-slate-200/60 dark:border-slate-700/60 flex items-center justify-between">
+                    <div className="truncate mr-2">
+                      <span className="text-[10px] uppercase tracking-wider text-slate-400 block">Chave XML NF-e</span>
+                      <span className="font-mono text-[11px] text-slate-700 dark:text-slate-300 break-all select-all truncate block">
+                        {carga.chave_acesso}
+                      </span>
+                    </div>
+                    <button
+                      onClick={e => handleCopiarChave(e, carga.chave_acesso)}
+                      title="Copiar chave"
+                      className="p-1 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 shrink-0"
+                    >
+                      <Copy className="w-3.5 h-3.5" />
+                    </button>
                   </div>
                 )}
 
@@ -339,10 +611,19 @@ export default function CargasPage() {
                 )}
 
                 <div className="mt-4 pt-3 border-t border-slate-100 dark:border-slate-700/60 flex items-center justify-between text-xs">
-                  <span className="text-slate-500">{Number(carga.peso_bruto || 0).toLocaleString('pt-BR')} kg</span>
-                  <span className="font-bold text-slate-900 dark:text-slate-100">
-                    R$ {Number(carga.valor_total || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
-                  </span>
+                  <span className="text-slate-500 font-semibold">{Number(carga.peso_bruto || 0).toLocaleString('pt-BR')} kg</span>
+                  <div className="flex items-center gap-2">
+                    <span className="font-bold text-slate-900 dark:text-slate-100">
+                      R$ {Number(carga.valor_total || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                    </span>
+                    <button
+                      onClick={e => { e.stopPropagation(); handleVisualizarDanfe(carga); }}
+                      title="Visualizar DANFE"
+                      className="p-1.5 rounded-lg bg-brand-50 text-brand-600 hover:bg-brand-100"
+                    >
+                      <Printer className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
                 </div>
               </div>
             );
@@ -477,6 +758,44 @@ export default function CargasPage() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Barra Flutuante Fixa de Totalizador quando houver notas selecionadas */}
+      {selectedIds.length > 0 && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-30 w-full max-w-2xl px-4 animate-in fade-in slide-in-from-bottom-4 duration-300">
+          <div className="bg-slate-900/95 dark:bg-slate-800/95 backdrop-blur-md text-white p-4 rounded-2xl shadow-2xl border border-slate-700/80 flex items-center justify-between gap-4">
+            <div className="flex items-center gap-4 text-xs">
+              <div className="px-3 py-1.5 rounded-xl bg-brand-600 font-bold text-sm">
+                {selectedIds.length} selecionada(s)
+              </div>
+              <div>
+                <span className="text-slate-400 block text-[10px] uppercase tracking-wider">Peso Total</span>
+                <span className="font-semibold text-white">{totalPeso.toLocaleString('pt-BR')} kg</span>
+              </div>
+              <div className="h-8 w-px bg-slate-700" />
+              <div>
+                <span className="text-slate-400 block text-[10px] uppercase tracking-wider">Valor Total NF-e</span>
+                <span className="font-bold text-emerald-400">R$ {totalValorCarga.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</span>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setSelectedIds([])}
+                className="px-3 py-2 rounded-xl text-xs text-slate-400 hover:text-white transition-colors"
+              >
+                Limpar
+              </button>
+              <button
+                onClick={() => setModalOpen(true)}
+                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs sm:text-sm font-semibold bg-brand-600 hover:bg-brand-500 text-white shadow-lg shadow-brand-600/30 transition-all"
+              >
+                <Truck className="w-4 h-4" />
+                Gerar CT-e Agora
+              </button>
+            </div>
           </div>
         </div>
       )}
