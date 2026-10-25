@@ -5,7 +5,7 @@ import {
   LayoutDashboard, Users, Headphones, Package, Network, Receipt,
   DollarSign, Settings, X, ChevronDown, HelpCircle, User,
   Trophy, FileText, Layers, Wallet, Megaphone, Shield, BrainCircuit, BarChart3, ChevronUp, ChevronRight,
-  ClipboardList, Building2, Key
+  ClipboardList, Building2, Key, Truck
 } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
 import { useSyncStatus } from '../../hooks/useSync'
