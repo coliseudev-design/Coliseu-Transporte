@@ -191,7 +191,7 @@ export default function Header() {
                 {isOpen && (
                   <>
                     <div className="fixed inset-0 z-40" onClick={() => setOpenDropdown(null)} />
-                    <div className="absolute left-0 mt-2.5 min-w-[285px] max-w-[340px] max-h-[calc(100vh-110px)] overflow-y-auto bg-slate-900/95 dark:bg-slate-950/95 border border-slate-700/80 shadow-[0_20px_50px_rgba(0,0,0,0.5)] backdrop-blur-xl rounded-2xl z-50 p-2 animate-scale-up text-left space-y-0 text-slate-100 divide-y divide-slate-800/40">
+                    <div className="absolute left-0 mt-2 min-w-[280px] max-w-[320px] max-h-[calc(100vh-100px)] overflow-y-auto bg-white/95 dark:bg-slate-900/95 border border-slate-200/80 dark:border-slate-700/80 shadow-2xl backdrop-blur-xl rounded-2xl z-50 p-2 text-left space-y-0.5 text-slate-900 dark:text-slate-100 animate-in fade-in zoom-in-95 duration-150">
                       {group.items.map((item) => {
                         const ItemIcon = item.icon
                         const isItemActive = location.pathname === item.to.split('?')[0] && (!item.to.includes('tab=') || location.search.includes(item.to.split('?')[1] || ''))
@@ -201,10 +201,10 @@ export default function Header() {
                             to={item.to}
                             onClick={() => setOpenDropdown(null)}
                             className={clsx(
-                              'flex items-center justify-between px-3 py-2 rounded-xl text-[12.5px] font-semibold transition-all duration-150 group/item my-0.5',
+                              'flex items-center justify-between px-3 py-2 rounded-xl text-[12.5px] font-semibold transition-all duration-150 group/item',
                               isItemActive
-                                ? 'bg-blue-600/30 text-blue-200 border border-blue-500/40 font-extrabold shadow-sm'
-                                : 'text-slate-200 hover:bg-slate-800/80 hover:text-white'
+                                ? 'bg-brand-500/10 text-brand-700 dark:text-brand-300 border border-brand-500/30 font-bold shadow-xs'
+                                : 'text-slate-700 dark:text-slate-200 hover:bg-slate-100/80 dark:hover:bg-slate-800/80 hover:text-slate-900 dark:hover:text-white'
                             )}
                           >
                             <div className="flex items-center gap-2.5 min-w-0">
