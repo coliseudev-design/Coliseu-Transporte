@@ -115,12 +115,11 @@ export default function Sidebar({ open, onClose }: Props) {
             </div>
           )}
 
-          {/* Grupo: Cadastros Fiscais */}
-          {renderGroupHeader('Cadastros Fiscais', ClipboardList, cadastrosOpen, () => setCadastrosOpen(!cadastrosOpen))}
+          {/* Grupo: Cadastros (ERP Coliseu) */}
+          {renderGroupHeader('Cadastros', ClipboardList, cadastrosOpen, () => setCadastrosOpen(!cadastrosOpen))}
           {cadastrosOpen && (
             <div className="space-y-0.5 pl-1">
-              {renderLink('/transporte/emitentes', 'Transportadoras (Emitentes)', Building2)}
-              {renderLink('/transporte/partes', 'Clientes & Destinatários', Users)}
+              {renderLink('/clientes', 'Clientes (ERP Coliseu)', Users)}
               {renderLink('/transporte/frota', 'Frota & Condutores', Layers)}
             </div>
           )}
@@ -139,9 +138,10 @@ export default function Sidebar({ open, onClose }: Props) {
           {renderGroupHeader('Configurações', Settings, configOpen, () => setConfigOpen(!configOpen))}
           {configOpen && (
             <div className="space-y-0.5 pl-1">
+              {renderLink('/transporte/empresa', 'Dados da Empresa (Emitente)', Building2)}
               {renderLink('/transporte/config', 'Regras Fiscais por UF', Settings)}
               {renderLink('/transporte/campos', 'Campos Dinâmicos', BrainCircuit)}
-              {renderLink('/transporte/certificados', 'Certificados Digitais', KeyRound)}
+              {renderLink('/transporte/certificados', 'Certificados Digitais A1', KeyRound)}
               {renderLink('/usuarios', 'Usuários & Permissões', Shield)}
             </div>
           )}

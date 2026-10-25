@@ -26,6 +26,7 @@ import RegrasFiscaisPage from './pages/transporte/RegrasFiscaisPage'
 import CamposDinamicosPage from './pages/transporte/CamposDinamicosPage'
 import RoteiroEntregaPage from './pages/transporte/RoteiroEntregaPage'
 import CertificadosPage from './pages/transporte/CertificadosPage'
+import DadosEmpresaPage from './pages/transporte/DadosEmpresaPage'
 
 function Protected({ children }: { children: JSX.Element }) {
   const user = useAuthStore((s) => s.user)
@@ -115,7 +116,8 @@ export default function App() {
         <Route path="transporte/mdfes" element={<MdfesPage />} />
         <Route path="transporte/contratos" element={<ContratosCiotPage />} />
         <Route path="transporte/frota" element={<FrotaPage />} />
-        <Route path="transporte/emitentes" element={<EmitentesPage />} />
+        <Route path="transporte/empresa" element={<DadosEmpresaPage />} />
+        <Route path="transporte/emitentes" element={<DadosEmpresaPage />} />
         <Route path="transporte/partes" element={<PartesPage />} />
         <Route path="transporte/relatorios" element={<RelatoriosPage />} />
         <Route path="transporte/config" element={<RegrasFiscaisPage />} />

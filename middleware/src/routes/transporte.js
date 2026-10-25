@@ -262,6 +262,8 @@ router.post('/mdfes', async (req, res) => {
         veiculo_id, veiculo_placa,
         motorista_id, motorista_cpf, motorista_nome,
         ctes_ids = [],
+        cargas_ids = [], // Suporte para NF-es diretas (Carga Própria / Varejo)
+        tipo_emitente, // '1' = Prestador de Serviço de Transporte, '2' = Carga Própria (Varejo)
         valor_carga, peso_bruto
     } = req.body;
 
@@ -269,33 +271,36 @@ router.post('/mdfes', async (req, res) => {
         let emitId = emitente_id;
         if (!emitId) {
             const em = await db.query(`SELECT id FROM dash_emitentes WHERE tenant_id = $1 AND ativo = true ORDER BY id LIMIT 1`, [tenantId]);
-            if (em.rows.length === 0) return res.status(400).json({ error: 'Cadastre uma transportadora (emitente) antes de emitir MDF-e.' });
+            if (em.rows.length === 0) return res.status(400).json({ error: 'Cadastre os dados da empresa emitente antes de gerar o MDF-e.' });
             emitId = em.rows[0].id;
         }
 
+        // Se vier com cargas_ids (NF-e do varejo), o tipo_emitente é '2' (Carga Própria)
+        const tipoEmitenteFinal = tipo_emitente || (cargas_ids.length > 0 ? '2' : '1');
         const ref = TransporteService.gerarRef('MDFE', tenantId, Date.now().toString().slice(-6));
 
         const { rows } = await db.query(
             `INSERT INTO dash_mdfes (
-                tenant_id, emitente_id, ref, status,
+                tenant_id, emitente_id, ref, status, tipo_emitente,
                 uf_inicio, uf_fim,
                 veiculo_id, veiculo_placa,
                 motorista_id, motorista_cpf, motorista_nome,
-                qtd_cte, valor_carga, peso_bruto
-             ) VALUES ($1, $2, $3, 'RASCUNHO', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                qtd_cte, qtd_nfe, valor_carga, peso_bruto
+             ) VALUES ($1, $2, $3, 'RASCUNHO', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
              RETURNING *`,
             [
-                tenantId, emitId, ref,
+                tenantId, emitId, ref, tipoEmitenteFinal,
                 uf_inicio, uf_fim,
                 veiculo_id || null, veiculo_placa,
                 motorista_id || null, motorista_cpf, motorista_nome,
-                ctes_ids.length, parseFloat(valor_carga || 0), parseFloat(peso_bruto || 0)
+                ctes_ids.length, cargas_ids.length,
+                parseFloat(valor_carga || 0), parseFloat(peso_bruto || 0)
             ]
         );
 
         const novoMdfe = rows[0];
 
-        // Vincula os CT-es selecionados ao manifesto
+        // 1. Vincula CT-es (quando for transportadora terceirizada)
         for (const cteId of ctes_ids) {
             const cteRes = await db.query(`SELECT chave_cte FROM dash_ctes WHERE id = $1 AND tenant_id = $2`, [cteId, tenantId]);
             if (cteRes.rows.length > 0 && cteRes.rows[0].chave_cte) {
@@ -303,6 +308,22 @@ router.post('/mdfes', async (req, res) => {
                     `INSERT INTO dash_mdfe_documentos (tenant_id, mdfe_id, tipo_documento, chave)
                      VALUES ($1, $2, 'CTE', $3)`,
                     [tenantId, novoMdfe.id, cteRes.rows[0].chave_cte]
+                );
+            }
+        }
+
+        // 2. Vincula NF-es diretas (quando for Varejo / Carga Própria)
+        for (const cargaId of cargas_ids) {
+            const cargaRes = await db.query(`SELECT chave_acesso, destinatario_municipio FROM dash_cargas WHERE id = $1 AND tenant_id = $2`, [cargaId, tenantId]);
+            if (cargaRes.rows.length > 0 && cargaRes.rows[0].chave_acesso) {
+                await db.query(
+                    `INSERT INTO dash_mdfe_documentos (tenant_id, mdfe_id, tipo_documento, chave, nome_municipio_descarregamento)
+                     VALUES ($1, $2, 'NFE', $3, $4)`,
+                    [tenantId, novoMdfe.id, cargaRes.rows[0].chave_acesso, cargaRes.rows[0].destinatario_municipio]
+                );
+                await db.query(
+                    `UPDATE dash_cargas SET status = 'EM_MDFE', mdfe_id = $1 WHERE id = $2`,
+                    [novoMdfe.id, cargaId]
                 );
             }
         }
@@ -369,10 +390,68 @@ router.get('/motoristas', async (req, res) => {
 router.get('/emitentes', async (req, res) => {
     const tenantId = req.tenant.id;
     try {
-        const { rows } = await db.query(`SELECT id, cnpj, razao_social, nome_fantasia, rntrc, focus_ambiente, uf, municipio, ativo FROM dash_emitentes WHERE tenant_id = $1`, [tenantId]);
+        let { rows } = await db.query(`SELECT id, cnpj, razao_social, nome_fantasia, inscricao_estadual, rntrc, focus_ambiente, uf, municipio, codigo_municipio, ativo FROM dash_emitentes WHERE tenant_id = $1`, [tenantId]);
+
+        // Se ainda não houver emitente cadastrado, tenta inicializar automaticamente com os dados da filial padrão do ERP (dash_filiais)
+        if (rows.length === 0) {
+            const filialRes = await db.query(
+                `SELECT nome, documento FROM dash_filiais WHERE tenant_id = $1 AND ativo = true ORDER BY is_default DESC LIMIT 1`,
+                [tenantId]
+            );
+            if (filialRes.rows.length > 0) {
+                const f = filialRes.rows[0];
+                const cleanDoc = (f.documento || '').replace(/\D/g, '') || '00000000000100';
+                const insRes = await db.query(
+                    `INSERT INTO dash_emitentes (
+                        tenant_id, cnpj, razao_social, nome_fantasia, uf, municipio, codigo_municipio, focus_ambiente, ativo
+                     ) VALUES ($1, $2, $3, $3, 'MS', 'Dourados', '5003702', 'homologacao', true)
+                     ON CONFLICT (tenant_id, cnpj) DO UPDATE SET razao_social = EXCLUDED.razao_social
+                     RETURNING id, cnpj, razao_social, nome_fantasia, inscricao_estadual, rntrc, focus_ambiente, uf, municipio, codigo_municipio, ativo`,
+                    [tenantId, cleanDoc, f.nome]
+                );
+                rows = insRes.rows;
+            }
+        }
+
         return res.json({ success: true, data: rows });
     } catch (err) {
         return res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * GET /api/transporte/municipios
+ * Busca municípios e códigos IBGE a partir de dash_regioes (sincronizado do ERP)
+ * e complementa com dash_coordenadas_municipios.
+ */
+router.get('/municipios', async (req, res) => {
+    const tenantId = req.tenant.id;
+    const { search = '' } = req.query;
+
+    try {
+        let sql = `
+            SELECT DISTINCT
+                COALESCE(r.cidade, c.nome) AS cidade,
+                COALESCE(r.uf, c.uf) AS uf,
+                COALESCE(r.cod_ibge, c.codigo_ibge) AS codigo_ibge
+            FROM dash_regioes r
+            FULL OUTER JOIN dash_coordenadas_municipios c ON UPPER(TRIM(c.nome)) = UPPER(TRIM(r.cidade))
+            WHERE (r.tenant_id = $1 OR r.tenant_id IS NULL)
+        `;
+        const params = [tenantId];
+
+        if (search) {
+            params.push(`%${search.trim()}%`);
+            sql += ` AND (r.cidade ILIKE $${params.length} OR c.nome ILIKE $${params.length} OR r.cod_ibge ILIKE $${params.length} OR c.codigo_ibge ILIKE $${params.length})`;
+        }
+
+        sql += ` ORDER BY cidade ASC LIMIT 100`;
+
+        const { rows } = await db.query(sql, params);
+        return res.json({ success: true, data: rows });
+    } catch (err) {
+        logger.error('[Transporte] Erro ao buscar municípios:', err.message);
+        return res.status(500).json({ error: 'Erro ao buscar municípios' });
     }
 });
 

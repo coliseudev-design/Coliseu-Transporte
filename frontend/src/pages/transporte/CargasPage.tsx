@@ -104,17 +104,66 @@ export default function CargasPage() {
   });
   const emitentes = emitentesData?.data || [];
 
-  // Pré-preenche o emitente e o município de origem com a 1ª carga selecionada
+  // Cidades e Regiões cadastradas no ERP (com código IBGE)
+  const { data: municipiosData } = useQuery({
+    queryKey: ['municipios-transporte'],
+    queryFn: async () => (await api.get('/transporte/municipios')).data
+  });
+  const municipiosList: Array<{ cidade: string; uf: string; codigo_ibge: string }> = municipiosData?.data || [];
+
+  // Veículos e Motoristas para o MDF-e direto
+  const { data: veiculosData } = useQuery({
+    queryKey: ['veiculos-mdfe'],
+    queryFn: async () => (await api.get('/transporte/veiculos')).data
+  });
+  const veiculos = veiculosData?.data || [];
+
+  const { data: motoristasData } = useQuery({
+    queryKey: ['motoristas-mdfe'],
+    queryFn: async () => (await api.get('/transporte/motoristas')).data
+  });
+  const motoristas = motoristasData?.data || [];
+
+  // Modal de MDF-e Direto (Carga Própria / Varejo)
+  const [modalMdfeDiretoOpen, setModalMdfeDiretoOpen] = useState(false);
+  const [mdfeVeiculoId, setMdfeVeiculoId] = useState('');
+  const [mdfeMotoristaId, setMdfeMotoristaId] = useState('');
+  const [mdfeUfInicio, setMdfeUfInicio] = useState('MS');
+  const [mdfeUfFim, setMdfeUfFim] = useState('MS');
+  const [submittingMdfe, setSubmittingMdfe] = useState(false);
+
+  // Pré-preenche emitente, municípios e código IBGE do ERP automaticamente a partir das notas selecionadas
   useEffect(() => {
     if (selecionadas.length === 0) return;
     const c = selecionadas[0];
-    setMunicipioInicio(c.remetente_municipio || '');
-    setMunicipioFim(c.destinatario_municipio || '');
+    const munOrigem = c.remetente_municipio || 'Dourados';
+    const munDestino = c.destinatario_municipio || 'Dourados';
+    setMunicipioInicio(munOrigem);
+    setMunicipioFim(munDestino);
+
+    // Puxa o emitente padrão
     if (!emitenteId && emitentes.length > 0) {
       setEmitenteId(String(emitentes[0].id));
-      setCodigoMunInicio(emitentes[0].codigo_municipio || '');
     }
-  }, [selectedIds.length, emitentes.length]);
+
+    // Busca código IBGE de origem na lista de regiões do ERP
+    const regOrigem = municipiosList.find(m => m.cidade.trim().toUpperCase() === munOrigem.trim().toUpperCase());
+    if (regOrigem?.codigo_ibge) {
+      setCodigoMunInicio(regOrigem.codigo_ibge);
+    } else if (emitentes[0]?.codigo_municipio) {
+      setCodigoMunInicio(emitentes[0].codigo_municipio);
+    }
+
+    // Busca código IBGE de destino na lista de regiões do ERP
+    const regDestino = municipiosList.find(m => m.cidade.trim().toUpperCase() === munDestino.trim().toUpperCase());
+    if (regDestino?.codigo_ibge) {
+      setCodigoMunFim(regDestino.codigo_ibge);
+    }
+
+    // UFs do MDF-e direto
+    setMdfeUfInicio(c.remetente_uf || 'MS');
+    setMdfeUfFim(c.destinatario_uf || 'MS');
+  }, [selectedIds.length, emitentes.length, municipiosList.length]);
 
   const cargas: Carga[] = data?.data || [];
 
@@ -168,6 +217,40 @@ export default function CargasPage() {
     alert('Chave XML copiada para a área de transferência!');
   };
 
+  const handleCriarMdfeDireto = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (selecionadas.length === 0) return;
+    setSubmittingMdfe(true);
+    try {
+      const v = veiculos.find((ve: any) => String(ve.id) === mdfeVeiculoId);
+      const mot = motoristas.find((mo: any) => String(mo.id) === mdfeMotoristaId);
+
+      await api.post('/transporte/mdfes', {
+        emitente_id: emitenteId ? Number(emitenteId) : undefined,
+        cargas_ids: selectedIds,
+        tipo_emitente: '2', // 2 = Carga Própria (Varejo/Comércio sem CT-e!)
+        uf_inicio: mdfeUfInicio,
+        uf_fim: mdfeUfFim,
+        veiculo_id: v?.id || null,
+        veiculo_placa: v?.placa || 'ABC1D23',
+        motorista_id: mot?.id || null,
+        motorista_cpf: mot?.cpf || '00000000000',
+        motorista_nome: mot?.nome || 'Motorista do Varejo',
+        valor_carga: totalValorCarga,
+        peso_bruto: totalPeso
+      });
+
+      setSelectedIds([]);
+      setModalMdfeDiretoOpen(false);
+      refetch();
+      alert('MDF-e de Carga Própria gerado com sucesso! Acesse a aba Manifestos (MDF-e) para transmitir na SEFAZ.');
+    } catch (err: any) {
+      alert('Erro ao gerar MDF-e direto: ' + (err.response?.data?.error || err.message));
+    } finally {
+      setSubmittingMdfe(false);
+    }
+  };
+
   const handleCriarCte = async (e: React.FormEvent) => {
     e.preventDefault();
     if (selecionadas.length === 0) return;
@@ -216,13 +299,24 @@ export default function CargasPage() {
         </div>
 
         {selectedIds.length > 0 && (
-          <button
-            onClick={() => setModalOpen(true)}
-            className="inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold text-white bg-brand-600 hover:bg-brand-700 shadow-sm shadow-brand-500/30 transition-all"
-          >
-            <Truck className="w-4 h-4" />
-            Gerar CT-e com {selectedIds.length} carga(s)
-          </button>
+          <div className="flex flex-wrap items-center gap-2.5">
+            <button
+              onClick={() => setModalOpen(true)}
+              className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-xs sm:text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 shadow-sm transition-all"
+              title="Para transportadoras que cobram frete e precisam emitir CT-e"
+            >
+              <FileText className="w-4 h-4" />
+              Gerar CT-e ({selectedIds.length})
+            </button>
+            <button
+              onClick={() => setModalMdfeDiretoOpen(true)}
+              className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-xs sm:text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-700 shadow-sm shadow-emerald-500/20 transition-all"
+              title="Para varejo/comércio que transporta mercadorias próprias e emite MDF-e direto sem CT-e"
+            >
+              <Truck className="w-4 h-4" />
+              Emitir MDF-e Direto (Carga Própria / Varejo)
+            </button>
+          </div>
         )}
       </div>
 
@@ -698,30 +792,57 @@ export default function CargasPage() {
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1">
-                    IBGE Município de Início *
+                    Cidade de Início (Origem) *
                   </label>
-                  <input
-                    type="text" required placeholder="5107875"
+                  <select
+                    required
                     value={codigoMunInicio}
-                    onChange={e => setCodigoMunInicio(e.target.value)}
-                    className="w-full px-3.5 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white font-mono focus:ring-2 focus:ring-brand-500"
-                  />
-                  <p className="text-[10px] text-slate-400 mt-1">{municipioInicio}</p>
+                    onChange={e => {
+                      setCodigoMunInicio(e.target.value);
+                      const m = municipiosList.find(x => x.codigo_ibge === e.target.value);
+                      if (m) setMunicipioInicio(m.cidade);
+                    }}
+                    className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:ring-2 focus:ring-brand-500 text-xs"
+                  >
+                    <option value="">Selecione a cidade...</option>
+                    {municipiosList.map((m, idx) => (
+                      <option key={idx} value={m.codigo_ibge}>
+                        {m.cidade} / {m.uf} (IBGE: {m.codigo_ibge})
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-[11px] text-slate-400 mt-0.5 font-mono">
+                    Código IBGE: <strong className="text-slate-700 dark:text-slate-200">{codigoMunInicio || 'Automático'}</strong>
+                  </p>
                 </div>
+
                 <div>
                   <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1">
-                    IBGE Município de Fim *
+                    Cidade de Fim (Destino) *
                   </label>
-                  <input
-                    type="text" required placeholder="3550308"
+                  <select
+                    required
                     value={codigoMunFim}
-                    onChange={e => setCodigoMunFim(e.target.value)}
-                    className="w-full px-3.5 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white font-mono focus:ring-2 focus:ring-brand-500"
-                  />
-                  <p className="text-[10px] text-slate-400 mt-1">{municipioFim}</p>
+                    onChange={e => {
+                      setCodigoMunFim(e.target.value);
+                      const m = municipiosList.find(x => x.codigo_ibge === e.target.value);
+                      if (m) setMunicipioFim(m.cidade);
+                    }}
+                    className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:ring-2 focus:ring-brand-500 text-xs"
+                  >
+                    <option value="">Selecione a cidade...</option>
+                    {municipiosList.map((m, idx) => (
+                      <option key={idx} value={m.codigo_ibge}>
+                        {m.cidade} / {m.uf} (IBGE: {m.codigo_ibge})
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-[11px] text-slate-400 mt-0.5 font-mono">
+                    Código IBGE: <strong className="text-slate-700 dark:text-slate-200">{codigoMunFim || 'Automático'}</strong>
+                  </p>
                 </div>
               </div>
 
@@ -762,6 +883,147 @@ export default function CargasPage() {
         </div>
       )}
 
+      {/* Modal de Criação de MDF-e Direto (Carga Própria / Varejo) */}
+      {modalMdfeDiretoOpen && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-slate-800 w-full max-w-lg rounded-2xl p-6 shadow-xl border border-slate-200 dark:border-slate-700">
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <h2 className="text-lg font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                  <Truck className="w-5 h-5 text-emerald-600" />
+                  Emitir MDF-e Direto (Carga Própria)
+                </h2>
+                <p className="text-xs text-slate-500 mt-1">
+                  Varejo/Comércio que transporta mercadorias próprias: gera o MDF-e agrupando {selecionadas.length} NF-e(s) <strong className="text-emerald-600">sem precisar de CT-e</strong>.
+                </p>
+              </div>
+            </div>
+
+            <div className="my-4 p-4 rounded-xl bg-emerald-50/60 dark:bg-emerald-950/30 border border-emerald-200/80 dark:border-emerald-800/50 text-xs space-y-1.5">
+              <div className="flex justify-between">
+                <span className="text-slate-600 dark:text-slate-400">Valor Total das Mercadorias:</span>
+                <span className="font-bold text-emerald-700 dark:text-emerald-300">R$ {totalValorCarga.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-600 dark:text-slate-400">Peso Total Consolidado:</span>
+                <span className="font-bold text-slate-900 dark:text-white">{totalPeso.toLocaleString('pt-BR')} kg</span>
+              </div>
+            </div>
+
+            <form onSubmit={handleCriarMdfeDireto} className="space-y-4 text-sm">
+              <div>
+                <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1">
+                  Empresa Emitente (Filial) *
+                </label>
+                <select
+                  required
+                  value={emitenteId}
+                  onChange={e => setEmitenteId(e.target.value)}
+                  className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:ring-2 focus:ring-brand-500 text-xs"
+                >
+                  <option value="">Selecione a empresa...</option>
+                  {emitentes.map((em: any) => (
+                    <option key={em.id} value={em.id}>
+                      {em.razao_social} — {em.cnpj}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1">
+                    UF Início (Carregamento) *
+                  </label>
+                  <input
+                    type="text" required maxLength={2}
+                    value={mdfeUfInicio}
+                    onChange={e => setMdfeUfInicio(e.target.value.toUpperCase())}
+                    className="w-24 px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white uppercase font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1">
+                    UF Fim (Descarregamento) *
+                  </label>
+                  <input
+                    type="text" required maxLength={2}
+                    value={mdfeUfFim}
+                    onChange={e => setMdfeUfFim(e.target.value.toUpperCase())}
+                    className="w-24 px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white uppercase font-mono"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1">
+                  Veículo de Tração (Placa) *
+                </label>
+                <select
+                  required
+                  value={mdfeVeiculoId}
+                  onChange={e => setMdfeVeiculoId(e.target.value)}
+                  className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:ring-2 focus:ring-brand-500 text-xs"
+                >
+                  <option value="">Selecione o veículo da frota...</option>
+                  {veiculos.map((v: any) => (
+                    <option key={v.id} value={v.id}>
+                      Placa: {v.placa} — Cap: {Number(v.capacidade_kg || 0).toLocaleString('pt-BR')} kg ({v.tipo_proprietario === '1' ? 'Próprio' : 'Terceiro'})
+                    </option>
+                  ))}
+                </select>
+                {veiculos.length === 0 && (
+                  <p className="text-[11px] text-amber-600 mt-1">
+                    Nenhum veículo cadastrado. Vá em Cadastros → Frota para adicionar.
+                  </p>
+                )}
+              </div>
+
+              <div>
+                <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1">
+                  Condutor / Motorista *
+                </label>
+                <select
+                  required
+                  value={mdfeMotoristaId}
+                  onChange={e => setMdfeMotoristaId(e.target.value)}
+                  className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:ring-2 focus:ring-brand-500 text-xs"
+                >
+                  <option value="">Selecione o motorista...</option>
+                  {motoristas.map((m: any) => (
+                    <option key={m.id} value={m.id}>
+                      {m.nome} — CPF: {m.cpf} (CNH: {m.cnh_categoria || 'D'})
+                    </option>
+                  ))}
+                </select>
+                {motoristas.length === 0 && (
+                  <p className="text-[11px] text-amber-600 mt-1">
+                    Nenhum motorista cadastrado. Vá em Cadastros → Frota para adicionar.
+                  </p>
+                )}
+              </div>
+
+              <div className="flex justify-end gap-2.5 pt-3 border-t border-slate-100 dark:border-slate-700">
+                <button
+                  type="button"
+                  onClick={() => setModalMdfeDiretoOpen(false)}
+                  className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={submittingMdfe}
+                  className="px-5 py-2 rounded-xl text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 transition-colors shadow-sm"
+                >
+                  {submittingMdfe ? 'Criando Manifesto...' : 'Gerar MDF-e de Carga Própria'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* Barra Flutuante Fixa de Totalizador quando houver notas selecionadas */}
       {selectedIds.length > 0 && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-30 w-full max-w-2xl px-4 animate-in fade-in slide-in-from-bottom-4 duration-300">
@@ -790,10 +1052,19 @@ export default function CargasPage() {
               </button>
               <button
                 onClick={() => setModalOpen(true)}
-                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs sm:text-sm font-semibold bg-brand-600 hover:bg-brand-500 text-white shadow-lg shadow-brand-600/30 transition-all"
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-blue-600 hover:bg-blue-500 text-white transition-all"
+                title="Emitir CT-e para cobrar frete"
               >
-                <Truck className="w-4 h-4" />
-                Gerar CT-e Agora
+                <FileText className="w-3.5 h-3.5" />
+                CT-e
+              </button>
+              <button
+                onClick={() => setModalMdfeDiretoOpen(true)}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-600/30 transition-all"
+                title="Emitir MDF-e direto sem CT-e (para varejo / carga própria)"
+              >
+                <Truck className="w-3.5 h-3.5" />
+                MDF-e Direto
               </button>
             </div>
           </div>

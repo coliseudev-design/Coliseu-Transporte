@@ -67,9 +67,8 @@ export default function Header() {
       activeBg: 'bg-[#6366F1]/10 text-[#6366F1] border-[#6366F1]/30',
       hoverBorderLeft: 'hover:border-l-[#6366F1]',
       items: [
-        { to: '/transporte/emitentes', label: 'Transportadoras (Emitentes)', icon: Building2 },
-        { to: '/transporte/partes', label: 'Clientes & Destinatários', icon: Users },
-        { to: '/clientes', label: 'Cadastro do ERP', icon: Network },
+        { to: '/clientes', label: 'Clientes (ERP Coliseu)', icon: Users },
+        { to: '/departamentos', label: 'Regiões & Cidades', icon: Network },
       ]
     },
     {
@@ -95,9 +94,10 @@ export default function Header() {
       activeBg: 'bg-slate-100 text-[#475569] border-[#CBD5E1]',
       hoverBorderLeft: 'hover:border-l-[#64748B]',
       items: [
+        { to: '/transporte/empresa', label: 'Dados da Empresa (Emitente Fiscal)', icon: Building2 },
         { to: '/transporte/config', label: 'Regras Fiscais & UF', icon: Settings },
         { to: '/transporte/campos', label: 'Campos Dinâmicos', icon: BrainCircuit },
-        { to: '/transporte/certificados', label: 'Certificados Digitais', icon: Key },
+        { to: '/transporte/certificados', label: 'Certificados Digitais A1', icon: Key },
         { to: '/usuarios', label: 'Usuários & Permissões', icon: Shield },
       ]
     }
