@@ -254,41 +254,63 @@ export default function FrotaPage() {
           </div>
         ) : (
           <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200/80 dark:border-slate-700/80 shadow-sm overflow-hidden">
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm">
-                <thead className="bg-slate-50 dark:bg-slate-900/50 text-[11px] font-semibold text-slate-500 border-b border-slate-100 dark:border-slate-700/60 uppercase tracking-wider">
-                  <tr>
-                    <th className="px-4 py-3.5">Placa</th>
-                    <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60">Tipo</th>
-                    <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60">Carroceria</th>
-                    <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60 text-right">Tara (kg)</th>
-                    <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60 text-right">Capacidade (kg)</th>
-                    <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60">Proprietário</th>
-                    <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60">RNTRC</th>
-                    <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60 text-right">Ação</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100 dark:divide-slate-700/60 text-xs">
-                  {veiculos.map(v => (
-                    <tr key={v.id} className="hover:bg-slate-50/70 dark:hover:bg-slate-700/30 transition-colors">
-                      <td className="px-4 py-3">
+                        <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200/80 dark:border-slate-700/80 shadow-sm overflow-hidden">
+              <TabelaResponsiva<Veiculo>
+                dados={veiculos}
+                chaveDe={v => v.id}
+                colunas={[
+                  {
+                    chave: 'placa',
+                    rotulo: 'Placa',
+                    render: v => (
+                      <div>
                         <p className="font-mono font-bold text-slate-900 dark:text-white">{v.placa}</p>
                         {v.uf && <p className="text-[10px] text-slate-400">{v.uf}</p>}
-                      </td>
-                      <td className="px-4 py-3 border-l border-slate-200 dark:border-slate-700/60 text-slate-700 dark:text-slate-300">
-                        {rotuloRodado(v.tipo_rodado)}
-                      </td>
-                      <td className="px-4 py-3 border-l border-slate-200 dark:border-slate-700/60 text-slate-700 dark:text-slate-300">
-                        {rotuloCarroceria(v.tipo_carroceria)}
-                      </td>
-                      <td className="px-4 py-3 border-l border-slate-200 dark:border-slate-700/60 text-right tabular-nums text-slate-700 dark:text-slate-300">
+                      </div>
+                    )
+                  },
+                  {
+                    chave: 'tipo',
+                    rotulo: 'Tipo',
+                    render: v => (
+                      <span className="text-slate-700 dark:text-slate-300">{rotuloRodado(v.tipo_rodado)}</span>
+                    )
+                  },
+                  {
+                    chave: 'carroceria',
+                    rotulo: 'Carroceria',
+                    ocultarNoTablet: true,
+                    render: v => (
+                      <span className="text-slate-700 dark:text-slate-300">{rotuloCarroceria(v.tipo_carroceria)}</span>
+                    )
+                  },
+                  {
+                    chave: 'tara',
+                    rotulo: 'Tara (kg)',
+                    alinhamento: 'right',
+                    ocultarNoCelular: true,
+                    render: v => (
+                      <span className="text-slate-700 dark:text-slate-300 tabular-nums whitespace-nowrap">
                         {Number(v.tara_kg || 0).toLocaleString('pt-BR')}
-                      </td>
-                      <td className="px-4 py-3 border-l border-slate-200 dark:border-slate-700/60 text-right font-bold tabular-nums text-slate-900 dark:text-white">
+                      </span>
+                    )
+                  },
+                  {
+                    chave: 'capacidade',
+                    rotulo: 'Capacidade (kg)',
+                    alinhamento: 'right',
+                    render: v => (
+                      <span className="font-bold text-slate-900 dark:text-white tabular-nums whitespace-nowrap">
                         {Number(v.capacidade_kg || 0).toLocaleString('pt-BR')}
-                      </td>
-                      <td className="px-4 py-3 border-l border-slate-200 dark:border-slate-700/60">
-                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
+                      </span>
+                    )
+                  },
+                  {
+                    chave: 'proprietario',
+                    rotulo: 'Proprietário',
+                    render: v => (
+                      <div>
+                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold whitespace-nowrap ${
                           v.tipo_proprietario === '1'
                             ? 'bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300'
                             : 'bg-violet-100 dark:bg-violet-950/60 text-violet-700 dark:text-violet-300'
@@ -298,22 +320,32 @@ export default function FrotaPage() {
                         {v.nome_proprietario && (
                           <p className="text-[10px] text-slate-400 mt-0.5 truncate max-w-[140px]">{v.nome_proprietario}</p>
                         )}
-                      </td>
-                      <td className="px-4 py-3 border-l border-slate-200 dark:border-slate-700/60 font-mono text-slate-600 dark:text-slate-400">
-                        {v.rntrc || '—'}
-                      </td>
-                      <td className="px-4 py-3 border-l border-slate-200 dark:border-slate-700/60 text-right">
-                        <button
-                          onClick={() => excluir('veiculos', v.id)}
-                          className="p-1.5 rounded-lg bg-red-50 dark:bg-red-950/50 text-red-600 hover:bg-red-100 transition-colors"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+                      </div>
+                    )
+                  },
+                  {
+                    chave: 'rntrc',
+                    rotulo: 'RNTRC',
+                    ocultarNoCelular: true,
+                    render: v => (
+                      <span className="font-mono text-slate-600 dark:text-slate-400">{v.rntrc || '—'}</span>
+                    )
+                  },
+                  {
+                    chave: 'acoes',
+                    rotulo: 'Ação',
+                    alinhamento: 'right',
+                    render: v => (
+                      <button
+                        onClick={() => excluir('veiculos', v.id)}
+                        className="p-1.5 rounded-lg bg-red-50 dark:bg-red-950/50 text-red-600 hover:bg-red-100 transition-colors"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )
+                  }
+                ]}
+              />
             </div>
           </div>
         )
@@ -336,49 +368,68 @@ export default function FrotaPage() {
           </div>
         ) : (
           <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200/80 dark:border-slate-700/80 shadow-sm overflow-hidden">
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm">
-                <thead className="bg-slate-50 dark:bg-slate-900/50 text-[11px] font-semibold text-slate-500 border-b border-slate-100 dark:border-slate-700/60 uppercase tracking-wider">
-                  <tr>
-                    <th className="px-4 py-3.5">Nome</th>
-                    <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60">CPF</th>
-                    <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60">CNH</th>
-                    <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60">Validade</th>
-                    <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60">Telefone</th>
-                    <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60 text-right">Ação</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100 dark:divide-slate-700/60 text-xs">
-                  {motoristas.map(m => (
-                    <tr key={m.id} className="hover:bg-slate-50/70 dark:hover:bg-slate-700/30 transition-colors">
-                      <td className="px-4 py-3 font-semibold text-slate-900 dark:text-white">{m.nome}</td>
-                      <td className="px-4 py-3 border-l border-slate-200 dark:border-slate-700/60 font-mono text-slate-600 dark:text-slate-400">
-                        {m.cpf}
-                      </td>
-                      <td className="px-4 py-3 border-l border-slate-200 dark:border-slate-700/60 font-mono text-slate-700 dark:text-slate-300">
+                        <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200/80 dark:border-slate-700/80 shadow-sm overflow-hidden">
+              <TabelaResponsiva<Motorista>
+                dados={motoristas}
+                chaveDe={m => m.id}
+                colunas={[
+                  {
+                    chave: 'nome',
+                    rotulo: 'Nome',
+                    render: m => (
+                      <span className="font-semibold text-slate-900 dark:text-white">{m.nome}</span>
+                    )
+                  },
+                  {
+                    chave: 'cpf',
+                    rotulo: 'CPF',
+                    render: m => (
+                      <span className="font-mono text-slate-600 dark:text-slate-400">{m.cpf}</span>
+                    )
+                  },
+                  {
+                    chave: 'cnh',
+                    rotulo: 'CNH',
+                    render: m => (
+                      <span className="font-mono text-slate-700 dark:text-slate-300 whitespace-nowrap">
                         {m.cnh || '—'}
                         {m.cnh_categoria && <span className="text-slate-400"> ({m.cnh_categoria})</span>}
-                      </td>
-                      <td className="px-4 py-3 border-l border-slate-200 dark:border-slate-700/60 text-slate-600 dark:text-slate-400">
-                        {m.cnh_validade
-                          ? new Date(m.cnh_validade).toLocaleDateString('pt-BR')
-                          : '—'}
-                      </td>
-                      <td className="px-4 py-3 border-l border-slate-200 dark:border-slate-700/60 text-slate-600 dark:text-slate-400">
-                        {m.telefone || '—'}
-                      </td>
-                      <td className="px-4 py-3 border-l border-slate-200 dark:border-slate-700/60 text-right">
-                        <button
-                          onClick={() => excluir('motoristas', m.id)}
-                          className="p-1.5 rounded-lg bg-red-50 dark:bg-red-950/50 text-red-600 hover:bg-red-100 transition-colors"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+                      </span>
+                    )
+                  },
+                  {
+                    chave: 'validade',
+                    rotulo: 'Validade',
+                    ocultarNoCelular: true,
+                    render: m => (
+                      <span className="text-slate-600 dark:text-slate-400 whitespace-nowrap">
+                        {m.cnh_validade ? new Date(m.cnh_validade).toLocaleDateString('pt-BR') : '—'}
+                      </span>
+                    )
+                  },
+                  {
+                    chave: 'telefone',
+                    rotulo: 'Telefone',
+                    ocultarNoTablet: true,
+                    render: m => (
+                      <span className="text-slate-600 dark:text-slate-400 whitespace-nowrap">{m.telefone || '—'}</span>
+                    )
+                  },
+                  {
+                    chave: 'acoes',
+                    rotulo: 'Ação',
+                    alinhamento: 'right',
+                    render: m => (
+                      <button
+                        onClick={() => excluir('motoristas', m.id)}
+                        className="p-1.5 rounded-lg bg-red-50 dark:bg-red-950/50 text-red-600 hover:bg-red-100 transition-colors"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )
+                  }
+                ]}
+              />
             </div>
           </div>
         )

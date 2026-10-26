@@ -86,107 +86,121 @@ export default function CtesPage() {
             Nenhum CT-e emitido ou em rascunho. Vá para a <strong>Central de Cargas</strong> para criar o primeiro a partir das notas fiscais.
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-sm">
-              <thead className="bg-slate-50 dark:bg-slate-900/50 text-xs font-semibold text-slate-500 border-b border-slate-100 dark:border-slate-700/60 uppercase tracking-wider">
-                <tr>
-                  <th className="px-6 py-4">Documento / Ref</th>
-                  <th className="px-6 py-4">Rota (Início ➔ Fim)</th>
-                  <th className="px-6 py-4">Frete (R$)</th>
-                  <th className="px-6 py-4">Peso</th>
-                  <th className="px-6 py-4">Status SEFAZ</th>
-                  <th className="px-6 py-4 text-right">Ações</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100 dark:divide-slate-700/60">
-                {ctes.map(cte => (
-                  <tr
-                    key={cte.id}
-                    onClick={() => setDrawerId(cte.id)}
-                    className="hover:bg-slate-50/50 dark:hover:bg-slate-700/30 transition-colors cursor-pointer"
-                  >
-                    <td className="px-6 py-4">
-                      <p className="font-bold text-slate-900 dark:text-white flex items-center gap-1.5">
-                        {cte.numero ? `CT-e nº ${cte.numero}` : 'Rascunho'}
+                    <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200/80 dark:border-slate-700/80 shadow-sm overflow-hidden">
+            <TabelaResponsiva<Cte>
+              dados={ctes}
+              chaveDe={c => c.id}
+              aoClicar={c => setDrawerId(c.id)}
+              colunas={[
+                {
+                  chave: 'doc',
+                  rotulo: 'Documento / Ref',
+                  render: c => (
+                    <div>
+                      <p className="font-bold text-slate-900 dark:text-white whitespace-nowrap">
+                        {c.numero ? `CT-e nº ${c.numero}` : 'Rascunho'}
                       </p>
-                      <p className="text-xs text-slate-400 font-mono mt-0.5 truncate max-w-xs">
-                        {cte.chave_cte || cte.ref}
+                      <p className="text-[10px] text-slate-400 font-mono mt-0.5 truncate max-w-[180px]">
+                        {c.chave_cte || c.ref}
                       </p>
-                    </td>
-                    <td className="px-6 py-4">
-                      <p className="font-medium text-slate-800 dark:text-slate-200">
-                        {cte.municipio_inicio}/{cte.uf_inicio} ➔ {cte.municipio_fim}/{cte.uf_fim}
-                      </p>
-                    </td>
-                    <td className="px-6 py-4 font-semibold text-slate-900 dark:text-white">
-                      R$ {Number(cte.valor_total || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
-                    </td>
-                    <td className="px-6 py-4 text-slate-600 dark:text-slate-400">
-                      {Number(cte.peso_bruto || 0).toLocaleString('pt-BR')} kg
-                    </td>
-                    <td className="px-6 py-4">
-                      <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold ${
-                        cte.status === 'AUTORIZADO'
-                          ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300'
-                          : cte.status === 'PROCESSANDO'
-                          ? 'bg-blue-100 text-blue-800 dark:bg-blue-950/60 dark:text-blue-300'
-                          : cte.status === 'REJEITADO'
-                          ? 'bg-red-100 text-red-800 dark:bg-red-950/60 dark:text-red-300'
-                          : 'bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-300'
-                      }`}>
-                        {cte.status === 'AUTORIZADO' && <CheckCircle2 className="w-3.5 h-3.5" />}
-                        {cte.status === 'PROCESSANDO' && <Clock className="w-3.5 h-3.5 animate-spin" />}
-                        {cte.status === 'REJEITADO' && <AlertTriangle className="w-3.5 h-3.5" />}
-                        {cte.status}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4 text-right space-x-2">
-                      {cte.status === 'RASCUNHO' && (
+                    </div>
+                  )
+                },
+                {
+                  chave: 'rota',
+                  rotulo: 'Rota (Início ➔ Fim)',
+                  render: c => (
+                    <span className="font-medium text-slate-800 dark:text-slate-200 whitespace-nowrap">
+                      {c.municipio_inicio}/{c.uf_inicio} ➔ {c.municipio_fim}/{c.uf_fim}
+                    </span>
+                  )
+                },
+                {
+                  chave: 'frete',
+                  rotulo: 'Frete (R$)',
+                  alinhamento: 'right',
+                  render: c => (
+                    <span className="font-semibold text-slate-900 dark:text-white tabular-nums whitespace-nowrap">
+                      R$ {Number(c.valor_total || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                    </span>
+                  )
+                },
+                {
+                  chave: 'peso',
+                  rotulo: 'Peso',
+                  alinhamento: 'right',
+                  ocultarNoCelular: true,
+                  render: c => (
+                    <span className="text-slate-600 dark:text-slate-400 tabular-nums whitespace-nowrap">
+                      {Number(c.peso_bruto || 0).toLocaleString('pt-BR')} kg
+                    </span>
+                  )
+                },
+                {
+                  chave: 'status',
+                  rotulo: 'Status SEFAZ',
+                  render: c => (
+                    <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold whitespace-nowrap ${
+                      c.status === 'AUTORIZADO'
+                        ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300'
+                        : c.status === 'PROCESSANDO'
+                        ? 'bg-blue-100 text-blue-800 dark:bg-blue-950/60 dark:text-blue-300'
+                        : c.status === 'REJEITADO'
+                        ? 'bg-red-100 text-red-800 dark:bg-red-950/60 dark:text-red-300'
+                        : 'bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-300'
+                    }`}>
+                      {c.status === 'AUTORIZADO' && <CheckCircle2 className="w-3.5 h-3.5" />}
+                      {c.status === 'PROCESSANDO' && <Clock className="w-3.5 h-3.5 animate-spin" />}
+                      {c.status === 'REJEITADO' && <AlertTriangle className="w-3.5 h-3.5" />}
+                      {c.status}
+                    </span>
+                  )
+                },
+                {
+                  chave: 'acoes',
+                  rotulo: 'Ações',
+                  alinhamento: 'right',
+                  render: c => (
+                    <div className="flex items-center justify-end gap-1.5" onClick={e => e.stopPropagation()}>
+                      {c.status === 'RASCUNHO' && (
                         <button
-                          onClick={(e) => { e.stopPropagation(); handleEmitir(cte.id); }}
-                          disabled={loadingEmit === cte.id}
+                          onClick={(e) => { e.stopPropagation(); handleEmitir(c.id); }}
+                          disabled={loadingEmit === c.id}
                           className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold text-white bg-brand-600 hover:bg-brand-700 disabled:opacity-50 transition-colors"
                         >
                           <Send className="w-3.5 h-3.5" />
-                          {loadingEmit === cte.id ? 'Transmitindo...' : 'Transmitir SEFAZ'}
+                          <span className="hidden xl:inline">{loadingEmit === c.id ? 'Transmitindo...' : 'Transmitir'}</span>
                         </button>
                       )}
-                      {cte.caminho_dacte && (
+                      {c.caminho_dacte && (
                         <a
-                          href={cte.caminho_dacte}
+                          href={c.caminho_dacte}
                           target="_blank"
                           rel="noreferrer"
                           onClick={e => e.stopPropagation()}
-                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-medium bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 text-slate-700 dark:text-slate-200 transition-colors"
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-medium bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-200 transition-colors"
                         >
                           <Eye className="w-3.5 h-3.5" />
-                          DACTE (PDF)
+                          <span className="hidden xl:inline">DACTE</span>
                         </a>
                       )}
-                      {cte.caminho_xml && (
+                      {c.caminho_xml && (
                         <a
-                          href={cte.caminho_xml}
+                          href={c.caminho_xml}
                           target="_blank"
                           rel="noreferrer"
                           onClick={e => e.stopPropagation()}
-                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-medium bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 text-slate-700 dark:text-slate-200 transition-colors"
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-medium bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-200 transition-colors"
                         >
                           <Download className="w-3.5 h-3.5" />
-                          XML
+                          <span className="hidden xl:inline">XML</span>
                         </a>
                       )}
-                      <button
-                        onClick={(e) => { e.stopPropagation(); setDrawerId(cte.id); }}
-                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-semibold bg-slate-900 dark:bg-white text-white dark:text-slate-900 hover:bg-slate-700 dark:hover:bg-slate-200 transition-colors"
-                      >
-                        <MoreHorizontal className="w-3.5 h-3.5" />
-                        Detalhes
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+                    </div>
+                  )
+                }
+              ]}
+            />
           </div>
         )}
       </div>

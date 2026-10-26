@@ -217,98 +217,130 @@ export default function CiotConsultaPage() {
         </div>
       ) : (
         <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200/80 dark:border-slate-700/80 shadow-sm overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-sm">
-              <thead className="bg-slate-50 dark:bg-slate-900/50 text-[11px] font-semibold text-slate-500 border-b border-slate-100 dark:border-slate-700/60 uppercase tracking-wider">
-                <tr>
-                  <th className="px-4 py-3.5">Operação</th>
-                  <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60">Transportador</th>
-                  <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60">Contratante</th>
-                  <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60">Rota</th>
-                  <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60 text-right">Frete</th>
-                  <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60">Piso Mín.</th>
-                  <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60">CIOT</th>
-                  <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60 text-right">Ações</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100 dark:divide-slate-700/60 text-xs">
-                {contratos.map(c => {
-                  const st = STATUS_CIOT[c.ciot_status] || STATUS_CIOT.PENDENTE;
-                  return (
-                    <tr key={c.id} className="hover:bg-slate-50/70 dark:hover:bg-slate-700/30 transition-colors">
-                      <td className="px-4 py-3">
-                        <p className="font-semibold text-slate-900 dark:text-white">
-                          {c.tipo_operacao}
-                        </p>
-                        <p className="text-[10px] text-slate-400 mt-0.5">
-                          {c.tipo_transporte === '1' ? 'ETC' : c.tipo_transporte === '2' ? 'TAC' : 'CTC'}
-                          {c.transportador_rntrc && ` · RNTRC ${c.transportador_rntrc}`}
-                        </p>
-                      </td>
-                      <td className="px-4 py-3 border-l border-slate-200 dark:border-slate-700/60">
-                        <p className="font-medium text-slate-900 dark:text-white truncate max-w-[150px]">{c.transportador_nome}</p>
-                        <p className="text-[10px] text-slate-400 font-mono">{c.transportador_documento}</p>
-                      </td>
-                      <td className="px-4 py-3 border-l border-slate-200 dark:border-slate-700/60">
-                        <p className="text-slate-700 dark:text-slate-300 truncate max-w-[140px]">{c.contratante_nome}</p>
-                      </td>
-                      <td className="px-4 py-3 border-l border-slate-200 dark:border-slate-700/60 font-mono text-slate-600 dark:text-slate-400 whitespace-nowrap">
-                        {c.uf_inicio} → {c.uf_fim}
-                      </td>
-                      <td className="px-4 py-3 border-l border-slate-200 dark:border-slate-700/60 text-right font-bold text-slate-900 dark:text-white tabular-nums whitespace-nowrap">
-                        R$ {Number(c.valor_frete || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
-                      </td>
-                      <td className="px-4 py-3 border-l border-slate-200 dark:border-slate-700/60">
-                        {c.piso_minimo_antt ? (
-                          <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold ${
-                            c.piso_minimo_aprovado
-                              ? 'bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300'
-                              : 'bg-red-100 dark:bg-red-950/60 text-red-700 dark:text-red-300'
-                          }`}>
-                            {c.piso_minimo_aprovado
-                              ? <CheckCircle2 className="w-3 h-3" />
-                              : <AlertTriangle className="w-3 h-3" />}
-                            R$ {Number(c.piso_minimo_antt).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
-                          </span>
-                        ) : <span className="text-slate-400">—</span>}
-                      </td>
-                      <td className="px-4 py-3 border-l border-slate-200 dark:border-slate-700/60 whitespace-nowrap">
-                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${st.cor}`}>
+                    <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200/80 dark:border-slate-700/80 shadow-sm overflow-hidden">
+            <TabelaResponsiva<Contrato>
+              dados={contratos}
+              chaveDe={c => c.id}
+              colunas={[
+                {
+                  chave: 'operacao',
+                  rotulo: 'Operação',
+                  render: c => (
+                    <div>
+                      <p className="font-semibold text-slate-900 dark:text-white whitespace-nowrap">
+                        {c.tipo_operacao}
+                      </p>
+                      <p className="text-[10px] text-slate-400 mt-0.5">
+                        {c.tipo_transporte === '1' ? 'ETC' : c.tipo_transporte === '2' ? 'TAC' : 'CTC'}
+                        {c.transportador_rntrc && ` · RNTRC ${c.transportador_rntrc}`}
+                      </p>
+                    </div>
+                  )
+                },
+                {
+                  chave: 'transportador',
+                  rotulo: 'Transportador',
+                  render: c => (
+                    <div className="min-w-0">
+                      <p className="font-medium text-slate-900 dark:text-white truncate max-w-[150px]">{c.transportador_nome}</p>
+                      <p className="text-[10px] text-slate-400 font-mono">{c.transportador_documento}</p>
+                    </div>
+                  )
+                },
+                {
+                  chave: 'contratante',
+                  rotulo: 'Contratante',
+                  ocultarNoTablet: true,
+                  render: c => (
+                    <span className="text-slate-700 dark:text-slate-300 truncate block max-w-[140px]">{c.contratante_nome}</span>
+                  )
+                },
+                {
+                  chave: 'rota',
+                  rotulo: 'Rota',
+                  render: c => (
+                    <span className="font-mono text-slate-600 dark:text-slate-400 whitespace-nowrap">
+                      {c.uf_inicio} → {c.uf_fim}
+                    </span>
+                  )
+                },
+                {
+                  chave: 'frete',
+                  rotulo: 'Frete',
+                  alinhamento: 'right',
+                  render: c => (
+                    <span className="font-bold text-slate-900 dark:text-white tabular-nums whitespace-nowrap">
+                      R$ {Number(c.valor_frete || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                    </span>
+                  )
+                },
+                {
+                  chave: 'piso',
+                  rotulo: 'Piso Mín.',
+                  ocultarNoCelular: true,
+                  render: c => (
+                    c.piso_minimo_antt ? (
+                      <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold whitespace-nowrap ${
+                        c.piso_minimo_aprovado
+                          ? 'bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300'
+                          : 'bg-red-100 dark:bg-red-950/60 text-red-700 dark:text-red-300'
+                      }`}>
+                        {c.piso_minimo_aprovado
+                          ? <CheckCircle2 className="w-3 h-3" />
+                          : <AlertTriangle className="w-3 h-3" />}
+                        R$ {Number(c.piso_minimo_antt).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                      </span>
+                    ) : <span className="text-slate-400">—</span>
+                  )
+                },
+                {
+                  chave: 'ciot',
+                  rotulo: 'CIOT',
+                  render: c => {
+                    const st = STATUS_CIOT[c.ciot_status] || STATUS_CIOT.PENDENTE;
+                    return (
+                      <div>
+                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold whitespace-nowrap ${st.cor}`}>
                           {st.rotulo}
                         </span>
                         {c.ciot_codigo && (
                           <p className="text-[10px] font-mono text-slate-500 dark:text-slate-400 mt-1">{c.ciot_codigo}</p>
                         )}
-                      </td>
-                      <td className="px-4 py-3 border-l border-slate-200 dark:border-slate-700/60 text-right whitespace-nowrap space-x-1.5">
-                        {c.ciot_status === 'CANCELADO' ? (
-                          <span className="text-[11px] text-slate-400">Cancelado</span>
-                        ) : (
-                          <>
-                            <button
-                              onClick={() => gerarPayload(c.id)}
-                              className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-violet-50 dark:bg-violet-950/50 text-violet-700 dark:text-violet-300 border border-violet-200 dark:border-violet-800 hover:bg-violet-100 text-[11px] font-semibold transition-colors"
-                            >
-                              <Eye className="w-3 h-3" />
-                              Consultar
-                            </button>
-                            {c.ciot_codigo && (
-                              <button
-                                onClick={() => { setModalCancelar(c); setMotivo(''); }}
-                                className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-red-50 dark:bg-red-950/50 text-red-600 dark:text-red-400 border border-red-200 dark:border-red-900 hover:bg-red-100 text-[11px] font-semibold transition-colors"
-                              >
-                                <Ban className="w-3 h-3" />
-                                Cancelar
-                              </button>
-                            )}
-                          </>
+                      </div>
+                    );
+                  }
+                },
+                {
+                  chave: 'acoes',
+                  rotulo: 'Ações',
+                  alinhamento: 'right',
+                  render: c => (
+                    c.ciot_status === 'CANCELADO' ? (
+                      <span className="text-[11px] text-slate-400">Cancelado</span>
+                    ) : (
+                      <div className="flex items-center justify-end gap-1.5" onClick={e => e.stopPropagation()}>
+                        <button
+                          onClick={() => gerarPayload(c.id)}
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-violet-50 dark:bg-violet-950/50 text-violet-700 dark:text-violet-300 border border-violet-200 dark:border-violet-800 hover:bg-violet-100 text-[11px] font-semibold transition-colors"
+                        >
+                          <Eye className="w-3 h-3" />
+                          <span className="hidden xl:inline">Consultar</span>
+                        </button>
+                        {c.ciot_codigo && (
+                          <button
+                            onClick={() => { setModalCancelar(c); setMotivo(''); }}
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-red-50 dark:bg-red-950/50 text-red-600 dark:text-red-400 border border-red-200 dark:border-red-900 hover:bg-red-100 text-[11px] font-semibold transition-colors"
+                          >
+                            <Ban className="w-3 h-3" />
+                            <span className="hidden xl:inline">Cancelar</span>
+                          </button>
                         )}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                      </div>
+                    )
+                  )
+                }
+              ]}
+            />
           </div>
         </div>
       )}
