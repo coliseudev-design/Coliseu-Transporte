@@ -5,6 +5,7 @@ const router = express.Router();
 const db = require('../db/postgres');
 const logger = require('../config/logger');
 const TransporteService = require('../services/transporteService');
+const veiculoService = require('../services/veiculoService');
 
 // ─────────────────────────────────────────────────────────────
 // 1. CARGAS (Notas Fiscais vindas do ERP Coliseu / Firebird)
@@ -475,11 +476,132 @@ router.get('/veiculos', async (req, res) => {
     }
 });
 
+/**
+ * Cadastra (ou atualiza) um veículo.
+ */
+router.post('/veiculos', async (req, res) => {
+    const tenantId = req.tenant.id;
+    const {
+        id, placa, renavam, chassi, uf, tipo_rodado = '01', tipo_carroceria = '01',
+        tara_kg = 0, capacidade_kg = 0, capacidade_m3 = 0, tipo_proprietario = '1',
+        rntrc = null, cpf_cnpj_proprietario = null, nome_proprietario = null, uf_proprietario = null
+    } = req.body || {};
+
+    if (!placa || String(placa).replace(/\D/g, '').length < 7) {
+        return res.status(400).json({ error: 'Placa é obrigatória (7 caracteres).' });
+    }
+
+    try {
+        const { rows } = await db.query(
+            `INSERT INTO dash_veiculos (
+                tenant_id, id, placa, renavam, chassi, uf, tipo_rodado, tipo_carroceria,
+                tara_kg, capacidade_kg, capacidade_m3, tipo_proprietario,
+                rntrc, cpf_cnpj_proprietario, nome_proprietario, uf_proprietario
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+             ON CONFLICT (tenant_id, placa) DO UPDATE SET
+                renavam = COALESCE(NULLIF(EXCLUDED.renavam, ''), dash_veiculos.renavam),
+                chassi = COALESCE(NULLIF(EXCLUDED.chassi, ''), dash_veiculos.chassi),
+                uf = COALESCE(NULLIF(EXCLUDED.uf, ''), dash_veiculos.uf),
+                tipo_rodado = EXCLUDED.tipo_rodado,
+                tipo_carroceria = EXCLUDED.tipo_carroceria,
+                tara_kg = EXCLUDED.tara_kg,
+                capacidade_kg = EXCLUDED.capacidade_kg,
+                capacidade_m3 = EXCLUDED.capacidade_m3,
+                tipo_proprietario = EXCLUDED.tipo_proprietario,
+                rntrc = COALESCE(EXCLUDED.rntrc, dash_veiculos.rntrc),
+                cpf_cnpj_proprietario = COALESCE(EXCLUDED.cpf_cnpj_proprietario, dash_veiculos.cpf_cnpj_proprietario),
+                nome_proprietario = COALESCE(EXCLUDED.nome_proprietario, dash_veiculos.nome_proprietario),
+                uf_proprietario = COALESCE(EXCLUDED.uf_proprietario, dash_veiculos.uf_proprietario),
+                ativo = true,
+                updated_at = NOW()
+             RETURNING *`,
+            [
+                tenantId, id || null, veiculoService.normalizarPlaca(placa), renavam || null,
+                chassi || null, uf || null, tipo_rodado, tipo_carroceria,
+                parseFloat(tara_kg || 0), parseFloat(capacidade_kg || 0), parseFloat(capacidade_m3 || 0),
+                tipo_proprietario, rntrc || null, cpf_cnpj_proprietario || null,
+                nome_proprietario || null, uf_proprietario || null
+            ]
+        );
+        return res.status(201).json({ success: true, data: rows[0] });
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+});
+
+router.delete('/veiculos/:id', async (req, res) => {
+    const tenantId = req.tenant.id;
+    try {
+        await db.query(`UPDATE dash_veiculos SET ativo = false, updated_at = NOW() WHERE id = $1 AND tenant_id = $2`, [req.params.id, tenantId]);
+        return res.json({ success: true });
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * Consulta a placa nas bases públicas e devolve os dados preenchidos.
+ */
+router.get('/veiculos/placa/:placa', async (req, res) => {
+    try {
+        const resultado = await veiculoService.consultarPlaca(req.params.placa);
+        return res.json({ success: true, ...resultado });
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+});
+
 router.get('/motoristas', async (req, res) => {
     const tenantId = req.tenant.id;
     try {
         const { rows } = await db.query(`SELECT * FROM dash_motoristas WHERE tenant_id = $1 AND ativo = true ORDER BY nome`, [tenantId]);
         return res.json({ success: true, data: rows });
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * Cadastra (ou atualiza) um motorista.
+ */
+router.post('/motoristas', async (req, res) => {
+    const tenantId = req.tenant.id;
+    const { id, cpf, nome, cnh = null, cnh_categoria = null, cnh_validade = null, telefone = null } = req.body || {};
+
+    if (!cpf || !nome) {
+        return res.status(400).json({ error: 'CPF e nome são obrigatórios.' });
+    }
+
+    try {
+        const { rows } = await db.query(
+            `INSERT INTO dash_motoristas (
+                tenant_id, id, cpf, nome, cnh, cnh_categoria, cnh_validade, telefone
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+             ON CONFLICT (tenant_id, cpf) DO UPDATE SET
+                nome = EXCLUDED.nome,
+                cnh = COALESCE(NULLIF(EXCLUDED.cnh, ''), dash_motoristas.cnh),
+                cnh_categoria = COALESCE(NULLIF(EXCLUDED.cnh_categoria, ''), dash_motoristas.cnh_categoria),
+                cnh_validade = COALESCE(EXCLUDED.cnh_validade, dash_motoristas.cnh_validade),
+                telefone = COALESCE(NULLIF(EXCLUDED.telefone, ''), dash_motoristas.telefone),
+                ativo = true,
+                updated_at = NOW()
+             RETURNING *`,
+            [
+                tenantId, id || null, String(cpf).replace(/\D/g, ''), nome,
+                cnh || null, cnh_categoria || null, cnh_validade || null, telefone || null
+            ]
+        );
+        return res.status(201).json({ success: true, data: rows[0] });
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+});
+
+router.delete('/motoristas/:id', async (req, res) => {
+    const tenantId = req.tenant.id;
+    try {
+        await db.query(`UPDATE dash_motoristas SET ativo = false, updated_at = NOW() WHERE id = $1 AND tenant_id = $2`, [req.params.id, tenantId]);
+        return res.json({ success: true });
     } catch (err) {
         return res.status(500).json({ error: err.message });
     }

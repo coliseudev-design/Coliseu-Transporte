@@ -8,11 +8,10 @@ import {
 } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
 import { useSyncStatus } from '../../hooks/useSync'
-import BranchSelector from '../../components/BranchSelector'
 import ModalAlterarSenha from '../../components/ModalAlterarSenha'
 import clsx from 'clsx'
 
-export default function Header() {
+export default function Header({ onOpenSidebar }: { onOpenSidebar?: () => void }) {
   const navigate = useNavigate()
   const user = useAuthStore((s) => s.user)
   const logout = useAuthStore((s) => s.logout)
@@ -166,13 +165,13 @@ export default function Header() {
       {/* 3. NAVBAR (BARRA PRINCIPAL) - Altura: 74px, Fundo: #ffffff, Sombra elegante e proporcional */}
       <header className="h-[74px] bg-white border-b border-[#e8ecf1] sticky top-0 z-50 flex items-center px-3 sm:px-4 xl:px-5 shadow-[0_4px_20px_rgba(0,0,0,0.05),0_1px_3px_rgba(0,0,0,0.03)] transition-all">
         
-        {/* Hambúrguer Menu (Mobile) */}
+        {/* Hambúrguer Menu (Tablet e Mobile) — no desktop o menu lateral fixo assume */}
         <button
-          className="xl:hidden p-1.5 -ml-1 text-slate-600 hover:bg-slate-100 rounded-xl mr-1 transition-colors"
-          onClick={() => setMobileMenuOpen(true)}
+          className="lg:hidden p-1.5 -ml-1 text-slate-600 hover:bg-slate-100 rounded-xl mr-0.5 transition-colors"
+          onClick={() => { setMobileMenuOpen(true); onOpenSidebar?.(); }}
           aria-label="Abrir menu"
         >
-          <Menu size={24} />
+          <Menu size={22} />
         </button>
 
         {/* 1. LOGO COLISEU TRANSPORTE — COMPACTO */}
@@ -290,28 +289,26 @@ export default function Header() {
           })}
         </nav>
 
-        {/* ÁREA DA DIREITA: BRANCH SELECTOR, USUÁRIO & LOGOUT */}
-        <div className="ml-auto flex items-center gap-2.5 sm:gap-3 shrink-0">
-          
-          <BranchSelector />
+        {/* ÁREA DA DIREITA: USUÁRIO (compacta, sem sobrepor o menu) */}
+        <div className="flex items-center gap-1.5 shrink-0 ml-1">
 
-          {/* 5. USUÁRIO (AVATAR CIRCULAR 38x38px + NOME + CARD ARREDONDADO) */}
+          {/* 5. USUÁRIO (avatar compacto + nome) */}
           <div className="relative">
             <button
               onClick={() => setProfileDropdownOpen((o) => !o)}
-              className="flex items-center gap-2 p-[4px_14px_4px_4px] bg-white border border-[#e2e8f0] rounded-full hover:border-[#cbd5e1] hover:shadow-xs transition-all duration-250 cursor-pointer"
+              className="flex items-center gap-1.5 p-[3px_10px_3px_3px] bg-white border border-[#e2e8f0] rounded-full hover:border-[#cbd5e1] hover:shadow-xs transition-all duration-250 cursor-pointer"
             >
-              {/* Avatar 38x38px com gradiente azul marinho */}
-              <div className="w-[38px] h-[38px] rounded-full bg-gradient-to-tr from-[#1e3a8a] to-[#1e40af] text-white flex items-center justify-center text-sm font-black shadow-[0_2px_8px_rgba(30,58,138,0.35)] shrink-0">
+              {/* Avatar 30px */}
+              <div className="w-[30px] h-[30px] rounded-full bg-gradient-to-tr from-[#1e3a8a] to-[#1e40af] text-white flex items-center justify-center text-xs font-black shadow-[0_2px_6px_rgba(30,58,138,0.3)] shrink-0">
                 {user?.nome?.[0]?.toUpperCase() || 'U'}
               </div>
 
-              {/* Nome do usuário 13.5px, weight 700, cor #1e293b */}
-              <span className="text-[13.5px] font-extrabold text-slate-800 hidden md:inline truncate max-w-[130px]">
+              {/* Nome do usuário */}
+              <span className="text-xs font-extrabold text-slate-800 hidden xl:inline truncate max-w-[90px]">
                 {user?.nome || 'Usuário'}
               </span>
 
-              <ChevronDown size={13} className="text-[#94a3b8] opacity-70 hidden md:block" />
+              <ChevronDown size={11} className="text-[#94a3b8] opacity-70 hidden xl:block" />
             </button>
 
             {profileDropdownOpen && (
