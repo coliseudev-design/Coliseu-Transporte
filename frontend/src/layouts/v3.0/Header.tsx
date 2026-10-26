@@ -4,7 +4,7 @@ import {
   Menu, LogOut, X, ChevronDown, HelpCircle, User,
   Users, Package, Network, Settings,
   FileText, Shield, BrainCircuit, BarChart3, ChevronRight,
-  Building2, Key, Truck, Navigation, FileStack, BadgeCheck
+  Building2, Key, Truck, Navigation, FileStack, BadgeCheck, Plus
 } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
 import { useSyncStatus } from '../../hooks/useSync'
@@ -182,7 +182,7 @@ export default function Header() {
             className="flex items-center group transition-transform duration-250 hover:scale-105"
           >
             <img
-              src="/assets/logo-coliseu-transporte.svg"
+              src="/assets/logo-coliseu-transporte-compacto.svg"
               alt="Coliseu Transporte"
               className="h-[34px] lg:h-[38px] w-auto object-contain"
             />
@@ -406,7 +406,7 @@ export default function Header() {
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <img
-                    src="/assets/logo-coliseu-transporte.svg"
+                    src="/assets/logo-coliseu-transporte-compacto.svg"
                     alt="Coliseu Transporte"
                     className="h-7 w-auto object-contain"
                   />

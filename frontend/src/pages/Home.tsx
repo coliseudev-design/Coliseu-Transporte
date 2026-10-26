@@ -43,14 +43,6 @@ export default function Home() {
       {/* Topo Operacional com Ações Rápidas */}
       <div className="bg-white dark:bg-slate-800 p-6 sm:p-8 rounded-3xl border border-slate-200/80 dark:border-slate-700/80 shadow-xs flex flex-col lg:flex-row lg:items-center justify-between gap-6">
         <div>
-          <div className="flex items-center gap-2 mb-2">
-            <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-bold uppercase tracking-wider bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 border border-emerald-200/60 dark:border-emerald-800/40">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-              SEFAZ Online · Focus NFe Integrada
-            </span>
-            <span className="text-xs text-slate-400">•</span>
-            <span className="text-xs text-slate-500 dark:text-slate-400 font-medium">ERP Sincronizado</span>
-          </div>
           <h1 className="text-2xl sm:text-3xl font-black text-slate-900 dark:text-white tracking-tight">
             Central de Despacho & Transporte
           </h1>

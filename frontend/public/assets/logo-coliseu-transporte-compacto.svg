@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 260 64" width="260" height="64" role="img" aria-label="Coliseu Transporte">
+  <defs>
+    <linearGradient id="ctGradC" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1E3A8A"/>
+      <stop offset="100%" stop-color="#0EA5E9"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Onda Coliseu (3 faixas) -->
+  <g transform="translate(4 12)">
+    <path d="M0 8 Q 10 0 20 8 T 40 8 T 60 8" fill="none" stroke="url(#ctGradC)" stroke-width="6.5" stroke-linecap="round"/>
+    <path d="M0 23 Q 10 15 20 23 T 40 23 T 60 23" fill="none" stroke="url(#ctGradC)" stroke-width="6.5" stroke-linecap="round" opacity="0.72"/>
+    <path d="M0 38 Q 10 30 20 38 T 40 38 T 60 38" fill="none" stroke="url(#ctGradC)" stroke-width="6.5" stroke-linecap="round" opacity="0.45"/>
+  </g>
+
+  <!-- Tipografia compacta -->
+  <text x="78" y="30" font-family="Inter, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="22" font-weight="800" letter-spacing="-0.5" fill="#0F172A">
+    COLISEU
+  </text>
+  <text x="78" y="52" font-family="Inter, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="22" font-weight="800" letter-spacing="-0.5" fill="url(#ctGradC)">
+    TRANSPORTE
+  </text>
+</svg>
