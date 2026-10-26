@@ -228,7 +228,7 @@ export default function PartesPage() {
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                 <div className="sm:col-span-2">
                   <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1">Logradouro</label>
                   <input

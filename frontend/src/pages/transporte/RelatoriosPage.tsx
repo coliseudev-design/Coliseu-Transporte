@@ -112,7 +112,7 @@ export default function RelatoriosPage() {
             <div className="p-12 text-center text-slate-400 text-sm">Carregando indicadores...</div>
           ) : (
             <>
-              <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                 {[
                   { label: 'CT-e Emitidos', value: r.total_ctes, sub: `${r.ctes_autorizados} autorizados`, cor: 'text-sky-600' },
                   { label: 'CT-e Rejeitados', value: r.ctes_rejeitados, sub: 'pela SEFAZ', cor: 'text-red-500' },

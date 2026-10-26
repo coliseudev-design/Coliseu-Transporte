@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import api from '../../services/api';
+import TabelaResponsiva from '../../components/TabelaResponsiva';
 import { CampoFiscal, GradeCampos, SelectFiscal, InputFiscal, mascaras } from '../../components/fiscal/CampoFiscal';
 import {
   Truck, User, Plus, Search, Loader2, Trash2, AlertTriangle, CheckCircle2,

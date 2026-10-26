@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import api from '../../services/api';
+import TabelaResponsiva from '../../components/TabelaResponsiva';
 import DocumentoDrawer from '../../components/DocumentoDrawer';
 import {
   FileText, Send, CheckCircle2, AlertTriangle, XCircle,

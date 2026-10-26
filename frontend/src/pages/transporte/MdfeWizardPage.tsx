@@ -455,7 +455,7 @@ export default function MdfeWizardPage() {
                       vazio="Obrigatório desde a NT 2501 — adicione o pagamento do frete."
                       className="border-0"
                       renderItem={(item, i, atualizar, remover) => (
-                        <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
                           <InputFiscal value={item.responsavel} onChange={v => atualizar({ ...item, responsavel: v })} placeholder="Responsável (CNPJ)" />
                           <InputFiscal value={item.componentes} onChange={v => atualizar({ ...item, componentes: v })} placeholder="Componentes" />
                           <SelectFiscal
@@ -558,7 +558,7 @@ export default function MdfeWizardPage() {
                       vazio="Informe o produto predominante com o NCM."
                       className="border-0"
                       renderItem={(item, i, atualizar, remover) => (
-                        <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
                           <SelectFiscal
                             value={item.tipo_carga}
                             onChange={v => atualizar({ ...item, tipo_carga: v })}

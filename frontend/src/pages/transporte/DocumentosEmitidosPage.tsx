@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import api from '../../services/api';
+import TabelaResponsiva from '../../components/TabelaResponsiva';
 import DocumentoDrawer from '../../components/DocumentoDrawer';
 import {
   FileText, Truck, Search, Calendar, Download, Eye,
@@ -206,109 +207,143 @@ export default function DocumentosEmitidosPage() {
             </p>
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-sm">
-              <thead className="bg-slate-50 dark:bg-slate-900/50 text-[11px] font-semibold text-slate-500 border-b border-slate-100 dark:border-slate-700/60 uppercase tracking-wider">
-                <tr>
-                  <th className="px-4 py-3.5">Tipo</th>
-                  <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60">Documento</th>
-                  <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60">Chave de Acesso</th>
-                  <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60">Emissão</th>
-                  <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60">Emitente</th>
-                  <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60">Rota</th>
-                  <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60 text-right">Valor</th>
-                  <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60">Status</th>
-                  <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60 text-right">Ações</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100 dark:divide-slate-700/60 text-xs">
-                {documentos.map(doc => (
-                  <tr
-                    key={`${doc.tipo_documento}-${doc.id}`}
-                    onClick={() => setDrawer({ tipo: doc.tipo_documento, id: doc.id })}
-                    className="cursor-pointer hover:bg-slate-50/70 dark:hover:bg-slate-700/30 transition-colors"
-                  >
-                    <td className="px-4 py-3">
-                      <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[10px] font-bold ${
-                        doc.tipo_documento === 'CTE'
-                          ? 'bg-blue-50 dark:bg-blue-950/50 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800'
-                          : 'bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800'
-                      }`}>
-                        {doc.tipo_documento === 'CTE'
-                          ? <FileText className="w-3 h-3" />
-                          : <Truck className="w-3 h-3" />}
-                        {doc.tipo_documento === 'CTE' ? 'CT-e' : 'MDF-e'}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 border-l border-slate-200 dark:border-slate-700/60">
+                    <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200/80 dark:border-slate-700/80 shadow-sm overflow-hidden">
+            <TabelaResponsiva<Documento>
+              dados={documentos}
+              chaveDe={d => `${d.tipo_documento}-${d.id}`}
+              aoClicar={d => setDrawer({ tipo: d.tipo_documento, id: d.id })}
+              colunas={[
+                {
+                  chave: 'tipo',
+                  rotulo: 'Tipo',
+                  render: d => (
+                    <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[10px] font-bold ${
+                      d.tipo_documento === 'CTE'
+                        ? 'bg-blue-50 dark:bg-blue-950/50 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800'
+                        : 'bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800'
+                    }`}>
+                      {d.tipo_documento === 'CTE'
+                        ? <FileText className="w-3 h-3" />
+                        : <Truck className="w-3 h-3" />}
+                      {d.tipo_documento === 'CTE' ? 'CT-e' : 'MDF-e'}
+                    </span>
+                  )
+                },
+                {
+                  chave: 'documento',
+                  rotulo: 'Documento',
+                  render: d => (
+                    <div>
                       <p className="font-bold text-slate-900 dark:text-white whitespace-nowrap">
-                        Nº {doc.numero || '—'}
-                        {doc.serie && <span className="text-[10px] text-slate-400 font-normal ml-1">SÉRIE {doc.serie}</span>}
+                        Nº {d.numero || '—'}
+                        {d.serie && <span className="text-[10px] text-slate-400 font-normal ml-1">SÉRIE {d.serie}</span>}
                       </p>
-                      <p className="text-[10px] text-slate-400 mt-0.5">
-                        {doc.qtd_documentos} doc. vinculado(s)
-                      </p>
-                    </td>
-                    <td className="px-4 py-3 border-l border-slate-200 dark:border-slate-700/60 font-mono text-[10px] text-slate-500 dark:text-slate-400 max-w-[180px] truncate">
-                      {doc.chave || doc.ref}
-                    </td>
-                    <td className="px-4 py-3 border-l border-slate-200 dark:border-slate-700/60 text-slate-600 dark:text-slate-400 whitespace-nowrap">
-                      {doc.data_emissao ? new Date(doc.data_emissao).toLocaleDateString('pt-BR') : '—'}
-                    </td>
-                    <td className="px-4 py-3 border-l border-slate-200 dark:border-slate-700/60 text-slate-900 dark:text-white max-w-[160px] truncate" title={doc.emitente_nome}>
-                      {doc.emitente_nome || '—'}
-                    </td>
-                    <td className="px-4 py-3 border-l border-slate-200 dark:border-slate-700/60 text-slate-600 dark:text-slate-400 whitespace-nowrap">
-                      {doc.uf_inicio} → {doc.uf_fim}
-                      {doc.municipio_inicio && (
-                        <span className="block text-[10px] text-slate-400">
-                          {doc.municipio_inicio}
-                        </span>
-                      )}
-                    </td>
-                    <td className="px-4 py-3 border-l border-slate-200 dark:border-slate-700/60 text-right font-semibold text-slate-900 dark:text-white tabular-nums whitespace-nowrap">
-                      R$ {Number(doc.valor_total || doc.valor_carga || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
-                    </td>
-                    <td className="px-4 py-3 border-l border-slate-200 dark:border-slate-700/60 whitespace-nowrap">
-                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${statusBadge(doc.status)}`}>
-                        {doc.status}
+                      <p className="text-[10px] text-slate-400 mt-0.5">{d.qtd_documentos} doc. vinculado(s)</p>
+                    </div>
+                  )
+                },
+                {
+                  chave: 'chave',
+                  rotulo: 'Chave de Acesso',
+                  ocultarNoCelular: true,
+                  render: d => (
+                    <span className="font-mono text-[10px] text-slate-500 dark:text-slate-400 block max-w-[180px] truncate">
+                      {d.chave || d.ref}
+                    </span>
+                  )
+                },
+                {
+                  chave: 'emissao',
+                  rotulo: 'Emissão',
+                  ocultarNoCelular: true,
+                  render: d => (
+                    <span className="text-slate-600 dark:text-slate-400 whitespace-nowrap">
+                      {d.data_emissao ? new Date(d.data_emissao).toLocaleDateString('pt-BR') : '—'}
+                    </span>
+                  )
+                },
+                {
+                  chave: 'emitente',
+                  rotulo: 'Emitente',
+                  render: d => (
+                    <span className="text-slate-900 dark:text-white block truncate max-w-[170px]" title={d.emitente_nome}>
+                      {d.emitente_nome || '—'}
+                    </span>
+                  )
+                },
+                {
+                  chave: 'rota',
+                  rotulo: 'Rota',
+                  render: d => (
+                    <div>
+                      <span className="text-slate-600 dark:text-slate-400 whitespace-nowrap">
+                        {d.uf_inicio} → {d.uf_fim}
                       </span>
-                    </td>
-                    <td className="px-4 py-3 border-l border-slate-200 dark:border-slate-700/60 text-right whitespace-nowrap space-x-1.5" onClick={e => e.stopPropagation()}>
+                      {d.municipio_inicio && (
+                        <span className="block text-[10px] text-slate-400">{d.municipio_inicio}</span>
+                      )}
+                    </div>
+                  )
+                },
+                {
+                  chave: 'valor',
+                  rotulo: 'Valor',
+                  alinhamento: 'right',
+                  render: d => (
+                    <span className="font-semibold text-slate-900 dark:text-white tabular-nums whitespace-nowrap">
+                      R$ {Number(d.valor_total || d.valor_carga || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                    </span>
+                  )
+                },
+                {
+                  chave: 'status',
+                  rotulo: 'Status',
+                  render: d => (
+                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold whitespace-nowrap ${statusBadge(d.status)}`}>
+                      {d.status}
+                    </span>
+                  )
+                },
+                {
+                  chave: 'acoes',
+                  rotulo: 'Ações',
+                  alinhamento: 'right',
+                  render: d => (
+                    <div className="flex items-center justify-end gap-1.5" onClick={e => e.stopPropagation()}>
                       <button
-                        onClick={() => setDrawer({ tipo: doc.tipo_documento, id: doc.id })}
+                        onClick={() => setDrawer({ tipo: d.tipo_documento, id: d.id })}
                         className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-900 dark:bg-white text-white dark:text-slate-900 hover:bg-slate-700 dark:hover:bg-slate-200 text-[11px] font-semibold transition-colors"
                       >
                         <ArrowUpRight className="w-3 h-3" />
-                        Detalhes
+                        <span className="hidden xl:inline">Detalhes</span>
                       </button>
-                      {doc.caminho_pdf && (
+                      {d.caminho_pdf && (
                         <a
-                          href={doc.caminho_pdf}
+                          href={d.caminho_pdf}
                           target="_blank"
                           rel="noreferrer"
                           className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-200 text-[11px] font-medium transition-colors"
                         >
                           <Eye className="w-3 h-3" />
-                          PDF
+                          <span className="hidden xl:inline">PDF</span>
                         </a>
                       )}
-                      {doc.caminho_xml && (
+                      {d.caminho_xml && (
                         <a
-                          href={doc.caminho_xml}
+                          href={d.caminho_xml}
                           target="_blank"
                           rel="noreferrer"
                           className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-200 text-[11px] font-medium transition-colors"
                         >
                           <Download className="w-3 h-3" />
-                          XML
+                          <span className="hidden xl:inline">XML</span>
                         </a>
                       )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+                    </div>
+                  )
+                }
+              ]}
+            />
           </div>
         )}
       </div>

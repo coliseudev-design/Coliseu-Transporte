@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import api from '../../services/api';
+import TabelaResponsiva from '../../components/TabelaResponsiva';
 import {
   Package, Truck, FileText, ChevronRight,
   Search, List, LayoutGrid, Calendar, User, Printer, Copy, X, MapPin
@@ -508,152 +509,161 @@ export default function CargasPage() {
       ) : viewMode === 'lista' ? (
         /* MODO LISTA (TABELA OPERACIONAL DENSIDADE PRO - PADRÃO) */
         <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200/80 dark:border-slate-700/80 overflow-hidden shadow-sm">
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-sm">
-              <thead className="bg-slate-50 dark:bg-slate-900/50 text-[11px] font-semibold text-slate-500 border-b border-slate-100 dark:border-slate-700/60 uppercase tracking-wider">
-                <tr>
-                  <th className="px-4 py-3.5 w-10 text-center">
-                    <input
-                      type="checkbox"
-                      checked={selectedIds.length === cargas.length && cargas.length > 0}
-                      onChange={selectAll}
-                      className="w-4 h-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500"
-                    />
-                  </th>
-                  <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60">NF-e / Série</th>
-                  <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60">Chave XML</th>
-                  <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60">Data Emissão</th>
-                  <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60">Origem</th>
-                  <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60">Destinatário (Cliente)</th>
-                  <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60">Destino (Cidade/UF)</th>
-                  <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60 text-right">Peso</th>
-                  <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60 text-right">Valor da NF</th>
-                  <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60">Status</th>
-                  <th className="px-4 py-3.5 border-l border-slate-200 dark:border-slate-700/60 text-right">Ações</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100 dark:divide-slate-700/60 text-xs">
-                {cargas.map(carga => {
-                  const isSelected = selectedIds.includes(carga.id);
-                  const itens = carga.dados_nfe?.itens || [];
-                  const isExpanded = expandedItemsIds.includes(carga.id);
-                  return (
-                    <React.Fragment key={carga.id}>
-                      <tr
-                        onClick={() => toggleSelect(carga.id)}
-                        className={`cursor-pointer transition-colors ${
-                          isSelected
-                            ? 'bg-brand-50/60 dark:bg-brand-950/30'
-                            : 'hover:bg-slate-50/70 dark:hover:bg-slate-700/30'
-                        }`}
-                      >
-                        <td className="px-4 py-3 text-center" onClick={e => e.stopPropagation()}>
-                          <input
-                            type="checkbox"
-                            checked={isSelected}
-                            onChange={() => toggleSelect(carga.id)}
-                            className="w-4 h-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500"
-                          />
-                        </td>
-                        <td className="px-4 py-3 font-semibold text-slate-900 dark:text-white whitespace-nowrap border-l border-slate-200 dark:border-slate-700/60">
-                          NF-e {carga.numero || 'S/N'}
-                          {carga.serie && <span className="text-[10px] text-slate-400 font-normal ml-1">(Série {carga.serie})</span>}
-                        </td>
-                        <td className="px-4 py-3 font-mono text-[11px] text-slate-500 dark:text-slate-400 max-w-[200px] border-l border-slate-200 dark:border-slate-700/60">
-                          <div className="flex items-center gap-1.5">
-                            <span className="truncate" title={carga.chave_acesso}>
-                              {carga.chave_acesso || '—'}
-                            </span>
-                            {carga.chave_acesso && (
-                              <button
-                                onClick={e => handleCopiarChave(e, carga.chave_acesso)}
-                                title="Copiar Chave"
-                                className="p-1 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 shrink-0"
-                              >
-                                <Copy className="w-3 h-3" />
-                              </button>
-                            )}
-                          </div>
-                        </td>
-                        <td className="px-4 py-3 text-slate-600 dark:text-slate-400 whitespace-nowrap border-l border-slate-200 dark:border-slate-700/60">
-                          {carga.data_emissao ? new Date(carga.data_emissao).toLocaleDateString('pt-BR') : '—'}
-                        </td>
-                        <td className="px-4 py-3 text-slate-600 dark:text-slate-400 whitespace-nowrap border-l border-slate-200 dark:border-slate-700/60">
-                          {carga.remetente_municipio || '—'}/{carga.remetente_uf || ''}
-                        </td>
-                        <td className="px-4 py-3 text-slate-900 dark:text-white font-medium max-w-[200px] truncate border-l border-slate-200 dark:border-slate-700/60" title={carga.destinatario_nome}>
-                          {carga.destinatario_nome || 'Consumidor'}
-                        </td>
-                        <td className="px-4 py-3 text-slate-600 dark:text-slate-400 whitespace-nowrap border-l border-slate-200 dark:border-slate-700/60">
-                          {carga.destinatario_municipio || '—'}/{carga.destinatario_uf || ''}
-                        </td>
-                        <td className="px-4 py-3 text-slate-700 dark:text-slate-300 tabular-nums whitespace-nowrap text-right border-l border-slate-200 dark:border-slate-700/60">
-                          {Number(carga.peso_bruto || 0).toLocaleString('pt-BR')} kg
-                        </td>
-                        <td className="px-4 py-3 font-semibold text-slate-900 dark:text-white tabular-nums whitespace-nowrap text-right border-l border-slate-200 dark:border-slate-700/60">
-                          R$ {Number(carga.valor_total || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
-                        </td>
-                        <td className="px-4 py-3 whitespace-nowrap border-l border-slate-200 dark:border-slate-700/60">
-                          <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
-                            carga.status === 'PENDENTE'
-                              ? 'bg-amber-100 text-amber-800 dark:bg-amber-950/50 dark:text-amber-300'
-                              : 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-300'
-                          }`}>
-                            {carga.status}
+                      <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200/80 dark:border-slate-700/80 overflow-hidden shadow-sm">
+              <TabelaResponsiva<Carga>
+                dados={cargas}
+                chaveDe={c => c.id}
+                aoClicar={c => toggleSelect(c.id)}
+                selecionado={c => selectedIds.includes(c.id)}
+                colunas={[
+                  {
+                    chave: 'nf',
+                    rotulo: 'NF-e / Série',
+                    render: c => (
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={selectedIds.includes(c.id)}
+                          onChange={() => toggleSelect(c.id)}
+                          onClick={e => e.stopPropagation()}
+                          className="w-4 h-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500 shrink-0"
+                        />
+                        <span className="font-semibold text-slate-900 dark:text-white whitespace-nowrap">
+                          NF-e {c.numero || 'S/N'}
+                        </span>
+                        {c.serie && (
+                          <span className="text-[10px] text-slate-400 font-normal whitespace-nowrap">
+                            (Série {c.serie})
                           </span>
-                        </td>
-                        <td className="px-4 py-3 text-right whitespace-nowrap space-x-1.5 border-l border-slate-200 dark:border-slate-700/60" onClick={e => e.stopPropagation()}>
+                        )}
+                      </div>
+                    )
+                  },
+                  {
+                    chave: 'chave',
+                    rotulo: 'Chave XML',
+                    render: c => (
+                      <div className="flex items-center gap-1.5">
+                        <span className="font-mono text-[11px] text-slate-500 dark:text-slate-400 truncate max-w-[180px]">
+                          {c.chave_acesso || '—'}
+                        </span>
+                        {c.chave_acesso && (
+                          <button
+                            onClick={e => handleCopiarChave(e, c.chave_acesso)}
+                            title="Copiar Chave"
+                            className="p-1 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 shrink-0"
+                          >
+                            <Copy className="w-3 h-3" />
+                          </button>
+                        )}
+                      </div>
+                    )
+                  },
+                  {
+                    chave: 'data',
+                    rotulo: 'Data Emissão',
+                    ocultarNoCelular: true,
+                    render: c => (
+                      <span className="text-slate-600 dark:text-slate-400 whitespace-nowrap">
+                        {c.data_emissao ? new Date(c.data_emissao).toLocaleDateString('pt-BR') : '—'}
+                      </span>
+                    )
+                  },
+                  {
+                    chave: 'origem',
+                    rotulo: 'Origem',
+                    ocultarNoTablet: true,
+                    render: c => (
+                      <span className="text-slate-600 dark:text-slate-400 whitespace-nowrap">
+                        {c.remetente_municipio || '—'}/{c.remetente_uf || ''}
+                      </span>
+                    )
+                  },
+                  {
+                    chave: 'destinatario',
+                    rotulo: 'Destinatário (Cliente)',
+                    render: c => (
+                      <span className="font-medium text-slate-900 dark:text-white block truncate max-w-[220px]" title={c.destinatario_nome}>
+                        {c.destinatario_nome || 'Consumidor'}
+                      </span>
+                    )
+                  },
+                  {
+                    chave: 'destino',
+                    rotulo: 'Destino (Cidade/UF)',
+                    render: c => (
+                      <span className="text-slate-600 dark:text-slate-400 whitespace-nowrap">
+                        {c.destinatario_municipio || '—'}/{c.destinatario_uf || ''}
+                      </span>
+                    )
+                  },
+                  {
+                    chave: 'peso',
+                    rotulo: 'Peso',
+                    alinhamento: 'right',
+                    ocultarNoCelular: true,
+                    render: c => (
+                      <span className="text-slate-700 dark:text-slate-300 tabular-nums whitespace-nowrap">
+                        {Number(c.peso_bruto || 0).toLocaleString('pt-BR')} kg
+                      </span>
+                    )
+                  },
+                  {
+                    chave: 'valor',
+                    rotulo: 'Valor da NF',
+                    alinhamento: 'right',
+                    render: c => (
+                      <span className="font-semibold text-slate-900 dark:text-white tabular-nums whitespace-nowrap">
+                        R$ {Number(c.valor_total || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                      </span>
+                    )
+                  },
+                  {
+                    chave: 'status',
+                    rotulo: 'Status',
+                    render: c => (
+                      <span className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-semibold whitespace-nowrap ${
+                        c.status === 'PENDENTE'
+                          ? 'bg-amber-100 text-amber-800 dark:bg-amber-950/50 dark:text-amber-300'
+                          : 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-300'
+                      }`}>
+                        {c.status}
+                      </span>
+                    )
+                  },
+                  {
+                    chave: 'acoes',
+                    rotulo: 'Ações',
+                    alinhamento: 'right',
+                    render: c => {
+                      const itens = c.dados_nfe?.itens || [];
+                      return (
+                        <div className="flex items-center justify-end gap-1.5" onClick={e => e.stopPropagation()}>
                           {itens.length > 0 && (
                             <button
-                              onClick={e => toggleExpandItems(e, carga.id)}
+                              onClick={e => toggleExpandItems(e, c.id)}
                               title="Ver itens da nota"
                               className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-200 text-[11px] font-medium transition-colors"
                             >
                               <Package className="w-3 h-3" />
-                              {itens.length} itens
+                              <span className="hidden xl:inline">{itens.length} itens</span>
                             </button>
                           )}
                           <button
-                            onClick={() => handleVisualizarDanfe(carga)}
+                            onClick={() => handleVisualizarDanfe(c)}
                             title="Visualizar / Imprimir DANFE oficial"
                             className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-brand-50 dark:bg-brand-950/50 text-brand-700 dark:text-brand-300 border border-brand-200 dark:border-brand-800 hover:bg-brand-100 text-[11px] font-semibold transition-colors"
                           >
                             <Printer className="w-3 h-3" />
                             DANFE
                           </button>
-                        </td>
-                      </tr>
-
-                      {/* Linha expansível com itens da nota fiscal */}
-                      {isExpanded && (
-                        <tr className="bg-slate-50/70 dark:bg-slate-900/40">
-                          <td colSpan={11} className="px-6 py-3 border-t border-slate-100 dark:border-slate-800">
-                            <div className="text-xs font-semibold text-slate-500 mb-2 flex items-center gap-1.5">
-                              <Package className="w-3.5 h-3.5 text-brand-600" />
-                              Itens da NF-e {carga.numero}: {itens.length} produto(s) sincronizado(s)
-                            </div>
-                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 max-h-40 overflow-y-auto pr-1">
-                              {itens.map((it, idx) => (
-                                <div key={idx} className="p-2 rounded-lg bg-white dark:bg-slate-800 border border-slate-200/60 dark:border-slate-700/60 flex justify-between items-center text-[11px]">
-                                  <div className="truncate mr-2">
-                                    <p className="font-medium text-slate-900 dark:text-slate-100 truncate">{it.descricao}</p>
-                                    <p className="text-[10px] text-slate-400 font-mono">Qtd: {Number(it.quantidade || 0)} {it.unidade || 'UN'}</p>
-                                  </div>
-                                  <span className="font-semibold text-slate-900 dark:text-white shrink-0 tabular-nums">
-                                    R$ {Number(it.valor_total || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
-                                  </span>
-                                </div>
-                              ))}
-                            </div>
-                          </td>
-                        </tr>
-                      )}
-                    </React.Fragment>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+                        </div>
+                      );
+                    }
+                  }
+                ]}
+              />
+            </div>
         </div>
       ) : (
         /* MODO CARDS */
@@ -1099,7 +1109,7 @@ export default function CargasPage() {
             <form onSubmit={handleCriarMdfeDireto} className="flex-1 overflow-y-auto py-5 space-y-6 pr-1">
 
               {/* 1. Visão Geral da Rota e Cidades Envolvidas */}
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-3 bg-slate-50 dark:bg-slate-900/40 p-4 rounded-2xl border border-slate-100 dark:border-slate-800">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 bg-slate-50 dark:bg-slate-900/40 p-4 rounded-2xl border border-slate-100 dark:border-slate-800">
                 <div>
                   <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Notas Selecionadas</span>
                   <p className="text-xl font-black text-slate-900 dark:text-white mt-0.5">
