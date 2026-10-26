@@ -97,6 +97,14 @@ export default function CargasPage() {
   });
 
   // Quadro de Sincronismo do Worker (Clientes, Produtos, Notas Fiscais, Vendas/Itens)
+  // Diagnóstico da sincronização do Worker (mostra o que fazer se as notas não chegarem)
+  const { data: diagData } = useQuery({
+    queryKey: ['transporte-diagnostico'],
+    queryFn: async () => (await api.get('/transporte/diagnostico')).data,
+    refetchInterval: 60000
+  });
+  const diag = diagData?.data;
+
   const { data: syncStatusData } = useQuery({
     queryKey: ['transporte-sync-status'],
     queryFn: async () => (await api.get('/sync/status')).data,
@@ -499,17 +507,44 @@ export default function CargasPage() {
           Carregando notas fiscais do ERP...
         </div>
       ) : cargas.length === 0 ? (
-        <div className="bg-white dark:bg-slate-800 p-12 text-center rounded-2xl border border-dashed border-slate-200 dark:border-slate-700">
+        <div className="bg-white dark:bg-slate-800 p-10 text-center rounded-2xl border border-dashed border-slate-200 dark:border-slate-700">
           <Package className="w-12 h-12 mx-auto text-slate-400 mb-3" />
-          <h3 className="text-base font-semibold text-slate-800 dark:text-slate-200">Nenhuma nota fiscal encontrada</h3>
-          <p className="text-sm text-slate-500 dark:text-slate-400 mt-1 max-w-sm mx-auto">
-            Tente ajustar os filtros de período, cliente ou busca. O Worker continuará sincronizando novas notas automaticamente.
-          </p>
+          <h3 className="text-base font-semibold text-slate-800 dark:text-slate-200">
+            Nenhuma nota fiscal encontrada
+          </h3>
+
+          {diag?.diagnostico && diag.diagnostico !== 'Sincronizacao ativa.' ? (
+            <>
+              <p className="text-sm text-amber-700 dark:text-amber-300 mt-2 max-w-lg mx-auto leading-relaxed">
+                {diag.diagnostico}
+              </p>
+              {diag.acoes?.length > 0 && (
+                <div className="mt-5 max-w-lg mx-auto text-left bg-slate-50 dark:bg-slate-900/50 rounded-2xl border border-slate-200 dark:border-slate-800 p-4">
+                  <p className="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-2">
+                    O que fazer
+                  </p>
+                  <ol className="space-y-1.5">
+                    {diag.acoes.map((a, i) => (
+                      <li key={i} className="text-xs text-slate-600 dark:text-slate-300 flex gap-2">
+                        <span className="shrink-0 w-4 h-4 rounded-full bg-brand-100 dark:bg-brand-950 text-brand-700 dark:text-brand-300 text-[10px] font-bold flex items-center justify-center">
+                          {i + 1}
+                        </span>
+                        {a}
+                      </li>
+                    ))}
+                  </ol>
+                </div>
+              )}
+            </>
+          ) : (
+            <p className="text-sm text-slate-500 dark:text-slate-400 mt-1 max-w-sm mx-auto">
+              Ajuste os filtros de período, cliente ou busca. O Worker continua sincronizando novas notas automaticamente.
+            </p>
+          )}
         </div>
       ) : viewMode === 'lista' ? (
         /* MODO LISTA (TABELA OPERACIONAL DENSIDADE PRO - PADRÃO) */
         <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200/80 dark:border-slate-700/80 overflow-hidden shadow-sm">
-                      <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200/80 dark:border-slate-700/80 overflow-hidden shadow-sm">
               <TabelaResponsiva<Carga>
                 dados={cargas}
                 chaveDe={c => c.id}
@@ -664,7 +699,6 @@ export default function CargasPage() {
                 ]}
               />
             </div>
-        </div>
       ) : (
         /* MODO CARDS */
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">

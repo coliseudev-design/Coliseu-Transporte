@@ -648,6 +648,79 @@ router.get('/emitentes', async (req, res) => {
  * Busca municípios e códigos IBGE a partir de dash_regioes (sincronizado do ERP)
  * e complementa com dash_coordenadas_municipios.
  */
+/**
+ * Diagnóstico da sincronização do módulo Transporte.
+ * Mostra se o Worker estáConfigured, se as notas chegaram e o que fazer.
+ */
+router.get('/diagnostico', async (req, res) => {
+    const tenantId = req.tenant.id;
+    try {
+        const [cargas, ultimaSync, emitteres, heartbeat] = await Promise.all([
+            db.query(
+                `SELECT COUNT(*)::int AS total,
+                        COUNT(*) FILTER (WHERE status = 'PENDENTE')::int AS pendentes,
+                        MAX(sincronizado_em) AS ultima
+                 FROM dash_cargas WHERE tenant_id = $1`,
+                [tenantId]
+            ).catch(() => ({ rows: [{ total: 0, pendentes: 0, ultima: null }] })),
+            db.query(
+                `SELECT MAX(ultima_sincronizacao) AS ultima, MAX(registros_sincronizados)::int AS registros
+                 FROM dash_sync_metadata WHERE tenant_id = $1 AND tabela = 'dash_cargas'`,
+                [tenantId]
+            ).catch(() => ({ rows: [{ ultima: null, registros: 0 }] })),
+            db.query(
+                `SELECT COUNT(*)::int AS total FROM dash_emitentes WHERE tenant_id = $1`,
+                [tenantId]
+            ).catch(() => ({ rows: [{ total: 0 }] })),
+            db.query(
+                `SELECT status, ultima_sincronizacao FROM dash_sync_metadata
+                 WHERE tenant_id = $1 AND tabela = 'dash_cargas'`,
+                [tenantId]
+            ).catch(() => ({ rows: [] }))
+        ]);
+
+        const totalCargas = cargas.rows[0]?.total || 0;
+        const meta = ultimaSync.rows[0] || {};
+        const hb = heartbeat.rows[0] || {};
+
+        const diagnostico = {
+            notas_no_banco: totalCargas,
+            notas_pendentes: cargas.rows[0]?.pendentes || 0,
+            ultima_sincronizacao: cargas.rows[0]?.ultima || meta.ultima || null,
+            registros_no_metadata: meta.registros || 0,
+            status_sync: hb.status || 'NUNCA_SINCRONIZOU',
+            emitentes_cadastrados: emitteres.rows[0]?.total || 0,
+            diagnostico: null,
+            acoes: []
+        };
+
+        if (totalCargas === 0) {
+            diagnostico.diagnostico =
+                'O Worker do ERP ainda nao enviou as notas fiscais para este tenant. Verifique no Configurator do Cliente: ative o modulo "Coliseu Transporte" e informe a Internal API Key.';
+            diagnostico.acoes = [
+                'No Configurator (ColiseuSales), marque "Coliseu Transporte" como habilitado',
+                'Confirme a URL: https://transporte.coliseusistemas.com.br',
+                'Informe a Internal API Key do módulo no campo correspondente',
+                'Reinicie o servico ColiseuSales.Worker no Windows do cliente',
+                'Aguarde o primeiro ciclo de sincronizacao (o Worker envia a cada 10 minutos)'
+            ];
+        } else if (diagnostico.emitentes_cadastrados === 0) {
+            diagnostico.diagnostico =
+                'As notas chegaram, mas nenhum emitente fiscal esta cadastrado. Configure em Configuracoes > Dados da Empresa.';
+            diagnostico.acoes = [
+                'Acesse Configuracoes > Dados da Empresa no Coliseu Transporte',
+                'Cadastre o CNPJ, Inscricao Estadual, RNTRC e o token da Focus NFe'
+            ];
+        } else {
+            diagnostico.diagnostico = 'Sincronizacao ativa.';
+        }
+
+        return res.json({ success: true, data: diagnostico });
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+});
+
 router.get('/municipios', async (req, res) => {
     const tenantId = req.tenant.id;
     const { search = '' } = req.query;
