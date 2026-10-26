@@ -123,8 +123,10 @@ export default function Sidebar({ open, onClose }: Props) {
           {renderGroupHeader('Transportes', Truck, transporteOpen, () => setTransporteOpen(!transporteOpen))}
           {transporteOpen && (
             <div className="space-y-0.5 pl-1">
-              {renderLink('/transporte/ctes', 'Emitir CT-e', FileText)}
-              {renderLink('/transporte/mdfes', 'Emitir MDF-e', Truck)}
+              {renderLink('/transporte/cte/novo', 'Emitir CT-e', FileText)}
+              {renderLink('/transporte/mdfe/novo', 'Emitir MDF-e', Truck)}
+              {renderLink('/transporte/ctes', 'CT-e Emitidos', FileText)}
+              {renderLink('/transporte/mdfes', 'MDF-e Emitidos', Truck)}
               {renderLink('/transporte/documentos', 'Consultar Documentos', FileStack)}
             </div>
           )}

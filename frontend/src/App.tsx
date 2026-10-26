@@ -30,6 +30,8 @@ import RoteiroEntregaPage from './pages/transporte/RoteiroEntregaPage'
 import CertificadosPage from './pages/transporte/CertificadosPage'
 import DadosEmpresaPage from './pages/transporte/DadosEmpresaPage'
 import DocumentosEmitidosPage from './pages/transporte/DocumentosEmitidosPage'
+import CteWizardPage from './pages/transporte/CteWizardPage'
+import MdfeWizardPage from './pages/transporte/MdfeWizardPage'
 
 function Protected({ children }: { children: JSX.Element }) {
   const user = useAuthStore((s) => s.user)
@@ -128,6 +130,8 @@ export default function App() {
         <Route path="transporte/roteiro" element={<RoteiroEntregaPage />} />
         <Route path="transporte/certificados" element={<CertificadosPage />} />
         <Route path="transporte/documentos" element={<DocumentosEmitidosPage />} />
+        <Route path="transporte/cte/novo" element={<CteWizardPage />} />
+        <Route path="transporte/mdfe/novo" element={<MdfeWizardPage />} />
 
         {/* ── Cadastros do ERP Sincronizados ── */}
         <Route path="clientes" element={<Clientes />} />

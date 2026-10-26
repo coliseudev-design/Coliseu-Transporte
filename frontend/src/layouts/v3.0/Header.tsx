@@ -56,7 +56,6 @@ export default function Header() {
         { to: '/regioes', label: 'Regiões & Cidades', icon: Network },
         { to: '/transporte/frota', label: 'Frota & Condutores', icon: Truck },
         { to: '/transporte/partes', label: 'Partes do Transporte', icon: Building2 },
-        { to: '/transporte/empresa', label: 'Dados da Empresa (Emitente)', icon: Building2 },
       ]
     },
     {
@@ -69,8 +68,10 @@ export default function Header() {
       activeBg: 'bg-[#E0F2FE] text-[#0284C7] border-[#7DD3FC]',
       hoverBorderLeft: 'hover:border-l-[#0284C7]',
       items: [
-        { to: '/transporte/ctes', label: 'Emitir CT-e', icon: FileText },
-        { to: '/transporte/mdfes', label: 'Emitir MDF-e', icon: Truck },
+        { to: '/transporte/cte/novo', label: 'Emitir CT-e', icon: FileText },
+        { to: '/transporte/mdfe/novo', label: 'Emitir MDF-e', icon: Truck },
+        { to: '/transporte/ctes', label: 'CT-e Emitidos', icon: FileText },
+        { to: '/transporte/mdfes', label: 'MDF-e Emitidos', icon: Truck },
         { to: '/transporte/documentos', label: 'Consultar Documentos Emitidos', icon: FileStack },
       ]
     },
