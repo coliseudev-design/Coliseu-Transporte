@@ -32,6 +32,7 @@ import DadosEmpresaPage from './pages/transporte/DadosEmpresaPage'
 import DocumentosEmitidosPage from './pages/transporte/DocumentosEmitidosPage'
 import CteWizardPage from './pages/transporte/CteWizardPage'
 import MdfeWizardPage from './pages/transporte/MdfeWizardPage'
+import CiotConsultaPage from './pages/transporte/CiotConsultaPage'
 
 function Protected({ children }: { children: JSX.Element }) {
   const user = useAuthStore((s) => s.user)
@@ -119,7 +120,8 @@ export default function App() {
         <Route path="transporte/cargas" element={<CargasPage />} />
         <Route path="transporte/ctes" element={<CtesPage />} />
         <Route path="transporte/mdfes" element={<MdfesPage />} />
-        <Route path="transporte/contratos" element={<ContratosCiotPage />} />
+        <Route path="transporte/contratos" element={<CiotConsultaPage />} />
+        <Route path="transporte/ciot" element={<CiotConsultaPage />} />
         <Route path="transporte/frota" element={<FrotaPage />} />
         <Route path="transporte/empresa" element={<DadosEmpresaPage />} />
         <Route path="transporte/emitentes" element={<DadosEmpresaPage />} />

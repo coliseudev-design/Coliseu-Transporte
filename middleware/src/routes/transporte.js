@@ -845,6 +845,36 @@ router.patch('/contratos/:id/ciot', async (req, res) => {
     }
 });
 
+/**
+ * Cancela um CIOT já registrado (operação não efetivada).
+ */
+router.post('/contratos/:id/ciot/cancelar', async (req, res) => {
+    const tenantId = req.tenant.id;
+    const contratoId = req.params.id;
+    const { motivo } = req.body || {};
+
+    if (!motivo || String(motivo).trim().length < 10) {
+        return res.status(400).json({ error: 'Informe o motivo do cancelamento (mínimo 10 caracteres).' });
+    }
+
+    try {
+        const { rows } = await db.query(
+            `UPDATE dash_contratos_transporte
+             SET ciot_status = 'CANCELADO', ciot_erro = $1, updated_at = NOW()
+             WHERE id = $2 AND tenant_id = $3
+               AND (ciot_status IS NULL OR ciot_status <> 'CANCELADO')
+             RETURNING *`,
+            [String(motivo).trim(), contratoId, tenantId]
+        );
+        if (rows.length === 0) {
+            return res.status(404).json({ error: 'Contrato não encontrado ou CIOT já cancelado.' });
+        }
+        return res.json({ success: true, data: rows[0] });
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+});
+
 // ─────────────────────────────────────────────────────────────
 // 8. RELATÓRIOS FISCAIS
 // ─────────────────────────────────────────────────────────────

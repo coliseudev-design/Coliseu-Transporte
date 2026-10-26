@@ -4,7 +4,7 @@ import {
   Settings, ChevronDown, ChevronUp,
   LogOut, Shield, X, BarChart3, Truck, BrainCircuit,
   Route, Building2, Navigation, KeyRound,
-  FileStack, BadgeCheck
+  FileStack, BadgeCheck, Plus
 } from 'lucide-react'
 import clsx from 'clsx'
 import { useAuthStore } from '../../store/authStore'
@@ -125,8 +125,6 @@ export default function Sidebar({ open, onClose }: Props) {
             <div className="space-y-0.5 pl-1">
               {renderLink('/transporte/cte/novo', 'Emitir CT-e', FileText)}
               {renderLink('/transporte/mdfe/novo', 'Emitir MDF-e', Truck)}
-              {renderLink('/transporte/ctes', 'CT-e Emitidos', FileText)}
-              {renderLink('/transporte/mdfes', 'MDF-e Emitidos', Truck)}
               {renderLink('/transporte/documentos', 'Consultar Documentos', FileStack)}
             </div>
           )}
@@ -145,8 +143,8 @@ export default function Sidebar({ open, onClose }: Props) {
           {renderGroupHeader('CIOT', BadgeCheck, ciotOpen, () => setCiotOpen(!ciotOpen))}
           {ciotOpen && (
             <div className="space-y-0.5 pl-1">
-              {renderLink('/transporte/contratos', 'Contratos de Transporte', FileText)}
-              {renderLink('/transporte/contratos?acao=ciot', 'Gerar Payload do CIOT', BadgeCheck)}
+              {renderLink('/transporte/ciot', 'Consultar CIOT', BadgeCheck)}
+              {renderLink('/transporte/ciot?acao=novo', 'Criar Operação (CIOT)', Plus)}
             </div>
           )}
 

@@ -70,9 +70,6 @@ export default function Header() {
       items: [
         { to: '/transporte/cte/novo', label: 'Emitir CT-e', icon: FileText },
         { to: '/transporte/mdfe/novo', label: 'Emitir MDF-e', icon: Truck },
-        { to: '/transporte/ctes', label: 'CT-e Emitidos', icon: FileText },
-        { to: '/transporte/mdfes', label: 'MDF-e Emitidos', icon: Truck },
-        { to: '/transporte/documentos', label: 'Consultar Documentos Emitidos', icon: FileStack },
       ]
     },
     {
@@ -100,8 +97,8 @@ export default function Header() {
       activeBg: 'bg-[#F5F3FF] text-[#7C3AED] border-[#DDD6FE]',
       hoverBorderLeft: 'hover:border-l-[#7C3AED]',
       items: [
-        { to: '/transporte/contratos', label: 'Contratos de Transporte', icon: FileText },
-        { to: '/transporte/contratos?acao=ciot', label: 'Gerar Payload do CIOT', icon: BadgeCheck },
+        { to: '/transporte/ciot', label: 'Consultar CIOT', icon: BadgeCheck },
+        { to: '/transporte/ciot?acao=novo', label: 'Criar Operação (CIOT)', icon: Plus },
       ]
     },
     {
@@ -178,25 +175,24 @@ export default function Header() {
           <Menu size={24} />
         </button>
 
-        {/* 1. LOGO COLISEU TRANSPORTE — IMPONENTE & HARMÔNICA */}
+        {/* 1. LOGO COLISEU TRANSPORTE — COMPACTO */}
         <div className="flex items-center shrink-0">
-          <Link 
-            to="/" 
+          <Link
+            to="/"
             className="flex items-center group transition-transform duration-250 hover:scale-105"
           >
             <img
               src="/assets/logo-coliseu-transporte.svg"
               alt="Coliseu Transporte"
-              className="h-[42px] sm:h-[46px] w-auto object-contain filter drop-shadow-[0_2px_8px_rgba(30,58,138,0.14)]"
+              className="h-[34px] lg:h-[38px] w-auto object-contain"
             />
           </Link>
 
-          {/* DIVISOR VERTICAL ENTRE LOGO E MENU */}
-          <div className="hidden lg:block h-[38px] w-[1px] bg-[#e2e8f0] mx-2.5 sm:mx-3 xl:mx-3.5" />
+          <div className="hidden lg:block h-[30px] w-px bg-[#e2e8f0] mx-2 xl:mx-2.5" />
         </div>
 
-        {/* 2. BOTÕES DO MENU DE NAVEGAÇÃO — HARMÔNICOS, ELEGANTES E PROPORCIONAIS */}
-        <nav id="desktop-nav" className="hidden lg:flex items-center gap-1 xl:gap-1.5 2xl:gap-2 relative mr-auto">
+        {/* 2. BOTÕES DO MENU DE NAVEGAÇÃO — COMPACTOS E RESPONSIVOS */}
+        <nav id="desktop-nav" className="hidden lg:flex items-center gap-0.5 xl:gap-1 relative mr-auto min-w-0">
           {navigationGroups.map((group) => {
             const GroupIcon = group.icon
             const isGroupActive = group.items.some(item => {
@@ -219,7 +215,7 @@ export default function Header() {
                   }}
                   title={group.label}
                   className={clsx(
-                    'group relative flex items-center gap-2 px-3 py-2 rounded-xl text-[13px] font-semibold tracking-tight transition-all duration-200 cursor-pointer select-none border',
+                    'group relative flex items-center gap-1.5 px-2 xl:px-2.5 py-1.5 rounded-lg text-[12.5px] font-semibold tracking-tight transition-all duration-200 cursor-pointer select-none border whitespace-nowrap',
                     isGroupActive
                       ? 'bg-white border shadow-md -translate-y-0.5'
                       : isOpen
@@ -234,21 +230,21 @@ export default function Header() {
                 >
                   {/* Ícone colorido em um badge suave */}
                   <div
-                    className="p-1 rounded-md shrink-0 flex items-center justify-center transition-transform duration-200 group-hover:scale-110"
+                    className="p-0.5 rounded shrink-0 flex items-center justify-center transition-transform duration-200 group-hover:scale-110"
                     style={{ backgroundColor: `${group.hexColor}18`, color: group.hexColor }}
                   >
-                    <GroupIcon size={16} />
+                    <GroupIcon size={14} />
                   </div>
-                  
+
                   <span className="whitespace-nowrap">{group.label}</span>
 
                   {!(group as any).to && (
-                    <ChevronDown 
-                      size={12} 
+                    <ChevronDown
+                      size={11}
                       className={clsx(
-                        'transition-all duration-200 opacity-50 group-hover:opacity-100 ml-0.5',
-                        (isOpen || isGroupActive) && 'rotate-180 opacity-100 text-[#1E3A8A]'
-                      )} 
+                        'transition-all duration-200 opacity-40 group-hover:opacity-100',
+                        (isOpen || isGroupActive) && 'rotate-180 opacity-100'
+                      )}
                     />
                   )}
                 </button>

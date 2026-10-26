@@ -26,6 +26,7 @@ interface Ponto {
   status_entrega: 'PENDENTE' | 'ENTREGUE' | 'RECUSADO' | 'REENTREGA';
   entregue_em: string;
   recebedor_nome: string;
+  recebedor_documento?: string;
   observacao: string;
 }
 
@@ -156,7 +157,9 @@ export default function RoteiroEntregaPage() {
     if (comCoordenada.length === 0) return;
 
     // Polyline da rota
-    const latlngs = comCoordenada.map(p => [p.latitude, p.longitude]);
+    const latlngs: [number, number][] = comCoordenada.map(
+      p => [Number(p.latitude), Number(p.longitude)]
+    );
     polyline.current = window.L.polyline(latlngs, {
       color: '#0EA5E9',
       weight: 4,
@@ -181,7 +184,7 @@ export default function RoteiroEntregaPage() {
         iconAnchor: [16, 16]
       });
 
-      const marker = window.L.marker([p.latitude, p.longitude], { icon })
+      const marker = window.L.marker([Number(p.latitude), Number(p.longitude)], { icon: icone })
         .addTo(mapa)
         .bindPopup(`
           <div style="font-family: system-ui, sans-serif; min-width: 200px;">

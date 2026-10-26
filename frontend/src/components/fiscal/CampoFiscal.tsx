@@ -83,7 +83,7 @@ export function SelectFiscal({ value, onChange, opcoes, placeholder, required, d
 interface InputFiscalProps {
     type?: string;
     value: string | number;
-    onChange: (valor: string) => void;
+    onChange?: (valor: string) => void;
     placeholder?: string;
     required?: boolean;
     disabled?: boolean;
@@ -103,7 +103,7 @@ export function InputFiscal({
         <input
             type={type}
             value={value}
-            onChange={e => onChange(e.target.value)}
+            onChange={onChange ? (e => onChange(e.target.value)) : undefined}
             placeholder={placeholder}
             required={required}
             disabled={disabled}

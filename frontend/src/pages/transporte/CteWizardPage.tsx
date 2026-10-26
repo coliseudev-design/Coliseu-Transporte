@@ -188,6 +188,7 @@ export default function CteWizardPage() {
   );
 
   const baseCalculo = parseFloat(form.valor_total || '0') || 0;
+  const valorReceber = parseFloat(form.valor_receber || '0') || 0;
   const aliquotaIcms = parseFloat(form.aliquota_icms || '0') || 0;
   const valorIcms = (baseCalculo * aliquotaIcms) / 100;
   const aliquotaIbs = parseFloat(form.aliquota_ibs || '0') || 0;

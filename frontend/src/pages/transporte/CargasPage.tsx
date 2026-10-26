@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import { useNavigate } from 'react-router-dom';
 import api from '../../services/api';
 import {
   Package, Truck, FileText, ChevronRight,
@@ -50,6 +51,7 @@ const UFS_BRASIL = [
 ];
 
 export default function CargasPage() {
+  const navigate = useNavigate();
   const [search, setSearch] = useState('');
   const [cliente, setCliente] = useState('');
   const [dataInicio, setDataInicio] = useState('');
@@ -362,7 +364,7 @@ export default function CargasPage() {
         <div className="flex flex-wrap items-center gap-2.5 shrink-0">
           {/* Atalhos sempre visíveis — o operador nunca fica sem caminho */}
           <button
-            onClick={() => { selectAll(); setModalOpen(true); }}
+            onClick={() => { selectAll(); navigate('/transporte/cte/novo'); }}
             className="inline-flex items-center justify-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-semibold text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
             title="Seleciona todas as notas visíveis e abre a emissão"
           >
@@ -851,135 +853,216 @@ export default function CargasPage() {
               </div>
             </div>
 
-            <form onSubmit={handleCriarCte} className="space-y-4 text-sm">
-              <div>
-                <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1">
-                  Transportadora Emitente (CNPJ) *
-                </label>
-                <select
-                  required
-                  value={emitenteId}
-                  onChange={e => {
-                    setEmitenteId(e.target.value);
-                    const em = emitentes.find((x: any) => String(x.id) === e.target.value);
-                    if (em?.codigo_municipio) setCodigoMunInicio(em.codigo_municipio);
-                  }}
-                  className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:ring-2 focus:ring-brand-500"
-                >
-                  <option value="">Selecione a transportadora...</option>
-                  {emitentes.map((em: any) => (
-                    <option key={em.id} value={em.id}>
-                      {em.razao_social} — {em.cnpj}
-                    </option>
-                  ))}
-                </select>
-                {emitentes.length === 0 && (
-                  <p className="text-[11px] text-amber-600 dark:text-amber-400 mt-1">
-                    Nenhuma transportadora cadastrada. Acesse Cadastros Fiscais → Transportadoras.
-                  </p>
-                )}
-              </div>
+            <form onSubmit={handleCriarCte} className="text-sm">
+              <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
+                {/* COLUNA ESQUERDA — Configuração da emissão */}
+                <div className="lg:col-span-3 space-y-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div className="sm:col-span-2">
+                      <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">
+                        Transportadora Emitente (CNPJ) <span className="text-red-500">*</span>
+                      </label>
+                      <select
+                        required
+                        value={emitenteId}
+                        onChange={e => {
+                          setEmitenteId(e.target.value);
+                          const em = emitentes.find((x: any) => String(x.id) === e.target.value);
+                          if (em?.codigo_municipio) setCodigoMunInicio(em.codigo_municipio);
+                        }}
+                        className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-brand-500"
+                      >
+                        <option value="">Selecione a transportadora...</option>
+                        {emitentes.map((em: any) => (
+                          <option key={em.id} value={em.id}>
+                            {em.razao_social} — {em.cnpj}
+                          </option>
+                        ))}
+                      </select>
+                      {emitentes.length === 0 && (
+                        <p className="text-[11px] text-amber-600 dark:text-amber-400 mt-1">
+                          Nenhuma transportadora cadastrada. Configure em Configurações → Dados da Empresa.
+                        </p>
+                      )}
+                    </div>
 
-              <div>
-                <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1">
-                  Valor do Frete da Prestação (R$) *
-                </label>
-                <input
-                  type="number"
-                  step="0.01"
-                  required
-                  placeholder="Ex: 850.00"
-                  value={valorFrete}
-                  onChange={e => setValorFrete(e.target.value)}
-                  className="w-full px-3.5 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:ring-2 focus:ring-brand-500"
-                />
-              </div>
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">
+                        Valor do Frete (R$) <span className="text-red-500">*</span>
+                      </label>
+                      <input
+                        type="number" step="0.01" required placeholder="0,00"
+                        value={valorFrete}
+                        onChange={e => setValorFrete(e.target.value)}
+                        className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-brand-500 tabular-nums"
+                      />
+                    </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1">
-                    Cidade de Início (Origem) *
-                  </label>
-                  <select
-                    required
-                    value={codigoMunInicio}
-                    onChange={e => {
-                      setCodigoMunInicio(e.target.value);
-                      const m = municipiosList.find(x => x.codigo_ibge === e.target.value);
-                      if (m) setMunicipioInicio(m.cidade);
-                    }}
-                    className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:ring-2 focus:ring-brand-500 text-xs"
-                  >
-                    <option value="">Selecione a cidade...</option>
-                    {municipiosList.map((m, idx) => (
-                      <option key={idx} value={m.codigo_ibge}>
-                        {m.cidade} / {m.uf} (IBGE: {m.codigo_ibge})
-                      </option>
-                    ))}
-                  </select>
-                  <p className="text-[11px] text-slate-400 mt-0.5 font-mono">
-                    Código IBGE: <strong className="text-slate-700 dark:text-slate-200">{codigoMunInicio || 'Automático'}</strong>
-                  </p>
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">
+                        Tomador do Serviço
+                      </label>
+                      <select
+                        value={tomador}
+                        onChange={e => setTomador(e.target.value)}
+                        className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-brand-500"
+                      >
+                        <option value="0">Remetente</option>
+                        <option value="1">Expedidor</option>
+                        <option value="2">Recebedor</option>
+                        <option value="3">Destinatário</option>
+                        <option value="4">Outros</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">
+                        Cidade de Início <span className="text-red-500">*</span>
+                      </label>
+                      <select
+                        required
+                        value={codigoMunInicio}
+                        onChange={e => {
+                          setCodigoMunInicio(e.target.value);
+                          const m = municipiosList.find(x => x.codigo_ibge === e.target.value);
+                          if (m) setMunicipioInicio(m.cidade);
+                        }}
+                        className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-brand-500 text-xs"
+                      >
+                        <option value="">Selecione...</option>
+                        {municipiosList.map((m: any, idx: number) => (
+                          <option key={idx} value={m.codigo_ibge}>
+                            {m.cidade} / {m.uf} ({m.codigo_ibge})
+                          </option>
+                        ))}
+                      </select>
+                      <p className="text-[10px] text-slate-400 mt-1 font-mono">
+                        IBGE {codigoMunInicio || '—'} · {municipioInicio || '—'}
+                      </p>
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">
+                        Cidade de Fim <span className="text-red-500">*</span>
+                      </label>
+                      <select
+                        required
+                        value={codigoMunFim}
+                        onChange={e => {
+                          setCodigoMunFim(e.target.value);
+                          const m = municipiosList.find(x => x.codigo_ibge === e.target.value);
+                          if (m) setMunicipioFim(m.cidade);
+                        }}
+                        className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-brand-500 text-xs"
+                      >
+                        <option value="">Selecione...</option>
+                        {municipiosList.map((m: any, idx: number) => (
+                          <option key={idx} value={m.codigo_ibge}>
+                            {m.cidade} / {m.uf} ({m.codigo_ibge})
+                          </option>
+                        ))}
+                      </select>
+                      <p className="text-[10px] text-slate-400 mt-1 font-mono">
+                        IBGE {codigoMunFim || '—'} · {municipioFim || '—'}
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Ações */}
+                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 pt-4 border-t border-slate-100 dark:border-slate-700/60">
+                    <button
+                      type="button"
+                      onClick={() => setModalOpen(false)}
+                      className="px-4 py-2.5 rounded-xl text-xs font-bold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
+                    >
+                      Cancelar
+                    </button>
+                    <div className="flex flex-col sm:flex-row gap-2.5">
+                      <button
+                        type="button"
+                        onClick={() => navigate('/transporte/cte/novo')}
+                        className="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-bold text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
+                      >
+                        Abrir Wizard Completo (6 abas)
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={submitting}
+                        className="inline-flex items-center justify-center gap-1.5 px-5 py-2.5 rounded-xl text-xs font-bold text-white bg-brand-600 hover:bg-brand-700 disabled:opacity-50 shadow-sm transition-colors"
+                      >
+                        <FileText className="w-3.5 h-3.5" />
+                        {submitting ? 'Gerando...' : 'Gerar Rascunho do CT-e'}
+                      </button>
+                    </div>
+                  </div>
                 </div>
 
-                <div>
-                  <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1">
-                    Cidade de Fim (Destino) *
-                  </label>
-                  <select
-                    required
-                    value={codigoMunFim}
-                    onChange={e => {
-                      setCodigoMunFim(e.target.value);
-                      const m = municipiosList.find(x => x.codigo_ibge === e.target.value);
-                      if (m) setMunicipioFim(m.cidade);
-                    }}
-                    className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:ring-2 focus:ring-brand-500 text-xs"
-                  >
-                    <option value="">Selecione a cidade...</option>
-                    {municipiosList.map((m, idx) => (
-                      <option key={idx} value={m.codigo_ibge}>
-                        {m.cidade} / {m.uf} (IBGE: {m.codigo_ibge})
-                      </option>
-                    ))}
-                  </select>
-                  <p className="text-[11px] text-slate-400 mt-0.5 font-mono">
-                    Código IBGE: <strong className="text-slate-700 dark:text-slate-200">{codigoMunFim || 'Automático'}</strong>
-                  </p>
+                {/* COLUNA DIREITA — Conferência das notas */}
+                <div className="lg:col-span-2 space-y-4">
+                  <div className="border border-slate-200/80 dark:border-slate-700 rounded-2xl overflow-hidden">
+                    <div className="px-4 py-2.5 bg-slate-50 dark:bg-slate-900 border-b border-slate-200/60 dark:border-slate-700">
+                      <span className="text-xs font-bold text-slate-700 dark:text-slate-300">
+                        Notas Vinculadas ({selecionadas.length})
+                      </span>
+                      <p className="text-[10px] text-slate-400 mt-0.5">
+                        clique no X para retirar do conhecimento
+                      </p>
+                    </div>
+                    <div className="divide-y divide-slate-100 dark:divide-slate-700/60 max-h-64 overflow-y-auto">
+                      {selecionadas.length === 0 ? (
+                        <p className="px-4 py-8 text-center text-xs text-slate-400">
+                          Nenhuma nota selecionada.
+                        </p>
+                      ) : (
+                        selecionadas.map(c => (
+                          <div key={c.id} className="px-4 py-2.5 flex items-center justify-between gap-2">
+                            <div className="min-w-0">
+                              <p className="text-xs font-semibold text-slate-900 dark:text-white truncate">
+                                NF-e {c.numero} · {c.destinatario_nome || 'Consumidor'}
+                              </p>
+                              <p className="text-[10px] text-slate-400 font-mono truncate">
+                                {c.destinatario_municipio}/{c.destinatario_uf}
+                              </p>
+                            </div>
+                            <div className="text-right shrink-0 pr-1">
+                              <p className="text-xs font-bold text-slate-900 dark:text-white tabular-nums">
+                                R$ {Number(c.valor_total || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                              </p>
+                              <p className="text-[10px] text-slate-400 tabular-nums">
+                                {Number(c.peso_bruto || 0).toLocaleString('pt-BR')} kg
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => toggleSelect(c.id)}
+                              className="p-1 text-slate-400 hover:text-red-600 transition-colors shrink-0"
+                            >
+                              <X className="w-4 h-4" />
+                            </button>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Cidades do lote */}
+                  <div className="border border-slate-200/80 dark:border-slate-700 rounded-2xl p-4">
+                    <span className="text-xs font-bold text-slate-700 dark:text-slate-300">
+                      Destinos do Lote ({analiseLote.cidadesList.length})
+                    </span>
+                    <div className="flex flex-wrap gap-1.5 mt-2.5">
+                      {analiseLote.cidadesList.map((cid, i) => (
+                        <span
+                          key={i}
+                          className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg bg-slate-100 dark:bg-slate-800 text-[11px] font-medium text-slate-700 dark:text-slate-200"
+                        >
+                          {cid.cidade}/{cid.uf}
+                          <span className="text-slate-400">({cid.qtd})</span>
+                        </span>
+                      ))}
+                    </div>
+                  </div>
                 </div>
-              </div>
-
-              <div>
-                <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1">
-                  Quem paga o frete? (Tomador do Serviço)
-                </label>
-                <select
-                  value={tomador}
-                  onChange={e => setTomador(e.target.value)}
-                  className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:ring-2 focus:ring-brand-500"
-                >
-                  <option value="0">Remetente (Quem envia a mercadoria)</option>
-                  <option value="3">Destinatário (Quem recebe a mercadoria)</option>
-                  <option value="1">Expedidor</option>
-                  <option value="2">Recebedor</option>
-                </select>
-              </div>
-
-              <div className="flex justify-end gap-2.5 pt-3 border-t border-slate-100 dark:border-slate-700">
-                <button
-                  type="button"
-                  onClick={() => setModalOpen(false)}
-                  className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
-                >
-                  Cancelar
-                </button>
-                <button
-                  type="submit"
-                  disabled={submitting}
-                  className="px-5 py-2 rounded-xl text-xs font-semibold text-white bg-brand-600 hover:bg-brand-700 disabled:opacity-50 transition-colors shadow-sm"
-                >
-                  {submitting ? 'Gerando...' : 'Confirmar e Criar Rascunho'}
-                </button>
               </div>
             </form>
           </div>
