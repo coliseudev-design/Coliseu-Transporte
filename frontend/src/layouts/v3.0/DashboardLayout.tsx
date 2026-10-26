@@ -1,48 +1,15 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState } from 'react'
 import { Outlet } from 'react-router-dom'
 import Sidebar from './Sidebar'
 
 export default function DashboardLayout() {
   const [sidebarOpen, setSidebarOpen] = useState(false)   // drawer mobile/tablet
-  const [recolhido, setRecolhido] = useState(false)      // ícones apenas (desktop)
-  const [hoverAberto, setHoverAberto] = useState(false)   // expansão por hover
-  const [perto, setPerto] = useState(false)
-  const timerRef = useRef<number | null>(null)
-
-  // Ao passar o mouse na faixa do menu, expande; ao sair, recolhe
-  const abrirPorHover = () => {
-    if (timerRef.current) window.clearTimeout(timerRef.current)
-    setHoverAberto(true)
-    setPerto(true)
-  }
-
-  const fecharPorHover = () => {
-    timerRef.current = window.setTimeout(() => {
-      setHoverAberto(false)
-      setPerto(false)
-    }, 200)
-  }
-
-  useEffect(() => () => { if (timerRef.current) window.clearTimeout(timerRef.current) }, [])
-
-  // No desktop o menu expande por hover; o clique também funciona
-  const expandido = !recolhido || (perto && hoverAberto)
 
   return (
     <div className="min-h-screen bg-[#F4F7FE] dark:bg-[#0B1220] flex">
-      {/* ═══ MENU LATERAL FIXO (desktop) ═══ */}
-      <div
-        className="hidden lg:block shrink-0 sticky top-0 h-screen z-40"
-        onMouseEnter={abrirPorHover}
-        onMouseLeave={fecharPorHover}
-      >
-        <Sidebar
-          open
-          onClose={() => {}}
-          collapsed={!expandido}
-          onToggleCollapse={() => setRecolhido(c => !c)}
-          onOpenMobile={() => setSidebarOpen(true)}
-        />
+      {/* ═══ MENU LATERAL FIXO (desktop) — sempre visível ═══ */}
+      <div className="hidden lg:block shrink-0 sticky top-0 h-screen z-40">
+        <Sidebar open onClose={() => {}} />
       </div>
 
       {/* ═══ MENU LATERAL (mobile/tablet) ═══ */}

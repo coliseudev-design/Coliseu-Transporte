@@ -51,6 +51,8 @@ services:
         condition: service_healthy
     environment:
       - NODE_ENV=development
+      # Ambiente do banco: 'demo' habilita seeds de teste (frota)
+      - APP_AMBIENTE=demo
       - PORT=3200
 
       # Banco LOCAL

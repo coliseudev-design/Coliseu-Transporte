@@ -2,7 +2,7 @@ import { NavLink, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, Users, Package, FileText, Settings, ChevronDown, ChevronUp,
   LogOut, Shield, X, BarChart3, Truck, BrainCircuit, Route, Building2,
-  Navigation, KeyRound, FileStack, BadgeCheck, Search, ChevronLeft, ChevronRight,
+  Navigation, KeyRound, FileStack, BadgeCheck, Search,
   ScrollText, Menu, CircleDot
 } from 'lucide-react'
 import clsx from 'clsx'
@@ -12,9 +12,6 @@ import { useState } from 'react'
 interface Props {
   open: boolean
   onClose: () => void
-  /** Modo recolhido: apenas ícones */
-  collapsed?: boolean
-  onToggleCollapse?: () => void
   /** Abre o menu no mobile/tablet */
   onOpenMobile?: () => void
 }
@@ -101,7 +98,7 @@ const GRUPOS: MenuGroup[] = [
   }
 ]
 
-export default function Sidebar({ open, onClose, collapsed = false, onToggleCollapse, onOpenMobile }: Props) {
+export default function Sidebar({ open, onClose, onOpenMobile }: Props) {
   const navigate = useNavigate()
   const user = useAuthStore((s) => s.user)
   const logout = useAuthStore((s) => s.logout)
@@ -140,35 +137,23 @@ export default function Sidebar({ open, onClose, collapsed = false, onToggleColl
   return (
     <aside className={clsx(
       'flex flex-col h-screen bg-white dark:bg-slate-900 border-r border-slate-200/70 dark:border-slate-700/60 transition-[width] duration-300 ease-out',
-      collapsed ? 'w-[68px]' : 'w-[248px]'
+      'w-[248px]'
     )}>
 
       {/* ═══ TOPO: LOGO + CONTROLES ═══ */}
       <div className="flex items-center gap-2 px-4 h-[68px] border-b border-slate-200/70 dark:border-slate-700/60 shrink-0">
-        {collapsed ? (
-          <button
-            onClick={onToggleCollapse}
-            className="w-full flex justify-center py-1.5 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
-            title="Expandir menu"
-          >
-            <img src="/assets/logo-coliseu-transporte.svg" alt="Coliseu Transporte" className="w-8 h-8 object-contain object-left" />
-          </button>
-        ) : (
-          <>
-            <img
-              src="/assets/logo-coliseu-transporte.svg"
-              alt="Coliseu Transporte"
-              className="h-10 w-auto shrink-0"
-            />
-            <button
-              onClick={onToggleCollapse}
-              className="ml-auto p-1.5 rounded-lg text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-600 transition-colors"
-              title="Recolher menu"
-            >
-              <ChevronLeft className="w-4 h-4" />
-            </button>
-          </>
-        )}
+        <NavLink
+          to="/"
+          onClick={onClose}
+          className="flex items-center hover:opacity-80 transition-opacity"
+          title="Cockpit de Transporte"
+        >
+          <img
+            src="/assets/logo-coliseu-transporte.svg"
+            alt="Coliseu Transporte"
+            className="h-10 w-auto shrink-0"
+          />
+        </NavLink>
       </div>
 
       {/* Botão de menu (mobile/tablet) */}
@@ -182,8 +167,7 @@ export default function Sidebar({ open, onClose, collapsed = false, onToggleColl
       </button>
 
       {/* ═══ BUSCA ═══ */}
-      {!collapsed && (
-        <div className="px-3 pt-3 pb-1 shrink-0">
+      <div className="px-3 pt-3 pb-1 shrink-0">
           <div className="relative">
             <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
             <input
@@ -208,34 +192,13 @@ export default function Sidebar({ open, onClose, collapsed = false, onToggleColl
             </p>
           )}
         </div>
-      )}
 
       {/* ═══ NAVEGAÇÃO ═══ */}
       <nav className="flex-1 overflow-y-auto overflow-x-hidden px-2.5 pb-2">
         {gruposFiltrados.map(grupo => {
           const Icon = grupo.icon
-          const aberto = abertos[grupo.id] && !collapsed
+          const aberto = abertos[grupo.id]
           const grupoAtivo = grupo.items.some(i => itemAtivo(i.to))
-
-          if (collapsed) {
-            const primeiro = grupo.items[0]
-            return (
-              <NavLink
-                key={grupo.id}
-                to={primeiro.to}
-                end={primeiro.end}
-                title={grupo.label}
-                className={({ isActive }) => clsx(
-                  'flex items-center justify-center h-10 rounded-xl mb-1 transition-all duration-200',
-                  isActive
-                    ? 'bg-brand-500/12 text-brand-600 dark:text-brand-400'
-                    : 'text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-700 dark:hover:text-slate-200'
-                )}
-              >
-                <Icon className="w-[18px] h-[18px]" />
-              </NavLink>
-            )
-          }
 
           return (
             <div key={grupo.id} className="mb-1">
@@ -306,8 +269,7 @@ export default function Sidebar({ open, onClose, collapsed = false, onToggleColl
       <div className="border-t border-slate-200/70 dark:border-slate-700/60 p-2.5 shrink-0 space-y-2">
 
         {/* Empresa ativa */}
-        {!collapsed && (
-          <div className="flex items-center gap-2.5 px-2.5 py-2 rounded-xl bg-slate-50 dark:bg-slate-800/60">
+        <div className="flex items-center gap-2.5 px-2.5 py-2 rounded-xl bg-slate-50 dark:bg-slate-800/60">
             <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-[#0B3B66] to-[#0B63A5] text-white flex items-center justify-center shrink-0">
               <Building2 className="w-4 h-4" />
             </div>
@@ -318,32 +280,19 @@ export default function Sidebar({ open, onClose, collapsed = false, onToggleColl
               </p>
             </div>
           </div>
-        )}
 
         {/* Usuário + sair */}
-        <div className={clsx('flex items-center gap-2', collapsed ? 'justify-center' : 'px-1')}>
-          {collapsed && (
-            <button
-              onClick={onToggleCollapse}
-              className="p-2 rounded-xl text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-600 transition-all"
-              title="Expandir menu"
-            >
-              <ChevronRight className="w-4 h-4" />
-            </button>
-          )}
-
-          <div className={clsx('flex items-center gap-2.5 min-w-0 flex-1', collapsed && 'flex-col gap-1.5')}>
+        <div className="flex items-center gap-2 px-1">
+          <div className="flex items-center gap-2.5 min-w-0 flex-1">
             <div className="w-9 h-9 rounded-full bg-gradient-to-br from-[#1E3A8A] to-[#1E40AF] text-white flex items-center justify-center text-xs font-black shrink-0">
               {user?.nome?.[0]?.toUpperCase() || 'U'}
             </div>
-            {!collapsed && (
-              <div className="min-w-0 flex-1">
+            <div className="min-w-0 flex-1">
                 <p className="text-xs font-bold text-slate-800 dark:text-slate-100 truncate">
                   {user?.nome || 'Usuário'}
                 </p>
                 <p className="text-[10px] text-slate-400 truncate">{user?.email}</p>
               </div>
-            )}
             <button
               onClick={async () => { await logout(); onClose() }}
               title="Sair"

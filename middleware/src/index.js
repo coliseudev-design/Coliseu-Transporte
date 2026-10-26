@@ -24,6 +24,11 @@ async function startServer() {
             logger.warn('[App] Banco de dados indisponível no boot. Servidor continuará iniciando para health-checks responderem.');
         } else {
             try {
+                // Define o ambiente no banco (usado por seeds condicionais como a frota de teste)
+                const ambiente = process.env.APP_AMBIENTE || process.env.NODE_ENV || 'production';
+                await db.query(`SELECT set_config('app.ambiente', $1, false)`, [ambiente]);
+                logger.info(`[App] Ambiente de banco definido como: ${ambiente}`);
+
                 logger.info('[App] Sincronizando tabelas do banco de dados (schema.sql)...');
                 const schemaPath = path.join(__dirname, 'db', 'schema.sql');
                 const schemaSql = fs.readFileSync(schemaPath, 'utf8');

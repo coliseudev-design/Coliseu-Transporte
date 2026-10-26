@@ -30,6 +30,8 @@ services:
           - coliseu-transporte-middleware
     environment:
       - NODE_ENV=${NODE_ENV:-production}
+      # Ambiente do banco: 'demo' habilita seeds de teste (frota). 'production' desabilita.
+      - APP_AMBIENTE=${APP_AMBIENTE:-production}
       - PORT=${PORT:-3200}
       
       # Banco de dados
