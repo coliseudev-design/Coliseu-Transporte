@@ -162,7 +162,38 @@ router.get('/integracoes', async (req, res, next) => {
             ADD COLUMN IF NOT EXISTS ai_prompt_marketing TEXT,
             ADD COLUMN IF NOT EXISTS ai_prompt_cobranca TEXT,
             ADD COLUMN IF NOT EXISTS ai_prompt_contratos TEXT,
-            ADD COLUMN IF NOT EXISTS ai_prompt_bi TEXT;
+            ADD COLUMN IF NOT EXISTS ai_prompt_bi TEXT,
+            ADD COLUMN IF NOT EXISTS focus_token_homologacao TEXT,
+            ADD COLUMN IF NOT EXISTS focus_token_producao TEXT,
+            ADD COLUMN IF NOT EXISTS focus_ambiente VARCHAR(20) DEFAULT 'homologacao',
+            ADD COLUMN IF NOT EXISTS focus_regime_tributario VARCHAR(2) DEFAULT '1',
+            ADD COLUMN IF NOT EXISTS focus_rntrc VARCHAR(20),
+            ADD COLUMN IF NOT EXISTS focus_serie_cte VARCHAR(5) DEFAULT '1',
+            ADD COLUMN IF NOT EXISTS focus_serie_mdfe VARCHAR(5) DEFAULT '1',
+            ADD COLUMN IF NOT EXISTS focus_cfop_padrao VARCHAR(8) DEFAULT '5353',
+            ADD COLUMN IF NOT EXISTS focus_natureza_padrao VARCHAR(255) DEFAULT 'PRESTACAO DE SERVICO DE TRANSPORTE',
+            ADD COLUMN IF NOT EXISTS focus_aliquota_icms_padrao NUMERIC(7,4) DEFAULT 12.00,
+            ADD COLUMN IF NOT EXISTS focus_codigo_municipio VARCHAR(7),
+            ADD COLUMN IF NOT EXISTS focus_municipio VARCHAR(120),
+            ADD COLUMN IF NOT EXISTS focus_uf VARCHAR(2),
+            ADD COLUMN IF NOT EXISTS focus_inscricao_estadual VARCHAR(30),
+            ADD COLUMN IF NOT EXISTS focus_logradouro VARCHAR(255),
+            ADD COLUMN IF NOT EXISTS focus_numero VARCHAR(30),
+            ADD COLUMN IF NOT EXISTS focus_complemento VARCHAR(120),
+            ADD COLUMN IF NOT EXISTS focus_bairro VARCHAR(120),
+            ADD COLUMN IF NOT EXISTS focus_cep VARCHAR(10);
+        `).catch(() => {});
+
+        await db.query(`
+            ALTER TABLE dash_emitentes
+            ADD COLUMN IF NOT EXISTS focus_token_homologacao VARCHAR(255),
+            ADD COLUMN IF NOT EXISTS focus_token_producao VARCHAR(255),
+            ADD COLUMN IF NOT EXISTS regime_tributario VARCHAR(2) DEFAULT '1',
+            ADD COLUMN IF NOT EXISTS cfop_padrao_cte VARCHAR(8) DEFAULT '5353',
+            ADD COLUMN IF NOT EXISTS natureza_padrao_cte VARCHAR(255) DEFAULT 'PRESTACAO DE SERVICO DE TRANSPORTE',
+            ADD COLUMN IF NOT EXISTS aliquota_icms_padrao NUMERIC(7,4) DEFAULT 12.00,
+            ADD COLUMN IF NOT EXISTS complemento VARCHAR(120),
+            ADD COLUMN IF NOT EXISTS email VARCHAR(255);
         `).catch(() => {});
         
         let { rows } = await db.query(
@@ -206,12 +237,50 @@ router.get('/integracoes', async (req, res, next) => {
             );
             rows = insertRes.rows;
         } else {
-            // Atualiza dynamicamente os dados da empresa selecionada
-            rows[0].empresa_codigo = realCode;
-            rows[0].empresa_nome = realNome;
-            rows[0].empresa_razao_social = realNome;
-            rows[0].empresa_cnpj = realDoc;
+            // Atualiza dynamicamente os dados da empresa selecionada se a filial existir
+            if (filialRes.rows[0]) {
+                rows[0].empresa_codigo = realCode;
+                rows[0].empresa_nome = rows[0].empresa_nome || realNome;
+                rows[0].empresa_razao_social = rows[0].empresa_razao_social || realNome;
+                rows[0].empresa_cnpj = rows[0].empresa_cnpj || realDoc;
+            }
             rows[0].empresa_tipo = 'MULTI-EMPRESA';
+        }
+
+        // Mesclar dados fiscais de dash_emitentes para manter ConfigIntegracoes e Dados da Empresa sincronizados
+        const emitRes = await db.query(
+            'SELECT * FROM dash_emitentes WHERE tenant_id = $1 AND ativo = true ORDER BY id ASC LIMIT 1',
+            [tenantId]
+        ).catch(() => ({ rows: [] }));
+        const emit = emitRes.rows[0];
+        if (emit && rows[0]) {
+            rows[0].focus_ambiente = rows[0].focus_ambiente || emit.focus_ambiente || 'homologacao';
+            rows[0].focus_token_homologacao =
+                rows[0].focus_token_homologacao ||
+                emit.focus_token_homologacao ||
+                (emit.focus_ambiente !== 'producao' ? emit.focus_token : '') ||
+                '';
+            rows[0].focus_token_producao =
+                rows[0].focus_token_producao ||
+                emit.focus_token_producao ||
+                (emit.focus_ambiente === 'producao' ? emit.focus_token : '') ||
+                '';
+            rows[0].focus_regime_tributario = rows[0].focus_regime_tributario || emit.regime_tributario || '1';
+            rows[0].focus_rntrc = rows[0].focus_rntrc || emit.rntrc || '';
+            rows[0].focus_serie_cte = rows[0].focus_serie_cte || emit.serie_cte || '1';
+            rows[0].focus_serie_mdfe = rows[0].focus_serie_mdfe || emit.serie_mdfe || '1';
+            rows[0].focus_cfop_padrao = rows[0].focus_cfop_padrao || emit.cfop_padrao_cte || '5353';
+            rows[0].focus_natureza_padrao = rows[0].focus_natureza_padrao || emit.natureza_padrao_cte || 'PRESTACAO DE SERVICO DE TRANSPORTE';
+            rows[0].focus_aliquota_icms_padrao = rows[0].focus_aliquota_icms_padrao ?? emit.aliquota_icms_padrao ?? 12.00;
+            rows[0].focus_codigo_municipio = rows[0].focus_codigo_municipio || emit.codigo_municipio || '';
+            rows[0].focus_municipio = rows[0].focus_municipio || emit.municipio || '';
+            rows[0].focus_uf = rows[0].focus_uf || emit.uf || '';
+            rows[0].focus_inscricao_estadual = rows[0].focus_inscricao_estadual || emit.inscricao_estadual || rows[0].empresa_ie || '';
+            rows[0].focus_logradouro = rows[0].focus_logradouro || emit.logradouro || rows[0].empresa_endereco || '';
+            rows[0].focus_numero = rows[0].focus_numero || emit.numero || rows[0].empresa_numero || '';
+            rows[0].focus_complemento = rows[0].focus_complemento || emit.complemento || rows[0].empresa_complemento || '';
+            rows[0].focus_bairro = rows[0].focus_bairro || emit.bairro || rows[0].empresa_bairro || '';
+            rows[0].focus_cep = rows[0].focus_cep || emit.cep || rows[0].empresa_cep || '';
         }
 
         res.json({ data: rows[0] });
@@ -462,7 +531,38 @@ router.post('/integracoes', async (req, res, next) => {
             ADD COLUMN IF NOT EXISTS ai_prompt_marketing TEXT,
             ADD COLUMN IF NOT EXISTS ai_prompt_cobranca TEXT,
             ADD COLUMN IF NOT EXISTS ai_prompt_contratos TEXT,
-            ADD COLUMN IF NOT EXISTS ai_prompt_bi TEXT;
+            ADD COLUMN IF NOT EXISTS ai_prompt_bi TEXT,
+            ADD COLUMN IF NOT EXISTS focus_token_homologacao TEXT,
+            ADD COLUMN IF NOT EXISTS focus_token_producao TEXT,
+            ADD COLUMN IF NOT EXISTS focus_ambiente VARCHAR(20) DEFAULT 'homologacao',
+            ADD COLUMN IF NOT EXISTS focus_regime_tributario VARCHAR(2) DEFAULT '1',
+            ADD COLUMN IF NOT EXISTS focus_rntrc VARCHAR(20),
+            ADD COLUMN IF NOT EXISTS focus_serie_cte VARCHAR(5) DEFAULT '1',
+            ADD COLUMN IF NOT EXISTS focus_serie_mdfe VARCHAR(5) DEFAULT '1',
+            ADD COLUMN IF NOT EXISTS focus_cfop_padrao VARCHAR(8) DEFAULT '5353',
+            ADD COLUMN IF NOT EXISTS focus_natureza_padrao VARCHAR(255) DEFAULT 'PRESTACAO DE SERVICO DE TRANSPORTE',
+            ADD COLUMN IF NOT EXISTS focus_aliquota_icms_padrao NUMERIC(7,4) DEFAULT 12.00,
+            ADD COLUMN IF NOT EXISTS focus_codigo_municipio VARCHAR(7),
+            ADD COLUMN IF NOT EXISTS focus_municipio VARCHAR(120),
+            ADD COLUMN IF NOT EXISTS focus_uf VARCHAR(2),
+            ADD COLUMN IF NOT EXISTS focus_inscricao_estadual VARCHAR(30),
+            ADD COLUMN IF NOT EXISTS focus_logradouro VARCHAR(255),
+            ADD COLUMN IF NOT EXISTS focus_numero VARCHAR(30),
+            ADD COLUMN IF NOT EXISTS focus_complemento VARCHAR(120),
+            ADD COLUMN IF NOT EXISTS focus_bairro VARCHAR(120),
+            ADD COLUMN IF NOT EXISTS focus_cep VARCHAR(10);
+        `).catch(() => {});
+
+        await db.query(`
+            ALTER TABLE dash_emitentes
+            ADD COLUMN IF NOT EXISTS focus_token_homologacao VARCHAR(255),
+            ADD COLUMN IF NOT EXISTS focus_token_producao VARCHAR(255),
+            ADD COLUMN IF NOT EXISTS regime_tributario VARCHAR(2) DEFAULT '1',
+            ADD COLUMN IF NOT EXISTS cfop_padrao_cte VARCHAR(8) DEFAULT '5353',
+            ADD COLUMN IF NOT EXISTS natureza_padrao_cte VARCHAR(255) DEFAULT 'PRESTACAO DE SERVICO DE TRANSPORTE',
+            ADD COLUMN IF NOT EXISTS aliquota_icms_padrao NUMERIC(7,4) DEFAULT 12.00,
+            ADD COLUMN IF NOT EXISTS complemento VARCHAR(120),
+            ADD COLUMN IF NOT EXISTS email VARCHAR(255);
         `).catch(() => {});
 
         await client.query('BEGIN');
@@ -946,10 +1046,214 @@ router.post('/integracoes', async (req, res, next) => {
             ]
         );
 
+        // 3. Atualizar campos fiscais Focus NFe em dash_integracoes_config e sincronizar com dash_emitentes
+        const {
+            focus_token_homologacao,
+            focus_token_producao,
+            focus_ambiente,
+            focus_regime_tributario,
+            focus_rntrc,
+            focus_serie_cte,
+            focus_serie_mdfe,
+            focus_cfop_padrao,
+            focus_natureza_padrao,
+            focus_aliquota_icms_padrao,
+            focus_codigo_municipio,
+            focus_municipio,
+            focus_uf,
+            focus_inscricao_estadual,
+            focus_logradouro,
+            focus_numero,
+            focus_complemento,
+            focus_bairro,
+            focus_cep
+        } = req.body;
+
+        const cleanToken = (val, fallback) => {
+            if (val === undefined) return fallback || null;
+            if (!val || String(val).includes('...') || String(val).includes('•') || String(val).includes('*')) {
+                return fallback || null;
+            }
+            return String(val).trim();
+        };
+
+        const finalTokenHomolog = cleanToken(focus_token_homologacao, oldConf?.focus_token_homologacao);
+        const finalTokenProd = cleanToken(focus_token_producao, oldConf?.focus_token_producao);
+        const finalFocusAmbiente = (focus_ambiente || oldConf?.focus_ambiente || 'homologacao').toLowerCase() === 'producao'
+            ? 'producao'
+            : 'homologacao';
+
+        const focusUpdateRes = await client.query(
+            `UPDATE dash_integracoes_config
+             SET focus_token_homologacao = $1,
+                 focus_token_producao = $2,
+                 focus_ambiente = $3,
+                 focus_regime_tributario = $4,
+                 focus_rntrc = $5,
+                 focus_serie_cte = $6,
+                 focus_serie_mdfe = $7,
+                 focus_cfop_padrao = $8,
+                 focus_natureza_padrao = $9,
+                 focus_aliquota_icms_padrao = $10,
+                 focus_codigo_municipio = $11,
+                 focus_municipio = $12,
+                 focus_uf = $13,
+                 focus_inscricao_estadual = $14,
+                 focus_logradouro = $15,
+                 focus_numero = $16,
+                 focus_complemento = $17,
+                 focus_bairro = $18,
+                 focus_cep = $19
+             WHERE tenant_id = $20
+             RETURNING *`,
+            [
+                finalTokenHomolog,
+                finalTokenProd,
+                finalFocusAmbiente,
+                focus_regime_tributario || oldConf?.focus_regime_tributario || '1',
+                focus_rntrc !== undefined ? focus_rntrc : (oldConf?.focus_rntrc || null),
+                focus_serie_cte || oldConf?.focus_serie_cte || '1',
+                focus_serie_mdfe || oldConf?.focus_serie_mdfe || '1',
+                focus_cfop_padrao || oldConf?.focus_cfop_padrao || '5353',
+                focus_natureza_padrao || oldConf?.focus_natureza_padrao || 'PRESTACAO DE SERVICO DE TRANSPORTE',
+                focus_aliquota_icms_padrao !== undefined ? parseFloat(focus_aliquota_icms_padrao) : (oldConf?.focus_aliquota_icms_padrao ?? 12.00),
+                focus_codigo_municipio !== undefined ? String(focus_codigo_municipio).replace(/\D/g, '') : (oldConf?.focus_codigo_municipio || null),
+                focus_municipio !== undefined ? focus_municipio : (oldConf?.focus_municipio || empresa_regiao || null),
+                focus_uf !== undefined ? String(focus_uf).toUpperCase().slice(0, 2) : (oldConf?.focus_uf || 'MS'),
+                focus_inscricao_estadual !== undefined ? focus_inscricao_estadual : (oldConf?.focus_inscricao_estadual || empresa_ie || null),
+                focus_logradouro !== undefined ? focus_logradouro : (oldConf?.focus_logradouro || empresa_endereco || null),
+                focus_numero !== undefined ? focus_numero : (oldConf?.focus_numero || empresa_numero || null),
+                focus_complemento !== undefined ? focus_complemento : (oldConf?.focus_complemento || empresa_complemento || null),
+                focus_bairro !== undefined ? focus_bairro : (oldConf?.focus_bairro || empresa_bairro || null),
+                focus_cep !== undefined ? String(focus_cep).replace(/\D/g, '') : (oldConf?.focus_cep || String(empresa_cep || '').replace(/\D/g, '') || null),
+                tenantId
+            ]
+        );
+        const updatedConf = focusUpdateRes.rows[0] || rows[0];
+
+        // Sincronizar automaticamente com dash_emitentes para que a emissão de CT-e e MDF-e funcione imediatamente
+        const emitCnpj = String(empresa_cnpj || updatedConf.empresa_cnpj || '').replace(/\D/g, '');
+        if (emitCnpj.length === 14 || finalTokenHomolog || finalTokenProd) {
+            const existingEmit = await client.query(
+                'SELECT * FROM dash_emitentes WHERE tenant_id = $1 ORDER BY id ASC LIMIT 1',
+                [tenantId]
+            );
+            const activeToken = finalFocusAmbiente === 'producao'
+                ? (finalTokenProd || finalTokenHomolog || existingEmit.rows[0]?.focus_token || null)
+                : (finalTokenHomolog || finalTokenProd || existingEmit.rows[0]?.focus_token || null);
+
+            if (existingEmit.rows.length > 0) {
+                const em = existingEmit.rows[0];
+                await client.query(
+                    `UPDATE dash_emitentes
+                     SET cnpj = COALESCE(NULLIF($1, ''), cnpj),
+                         razao_social = COALESCE(NULLIF($2, ''), razao_social),
+                         nome_fantasia = COALESCE(NULLIF($3, ''), nome_fantasia),
+                         inscricao_estadual = COALESCE(NULLIF($4, ''), inscricao_estadual),
+                         rntrc = COALESCE(NULLIF($5, ''), rntrc),
+                         regime_tributario = COALESCE($6, regime_tributario),
+                         logradouro = COALESCE(NULLIF($7, ''), logradouro),
+                         numero = COALESCE(NULLIF($8, ''), numero),
+                         complemento = COALESCE($9, complemento),
+                         bairro = COALESCE(NULLIF($10, ''), bairro),
+                         cep = COALESCE(NULLIF($11, ''), cep),
+                         codigo_municipio = COALESCE(NULLIF($12, ''), codigo_municipio),
+                         municipio = COALESCE(NULLIF($13, ''), municipio),
+                         uf = COALESCE(NULLIF($14, ''), uf),
+                         telefone = COALESCE(NULLIF($15, ''), telefone),
+                         email = COALESCE(NULLIF($16, ''), email),
+                         focus_ambiente = $17,
+                         focus_token_homologacao = COALESCE($18, focus_token_homologacao),
+                         focus_token_producao = COALESCE($19, focus_token_producao),
+                         focus_token = COALESCE($20, focus_token),
+                         serie_cte = COALESCE($21, serie_cte),
+                         serie_mdfe = COALESCE($22, serie_mdfe),
+                         cfop_padrao_cte = COALESCE($23, cfop_padrao_cte),
+                         natureza_padrao_cte = COALESCE($24, natureza_padrao_cte),
+                         aliquota_icms_padrao = COALESCE($25, aliquota_icms_padrao),
+                         updated_at = NOW()
+                     WHERE id = $26 AND tenant_id = $27`,
+                    [
+                        emitCnpj || em.cnpj,
+                        empresa_razao_social || empresa_nome || em.razao_social,
+                        empresa_nome || em.nome_fantasia,
+                        updatedConf.focus_inscricao_estadual || empresa_ie || em.inscricao_estadual,
+                        updatedConf.focus_rntrc || em.rntrc,
+                        updatedConf.focus_regime_tributario || em.regime_tributario || '1',
+                        updatedConf.focus_logradouro || empresa_endereco || em.logradouro,
+                        updatedConf.focus_numero || empresa_numero || em.numero,
+                        updatedConf.focus_complemento ?? empresa_complemento ?? em.complemento,
+                        updatedConf.focus_bairro || empresa_bairro || em.bairro,
+                        updatedConf.focus_cep || String(empresa_cep || '').replace(/\D/g, '') || em.cep,
+                        updatedConf.focus_codigo_municipio || em.codigo_municipio,
+                        updatedConf.focus_municipio || empresa_regiao || em.municipio,
+                        updatedConf.focus_uf || em.uf || 'MS',
+                        String(empresa_fone1 || '').replace(/\D/g, '') || em.telefone,
+                        empresa_email || em.email,
+                        finalFocusAmbiente,
+                        finalTokenHomolog || em.focus_token_homologacao,
+                        finalTokenProd || em.focus_token_producao,
+                        activeToken,
+                        updatedConf.focus_serie_cte || em.serie_cte || '1',
+                        updatedConf.focus_serie_mdfe || em.serie_mdfe || '1',
+                        updatedConf.focus_cfop_padrao || em.cfop_padrao_cte || '5353',
+                        updatedConf.focus_natureza_padrao || em.natureza_padrao_cte || 'PRESTACAO DE SERVICO DE TRANSPORTE',
+                        updatedConf.focus_aliquota_icms_padrao ?? em.aliquota_icms_padrao ?? 12.00,
+                        em.id,
+                        tenantId
+                    ]
+                );
+            } else if (emitCnpj.length === 14) {
+                await client.query(
+                    `INSERT INTO dash_emitentes (
+                        tenant_id, cnpj, razao_social, nome_fantasia, inscricao_estadual, rntrc,
+                        regime_tributario, logradouro, numero, complemento, bairro, cep,
+                        codigo_municipio, municipio, uf, telefone, email,
+                        focus_ambiente, focus_token_homologacao, focus_token_producao, focus_token,
+                        serie_cte, serie_mdfe, cfop_padrao_cte, natureza_padrao_cte, aliquota_icms_padrao
+                     ) VALUES (
+                        $1, $2, $3, $4, $5, $6,
+                        $7, $8, $9, $10, $11, $12,
+                        $13, $14, $15, $16, $17,
+                        $18, $19, $20, $21,
+                        $22, $23, $24, $25, $26
+                     )`,
+                    [
+                        tenantId,
+                        emitCnpj,
+                        empresa_razao_social || empresa_nome || 'EMPRESA EMITENTE',
+                        empresa_nome || 'EMPRESA EMITENTE',
+                        updatedConf.focus_inscricao_estadual || empresa_ie || '',
+                        updatedConf.focus_rntrc || '',
+                        updatedConf.focus_regime_tributario || '1',
+                        updatedConf.focus_logradouro || empresa_endereco || 'RUA PRINCIPAL',
+                        updatedConf.focus_numero || empresa_numero || 'SN',
+                        updatedConf.focus_complemento || empresa_complemento || '',
+                        updatedConf.focus_bairro || empresa_bairro || 'CENTRO',
+                        updatedConf.focus_cep || String(empresa_cep || '').replace(/\D/g, '') || '79004000',
+                        updatedConf.focus_codigo_municipio || '5002704',
+                        updatedConf.focus_municipio || empresa_regiao || 'Campo Grande',
+                        updatedConf.focus_uf || 'MS',
+                        String(empresa_fone1 || '').replace(/\D/g, ''),
+                        empresa_email || '',
+                        finalFocusAmbiente,
+                        finalTokenHomolog,
+                        finalTokenProd,
+                        activeToken,
+                        updatedConf.focus_serie_cte || '1',
+                        updatedConf.focus_serie_mdfe || '1',
+                        updatedConf.focus_cfop_padrao || '5353',
+                        updatedConf.focus_natureza_padrao || 'PRESTACAO DE SERVICO DE TRANSPORTE',
+                        updatedConf.focus_aliquota_icms_padrao ?? 12.00
+                    ]
+                );
+            }
+        }
+
         await client.query('COMMIT');
         res.json({
             success: true,
-            data: rows[0],
+            data: updatedConf,
             recalculation: {
                 applied: recalculouContratos,
                 installmentsCount: contratosContados,

@@ -45,11 +45,23 @@ export default function CtesPage() {
   const handleEmitir = async (id: number) => {
     setLoadingEmit(id);
     try {
-      const res = await api.post(`/transporte/ctes/${id}/emitir`);
+      await api.post(`/transporte/ctes/${id}/emitir`);
       alert('CT-e enviado para autorização na SEFAZ com sucesso! A Focus NFe processará assincronamente.');
       refetch();
     } catch (err: any) {
       alert('Erro ao emitir CT-e: ' + (err.response?.data?.error || err.message));
+    } finally {
+      setLoadingEmit(null);
+    }
+  };
+
+  const handleConsultarFocus = async (id: number) => {
+    setLoadingEmit(id);
+    try {
+      await api.post(`/transporte/ctes/${id}/consultar-focus`);
+      refetch();
+    } catch (err: any) {
+      alert('Erro ao consultar Focus NFe: ' + (err.response?.data?.error || err.message));
     } finally {
       setLoadingEmit(null);
     }
@@ -162,7 +174,7 @@ export default function CtesPage() {
                   alinhamento: 'right',
                   render: c => (
                     <div className="flex items-center justify-end gap-1.5" onClick={e => e.stopPropagation()}>
-                      {c.status === 'RASCUNHO' && (
+                      {(c.status === 'RASCUNHO' || c.status === 'REJEITADO') && (
                         <button
                           onClick={(e) => { e.stopPropagation(); handleEmitir(c.id); }}
                           disabled={loadingEmit === c.id}
@@ -170,6 +182,17 @@ export default function CtesPage() {
                         >
                           <Send className="w-3.5 h-3.5" />
                           <span className="hidden xl:inline">{loadingEmit === c.id ? 'Transmitindo...' : 'Transmitir'}</span>
+                        </button>
+                      )}
+                      {c.status !== 'RASCUNHO' && (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleConsultarFocus(c.id); }}
+                          disabled={loadingEmit === c.id}
+                          title="Sincronizar status com a SEFAZ / Focus NFe"
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-medium bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-200 transition-colors"
+                        >
+                          <RefreshCw className={`w-3.5 h-3.5 ${loadingEmit === c.id ? 'animate-spin' : ''}`} />
+                          <span className="hidden xl:inline">SEFAZ</span>
                         </button>
                       )}
                       {c.caminho_dacte && (

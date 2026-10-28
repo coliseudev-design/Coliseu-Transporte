@@ -101,6 +101,21 @@ export default function MdfeWizardPage() {
   });
   const municipios = municipiosData?.data || [];
 
+  // Auto-seleciona o emitente padrão ao carregar
+  React.useEffect(() => {
+    if (emitentes.length > 0 && !form.emitente_id) {
+      const em = emitentes[0];
+      setForm(f => ({
+        ...f,
+        emitente_id: String(em.id),
+        serie: em.serie_mdfe || f.serie || '1',
+        uf_inicio: f.uf_inicio || em.uf || '',
+        codigo_municipio_carga: f.codigo_municipio_carga || em.codigo_municipio || '',
+        municipio_carga: f.municipio_carga || em.municipio || ''
+      }));
+    }
+  }, [emitentes.length]);
+
   // ── Checklist de prontidão (pré-requisitos) ──
   const checklist = useMemo(() => [
     { ok: veiculos.length > 0, rotulo: 'Veículos cadastrados', detalhe: `${veiculos.length} veículo(s)` },
@@ -264,6 +279,26 @@ export default function MdfeWizardPage() {
                 </legend>
 
                 <GradeCampos className="gap-x-4 gap-y-3">
+                  <CampoFiscal rotulo="Transportadora Emitente" obrigatorio erro={erros.dados.find(e => e.includes('transportadora'))}>
+                    <SelectFiscal
+                      value={form.emitente_id}
+                      onChange={v => {
+                        setCampo('emitente_id', v);
+                        const em = emitentes.find((x: any) => String(x.id) === v);
+                        if (em) {
+                          setForm(f => ({
+                            ...f,
+                            uf_inicio: f.uf_inicio || em.uf || '',
+                            codigo_municipio_carga: f.codigo_municipio_carga || em.codigo_municipio || '',
+                            municipio_carga: f.municipio_carga || em.municipio || ''
+                          }));
+                        }
+                      }}
+                      opcoes={emitentes.map((em: any) => ({ valor: String(em.id), rotulo: `${em.razao_social} — ${em.cnpj}` }))}
+                      placeholder="Selecione a transportadora..."
+                    />
+                  </CampoFiscal>
+
                   <CampoFiscal rotulo="Operação Comercial" dica="Modelo do manifesto">
                     <SelectFiscal
                       value={form.tipo_emitente}
@@ -513,10 +548,19 @@ export default function MdfeWizardPage() {
                               return (
                                 <tr
                                   key={c.id}
-                                  onClick={() => setForm(f => ({
-                                    ...f,
-                                    ctes_ids: marcado ? f.ctes_ids.filter(x => x !== c.id) : [...f.ctes_ids, c.id]
-                                  }))}
+                                  onClick={() => {
+                                    const novosIds = marcado ? form.ctes_ids.filter(x => x !== c.id) : [...form.ctes_ids, c.id];
+                                    const selecionados = ctes.filter((item: any) => novosIds.includes(item.id));
+                                    const somaValor = selecionados.reduce((acc: number, item: any) => acc + Number(item.valor_carga || item.valor_total || 0), 0);
+                                    const somaPeso = selecionados.reduce((acc: number, item: any) => acc + Number(item.peso_bruto || 0), 0);
+                                    setForm(f => ({
+                                      ...f,
+                                      ctes_ids: novosIds,
+                                      uf_fim: f.uf_fim || c.uf_fim || '',
+                                      valor_total_carga: somaValor > 0 ? somaValor.toFixed(2) : f.valor_total_carga,
+                                      peso_bruto: somaPeso > 0 ? somaPeso.toFixed(2) : f.peso_bruto
+                                    }));
+                                  }}
                                   className={`cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/50 ${marcado ? 'bg-sky-50 dark:bg-sky-950/30' : ''}`}
                                 >
                                   <td className="px-2.5 py-1.5">
@@ -545,10 +589,18 @@ export default function MdfeWizardPage() {
                   </fieldset>
 
                   {/* Produtos predominantes e totais */}
-                  <fieldset className="border border-slate-200 dark:border-slate-700 rounded-xl p-4">
+                  <fieldset className="border border-slate-200 dark:border-slate-700 rounded-xl p-4 space-y-4">
                     <legend className="px-2 text-xs font-bold text-slate-500 uppercase tracking-wider">
-                      Produtos Predominantes <span className="text-red-500">*</span>
+                      Produtos Predominantes e Totais da Carga <span className="text-red-500">*</span>
                     </legend>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <CampoFiscal rotulo="Valor Total da Carga (R$)" obrigatorio erro={erros.produtos.find(e => e.includes('Valor total'))}>
+                        <InputFiscal type="number" step="0.01" value={form.valor_total_carga} onChange={v => setCampo('valor_total_carga', v)} placeholder="0,00" />
+                      </CampoFiscal>
+                      <CampoFiscal rotulo="Peso Bruto Total (kg)" obrigatorio erro={erros.produtos.find(e => e.includes('Peso bruto'))}>
+                        <InputFiscal type="number" step="0.01" value={form.peso_bruto} onChange={v => setCampo('peso_bruto', v)} placeholder="0,00" />
+                      </CampoFiscal>
+                    </div>
                     <ListaEditavelFiscal<ProdutoPred>
                       titulo=""
                       itens={form.produtos_predominantes}

@@ -5,7 +5,7 @@ import api from '../../services/api';
 import DocumentoDrawer from '../../components/DocumentoDrawer';
 import {
   Truck, Send, CheckCircle2, Clock, CheckSquare,
-  AlertCircle, Eye, Download, Plus, Navigation, MapPin, MoreHorizontal
+  AlertCircle, Eye, Download, Plus, Navigation, MapPin, MoreHorizontal, RefreshCw
 } from 'lucide-react';
 
 interface Mdfe {
@@ -53,6 +53,18 @@ export default function MdfesPage() {
       refetch();
     } catch (err: any) {
       alert('Erro ao emitir MDF-e: ' + (err.response?.data?.error || err.message));
+    } finally {
+      setLoadingEmit(null);
+    }
+  };
+
+  const handleConsultarFocus = async (id: number) => {
+    setLoadingEmit(id);
+    try {
+      await api.post(`/transporte/mdfes/${id}/consultar-focus`);
+      refetch();
+    } catch (err: any) {
+      alert('Erro ao consultar MDF-e na Focus NFe: ' + (err.response?.data?.error || err.message));
     } finally {
       setLoadingEmit(null);
     }
@@ -173,7 +185,7 @@ export default function MdfesPage() {
                 </div>
 
                 <div className="flex gap-2">
-                  {mdfe.status === 'RASCUNHO' && (
+                  {(mdfe.status === 'RASCUNHO' || mdfe.status === 'REJEITADO') && (
                     <button
                       onClick={() => handleEmitir(mdfe.id)}
                       disabled={loadingEmit === mdfe.id}
@@ -181,6 +193,17 @@ export default function MdfesPage() {
                     >
                       <Send className="w-3.5 h-3.5" />
                       {loadingEmit === mdfe.id ? 'Transmitindo...' : 'Transmitir MDF-e'}
+                    </button>
+                  )}
+                  {mdfe.status !== 'RASCUNHO' && (
+                    <button
+                      onClick={() => handleConsultarFocus(mdfe.id)}
+                      disabled={loadingEmit === mdfe.id}
+                      title="Consultar status na SEFAZ / Focus NFe"
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl font-semibold bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-200 transition-colors"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${loadingEmit === mdfe.id ? 'animate-spin' : ''}`} />
+                      SEFAZ
                     </button>
                   )}
                   {mdfe.status === 'AUTORIZADO' && (

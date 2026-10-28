@@ -4,7 +4,7 @@ import api from '../services/api';
 import {
   X, FileText, Truck, CheckCircle2, AlertTriangle, XCircle, Clock,
   Download, Eye, Send, Ban, FilePen, UserPlus, PlusCircle,
-  MapPin, Package, Copy, Loader2, ShieldCheck, Info
+  MapPin, Package, Copy, Loader2, ShieldCheck, Info, RefreshCw, Mail
 } from 'lucide-react';
 
 interface DrawerProps {
@@ -43,7 +43,7 @@ const COR_EVENTO: Record<string, string> = {
     RESPOSTA: 'bg-amber-100 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400',
     CANCELAMENTO: 'bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-300',
     ENCERRAMENTO: 'bg-emerald-100 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400',
-    CARTA_CORRECAO: 'bg-violet-100 dark:bg-violet-950/60 text-violet-600 dark:text-violet-400',
+    CARTA_CORRECAO: 'bg-sky-100 dark:bg-sky-950/60 text-sky-600 dark:text-sky-400',
     INCLUSAO_CONDUTOR: 'bg-cyan-100 dark:bg-cyan-950/60 text-cyan-600 dark:text-cyan-400',
     INCLUSAO_DFE: 'bg-cyan-100 dark:bg-cyan-950/60 text-cyan-600 dark:text-cyan-400'
 };
@@ -113,7 +113,7 @@ export default function DocumentoDrawer({ tipo, documentoId, onClose, onVerRotei
       PROCESSANDO: 'bg-sky-100 dark:bg-sky-950/60 text-sky-700 dark:text-sky-300',
       REJEITADO: 'bg-red-100 dark:bg-red-950/60 text-red-700 dark:text-red-300',
       CANCELADO: 'bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300',
-      ENCERRADO: 'bg-violet-100 dark:bg-violet-950/60 text-violet-700 dark:text-violet-300',
+      ENCERRADO: 'bg-teal-100 dark:bg-teal-950/60 text-teal-700 dark:text-teal-300',
       RASCUNHO: 'bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300'
     };
     return cores[status] || 'bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300';
@@ -388,11 +388,25 @@ export default function DocumentoDrawer({ tipo, documentoId, onClose, onVerRotei
             {/* Ações */}
             <footer className="px-6 py-4 border-t border-slate-200 dark:border-slate-700/70 shrink-0 bg-slate-50/70 dark:bg-slate-800/40">
               <div className="flex flex-wrap gap-2">
-                {tipo === 'CTE' && doc.status === 'RASCUNHO' && (
+                {doc.status !== 'RASCUNHO' && (
+                  <button
+                    onClick={() => acao(
+                      () => api.post(`/transporte/${tipo === 'CTE' ? 'ctes' : 'mdfes'}/${doc.id}/consultar-focus`),
+                      'Status sincronizado com a Focus NFe / SEFAZ!'
+                    )}
+                    disabled={enviando}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-semibold disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${enviando ? 'animate-spin' : ''}`} />
+                    Consultar SEFAZ
+                  </button>
+                )}
+
+                {(tipo === 'CTE' && (doc.status === 'RASCUNHO' || doc.status === 'REJEITADO')) && (
                   <button
                     onClick={() => acao(() => api.post(`/transporte/ctes/${doc.id}/emitir`), 'CT-e enviado à SEFAZ!')}
                     disabled={enviando}
-                    className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold disabled:opacity-50 shadow-sm"
+                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold disabled:opacity-50 shadow-sm"
                   >
                     <Send className="w-3.5 h-3.5" />
                     Transmitir à SEFAZ
@@ -403,14 +417,29 @@ export default function DocumentoDrawer({ tipo, documentoId, onClose, onVerRotei
                   <>
                     <button
                       onClick={() => setModalCorrecao(true)}
-                      className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-violet-600 hover:bg-violet-700 text-white text-xs font-semibold shadow-sm"
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold shadow-sm"
                     >
                       <FilePen className="w-3.5 h-3.5" />
                       Carta de Correção
                     </button>
                     <button
+                      onClick={() => {
+                        const email = window.prompt('Informe o(s) e-mail(s) separado(s) por vírgula para envio do XML e DACTE:');
+                        if (email && email.trim()) {
+                          acao(
+                            () => api.post(`/transporte/ctes/${doc.id}/enviar-email`, { emails: email.split(',').map(s => s.trim()).filter(Boolean) }),
+                            'E-mail fiscal enviado com sucesso!'
+                          );
+                        }
+                      }}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-teal-600 hover:bg-teal-700 text-white text-xs font-semibold shadow-sm"
+                    >
+                      <Mail className="w-3.5 h-3.5" />
+                      Enviar E-mail
+                    </button>
+                    <button
                       onClick={() => setModalCancelar(true)}
-                      className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl border border-red-200 dark:border-red-900 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 text-xs font-semibold"
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-red-200 dark:border-red-900 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 text-xs font-semibold"
                     >
                       <Ban className="w-3.5 h-3.5" />
                       Cancelar
@@ -418,11 +447,11 @@ export default function DocumentoDrawer({ tipo, documentoId, onClose, onVerRotei
                   </>
                 )}
 
-                {tipo === 'MDFE' && doc.status === 'RASCUNHO' && (
+                {tipo === 'MDFE' && (doc.status === 'RASCUNHO' || doc.status === 'REJEITADO') && (
                   <button
                     onClick={() => acao(() => api.post(`/transporte/mdfes/${doc.id}/emitir`), 'MDF-e enviado à SEFAZ!')}
                     disabled={enviando}
-                    className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold disabled:opacity-50 shadow-sm"
+                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold disabled:opacity-50 shadow-sm"
                   >
                     <Send className="w-3.5 h-3.5" />
                     Transmitir MDF-e
@@ -433,24 +462,31 @@ export default function DocumentoDrawer({ tipo, documentoId, onClose, onVerRotei
                   <>
                     <button
                       onClick={() => setModalCondutor(true)}
-                      className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-cyan-600 hover:bg-cyan-700 text-white text-xs font-semibold shadow-sm"
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-700 text-white text-xs font-semibold shadow-sm"
                     >
                       <UserPlus className="w-3.5 h-3.5" />
                       Incluir condutor
                     </button>
                     <button
                       onClick={() => setModalDfe(true)}
-                      className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold shadow-sm"
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-teal-600 hover:bg-teal-700 text-white text-xs font-semibold shadow-sm"
                     >
                       <PlusCircle className="w-3.5 h-3.5" />
                       Incluir DF-e
                     </button>
                     <button
                       onClick={() => onVerRoteiro?.(doc.id)}
-                      className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold shadow-sm"
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold shadow-sm"
                     >
                       <MapPin className="w-3.5 h-3.5" />
                       Roteiro
+                    </button>
+                    <button
+                      onClick={() => setModalCancelar(true)}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-red-200 dark:border-red-900 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 text-xs font-semibold"
+                    >
+                      <Ban className="w-3.5 h-3.5" />
+                      Cancelar MDF-e
                     </button>
                   </>
                 )}

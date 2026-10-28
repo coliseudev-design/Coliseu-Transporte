@@ -138,6 +138,26 @@ interface IntegracoesConfig {
   padrao_juros_percentual?: number
   padrao_plano_contas_id?: number | null
   padrao_plano_contas_nome?: string | null
+  // Fiscal / Focus NFe (CT-e, CT-e OS e MDF-e)
+  focus_token_homologacao?: string | null
+  focus_token_producao?: string | null
+  focus_ambiente?: 'homologacao' | 'producao' | string
+  focus_regime_tributario?: string
+  focus_rntrc?: string | null
+  focus_serie_cte?: string
+  focus_serie_mdfe?: string
+  focus_cfop_padrao?: string
+  focus_natureza_padrao?: string
+  focus_aliquota_icms_padrao?: number
+  focus_codigo_municipio?: string | null
+  focus_municipio?: string | null
+  focus_uf?: string | null
+  focus_inscricao_estadual?: string | null
+  focus_logradouro?: string | null
+  focus_numero?: string | null
+  focus_complemento?: string | null
+  focus_bairro?: string | null
+  focus_cep?: string | null
 }
 
 import SystemLogsSection from '../components/configuracoes/SystemLogsSection'
@@ -154,7 +174,13 @@ export default function ConfigIntegracoes() {
   const [searchParams] = useSearchParams()
   const tabParam = searchParams.get('tab')
   const [activeTab, setActiveTab] = useState<TabType>(
-    tabParam === 'automacoes' ? 'documentos' : tabParam === 'apis' ? 'apis' : 'empresa'
+    tabParam === 'automacoes'
+      ? 'documentos'
+      : tabParam === 'apis'
+      ? 'apis'
+      : tabParam === 'fiscal'
+      ? 'fiscal'
+      : 'empresa'
   )
   const [padronizacaoSubTab, setPadronizacaoSubTab] = useState<PadronizacaoSubTab>('movimentacao')
   const [apiSubTab, setApiSubTab] = useState<ApiSubTab>('bancos')
@@ -187,6 +213,8 @@ export default function ConfigIntegracoes() {
       setActiveTab('automacoes')
     } else if (tabParam === 'apis') {
       setActiveTab('apis')
+    } else if (tabParam === 'fiscal') {
+      setActiveTab('fiscal')
     }
   }, [tabParam])
   
@@ -270,8 +298,51 @@ export default function ConfigIntegracoes() {
     portador_padrao_id: null,
     portador_padrao_nome: '',
     especie_padrao_id: null,
-    especie_padrao_nome: ''
+    especie_padrao_nome: '',
+    // Fiscal / Focus NFe
+    focus_token_homologacao: '',
+    focus_token_producao: '',
+    focus_ambiente: 'homologacao',
+    focus_regime_tributario: '1',
+    focus_rntrc: '',
+    focus_serie_cte: '1',
+    focus_serie_mdfe: '1',
+    focus_cfop_padrao: '5353',
+    focus_natureza_padrao: 'PRESTACAO DE SERVICO DE TRANSPORTE',
+    focus_aliquota_icms_padrao: 12,
+    focus_codigo_municipio: '5002704',
+    focus_municipio: 'Campo Grande',
+    focus_uf: 'MS',
+    focus_inscricao_estadual: '',
+    focus_logradouro: '',
+    focus_numero: '',
+    focus_complemento: '',
+    focus_bairro: '',
+    focus_cep: ''
   })
+
+  const [testingFocus, setTestingFocus] = useState(false)
+  const [focusTestResult, setFocusTestResult] = useState<{ ok: boolean; message: string } | null>(null)
+
+  const handleTestFocusConnection = async (ambienteTeste?: 'homologacao' | 'producao') => {
+    const amb = ambienteTeste || (form.focus_ambiente as 'homologacao' | 'producao') || 'homologacao'
+    setTestingFocus(true)
+    setFocusTestResult(null)
+    try {
+      const res = await api.post('/transporte/focus/testar', {
+        ambiente: amb,
+        token_homologacao: form.focus_token_homologacao || undefined,
+        token_producao: form.focus_token_producao || undefined
+      })
+      const msg = res.data?.mensagem || `Conexão com Focus NFe (${amb.toUpperCase()}) autenticada com sucesso!`
+      setFocusTestResult({ ok: true, message: msg })
+    } catch (err: any) {
+      const msg = err.response?.data?.error || err.message || 'Falha ao testar conexão com a Focus NFe.'
+      setFocusTestResult({ ok: false, message: msg })
+    } finally {
+      setTestingFocus(false)
+    }
+  }
 
   const [testingAI, setTestingAI] = useState<{ [key: string]: boolean }>({})
   const [aiStatus, setAiStatus] = useState<{ [key: string]: 'idle' | 'success' | 'failed' }>({})
@@ -528,7 +599,27 @@ export default function ConfigIntegracoes() {
         padrao_juros_carencia_dias: Number(c.padrao_juros_carencia_dias ?? 0),
         padrao_juros_percentual: Number(c.padrao_juros_percentual ?? 0),
         padrao_plano_contas_id: c.padrao_plano_contas_id ? Number(c.padrao_plano_contas_id) : null,
-        padrao_plano_contas_nome: c.padrao_plano_contas_nome || ''
+        padrao_plano_contas_nome: c.padrao_plano_contas_nome || '',
+        // Fiscal / Focus NFe
+        focus_token_homologacao: c.focus_token_homologacao || '',
+        focus_token_producao: c.focus_token_producao || '',
+        focus_ambiente: c.focus_ambiente || 'homologacao',
+        focus_regime_tributario: c.focus_regime_tributario || '1',
+        focus_rntrc: c.focus_rntrc || '',
+        focus_serie_cte: c.focus_serie_cte || '1',
+        focus_serie_mdfe: c.focus_serie_mdfe || '1',
+        focus_cfop_padrao: c.focus_cfop_padrao || '5353',
+        focus_natureza_padrao: c.focus_natureza_padrao || 'PRESTACAO DE SERVICO DE TRANSPORTE',
+        focus_aliquota_icms_padrao: Number(c.focus_aliquota_icms_padrao ?? 12),
+        focus_codigo_municipio: c.focus_codigo_municipio || '5002704',
+        focus_municipio: c.focus_municipio || c.empresa_regiao || 'Campo Grande',
+        focus_uf: c.focus_uf || 'MS',
+        focus_inscricao_estadual: c.focus_inscricao_estadual || c.empresa_ie || '',
+        focus_logradouro: c.focus_logradouro || c.empresa_endereco || '',
+        focus_numero: c.focus_numero || c.empresa_numero || '',
+        focus_complemento: c.focus_complemento || c.empresa_complemento || '',
+        focus_bairro: c.focus_bairro || c.empresa_bairro || '',
+        focus_cep: c.focus_cep || c.empresa_cep || ''
       })
     }
   }, [configRes, selectedBranch, filiais])
@@ -4828,33 +4919,404 @@ export default function ConfigIntegracoes() {
             </div>
           )}
 
-          {/* TAB: FISCAL */}
+          {/* TAB: FISCAL (FOCUS NFE CT-e / CT-e OS / MDF-e) */}
           {activeTab === 'fiscal' && (
-            <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm space-y-5 animate-fade-in">
-              <div className="flex items-center gap-2.5 text-indigo-600 dark:text-indigo-400 border-b border-slate-200 dark:border-slate-800 pb-3">
-                <Building2 size={20} />
-                <h3 className="font-extrabold text-sm uppercase text-slate-800 dark:text-slate-200 font-heading">
-                  Parâmetros Fiscais & Certificados Digitais
-                </h3>
+            <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm space-y-6 animate-fade-in">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 dark:border-slate-800 pb-3">
+                <div className="flex items-center gap-2.5 text-blue-600 dark:text-blue-400">
+                  <Building2 size={20} />
+                  <div>
+                    <h3 className="font-extrabold text-sm uppercase text-slate-800 dark:text-slate-200 font-heading">
+                      Emissão Fiscal — Focus NFe v2 (CT-e 57, CT-e OS 67 e MDF-e 58)
+                    </h3>
+                    <p className="text-[11px] text-slate-500">
+                      Configure seus tokens de Homologação e Produção, selecione o ambiente ativo e defina os parâmetros fiscais padrão da transportadora.
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span
+                    className={clsx(
+                      'px-3 py-1 rounded-full text-[11px] font-bold border',
+                      form.focus_ambiente === 'producao'
+                        ? 'bg-emerald-500/10 text-emerald-700 border-emerald-500/30'
+                        : 'bg-amber-500/10 text-amber-700 border-amber-500/30'
+                    )}
+                  >
+                    {form.focus_ambiente === 'producao'
+                      ? '🟢 AMBIENTE ATIVO: PRODUÇÃO (COM VALOR FISCAL)'
+                      : '🟡 AMBIENTE ATIVO: HOMOLOGAÇÃO (TESTES SEFAZ)'}
+                  </span>
+                </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
-                <div>
-                  <label className="text-[10px] font-bold text-slate-500 uppercase block mb-1">Regime Tributário</label>
-                  <select className="input font-bold w-full bg-white dark:bg-slate-900 border-slate-300">
-                    <option value="1">Simples Nacional</option>
-                    <option value="2">Simples Nacional - Excesso de Sublimite</option>
-                    <option value="3">Regime Normal (Lucro Presumido / Real)</option>
-                  </select>
+              {/* 1. AMBIENTE E CREDENCIAIS FOCUS NFE */}
+              <div className="p-4 bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 rounded-xl space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h4 className="font-extrabold text-xs uppercase text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
+                      <Key size={14} className="text-blue-600" />
+                      1. Credenciais e Ambiente da API Focus NFe
+                    </h4>
+                    <p className="text-[11px] text-slate-500 mt-0.5">
+                      Informe os dois tokens do painel Focus NFe e alterne entre Homologação e Produção quando desejar.
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={testingFocus}
+                      onClick={() => handleTestFocusConnection('homologacao')}
+                      className="px-3 py-1.5 rounded-lg text-[11px] font-bold border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-800 flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50"
+                    >
+                      {testingFocus ? <RefreshCw size={12} className="animate-spin" /> : <Play size={12} />}
+                      Testar Homologação
+                    </button>
+                    <button
+                      type="button"
+                      disabled={testingFocus}
+                      onClick={() => handleTestFocusConnection('producao')}
+                      className="px-3 py-1.5 rounded-lg text-[11px] font-bold border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50"
+                    >
+                      {testingFocus ? <RefreshCw size={12} className="animate-spin" /> : <CheckCircle2 size={12} />}
+                      Testar Produção
+                    </button>
+                  </div>
                 </div>
 
-                <div>
-                  <label className="text-[10px] font-bold text-slate-500 uppercase block mb-1">Ambiente de Emissão Fiscal</label>
-                  <select className="input font-bold w-full bg-white dark:bg-slate-900 border-slate-300">
-                    <option value="homologacao">Homologação (Testes)</option>
-                    <option value="producao">Produção (Com Valor Fiscal)</option>
-                  </select>
+                {focusTestResult && (
+                  <div
+                    className={clsx(
+                      'p-3 rounded-lg border text-xs font-semibold flex items-center gap-2',
+                      focusTestResult.ok
+                        ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                        : 'bg-red-50 border-red-200 text-red-800'
+                    )}
+                  >
+                    {focusTestResult.ok ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />}
+                    <span>{focusTestResult.message}</span>
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
+                  <div>
+                    <label className="text-[10px] font-bold text-slate-600 dark:text-slate-400 uppercase block mb-1">
+                      Ambiente de Emissão Ativo *
+                    </label>
+                    <select
+                      value={form.focus_ambiente || 'homologacao'}
+                      onChange={e => setForm(prev => ({ ...prev, focus_ambiente: e.target.value }))}
+                      className="input font-bold w-full bg-white dark:bg-slate-900 border-slate-300"
+                    >
+                      <option value="homologacao">🟡 Homologação (Testes SEFAZ — Sem Valor Fiscal)</option>
+                      <option value="producao">🟢 Produção (Validade Jurídica SEFAZ)</option>
+                    </select>
+                    <span className="text-[10px] text-slate-400 block mt-1">
+                      Endpoint ativo:{' '}
+                      <code className="font-mono text-slate-600 dark:text-slate-300">
+                        {form.focus_ambiente === 'producao'
+                          ? 'https://api.focusnfe.com.br'
+                          : 'https://homologacao.focusnfe.com.br'}
+                      </code>
+                    </span>
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] font-bold text-amber-700 dark:text-amber-400 uppercase flex items-center justify-between mb-1">
+                      <span>Token Focus NFe — Homologação</span>
+                      {form.focus_token_homologacao ? (
+                        <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-800">Configurado</span>
+                      ) : (
+                        <span className="text-[9px] px-1.5 py-0.5 rounded bg-slate-200 text-slate-600">Pendente</span>
+                      )}
+                    </label>
+                    <input
+                      type="password"
+                      value={form.focus_token_homologacao || ''}
+                      onChange={e => setForm(prev => ({ ...prev, focus_token_homologacao: e.target.value }))}
+                      placeholder="Cole aqui o Token de Homologação da Focus NFe"
+                      className="input font-mono w-full bg-white dark:bg-slate-900 border-slate-300"
+                    />
+                    <span className="text-[10px] text-slate-400 block mt-1">
+                      Usado automaticamente quando o ambiente está em Homologação.
+                    </span>
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] font-bold text-emerald-700 dark:text-emerald-400 uppercase flex items-center justify-between mb-1">
+                      <span>Token Focus NFe — Produção</span>
+                      {form.focus_token_producao ? (
+                        <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800">Configurado</span>
+                      ) : (
+                        <span className="text-[9px] px-1.5 py-0.5 rounded bg-slate-200 text-slate-600">Pendente</span>
+                      )}
+                    </label>
+                    <input
+                      type="password"
+                      value={form.focus_token_producao || ''}
+                      onChange={e => setForm(prev => ({ ...prev, focus_token_producao: e.target.value }))}
+                      placeholder="Cole aqui o Token de Produção da Focus NFe"
+                      className="input font-mono w-full bg-white dark:bg-slate-900 border-slate-300"
+                    />
+                    <span className="text-[10px] text-slate-400 block mt-1">
+                      Usado automaticamente quando o ambiente está em Produção.
+                    </span>
+                  </div>
                 </div>
+
+                {/* Webhook URL box */}
+                <div className="pt-2 border-t border-slate-200 dark:border-slate-700 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+                  <div>
+                    <span className="font-bold text-slate-700 dark:text-slate-300">
+                      🔗 URL de Gatilho (Webhook) para cadastrar no Painel Focus NFe (CT-e e MDF-e):
+                    </span>
+                    <code className="block sm:inline sm:ml-2 px-2 py-0.5 rounded bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 font-mono text-[11px] text-blue-600">
+                      https://transporte.coliseusistemas.com.br/api/webhooks/focus
+                    </code>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard?.writeText('https://transporte.coliseusistemas.com.br/api/webhooks/focus')
+                      alert('URL do Webhook copiada para a área de transferência!')
+                    }}
+                    className="px-2.5 py-1 rounded border border-slate-300 bg-white hover:bg-slate-100 text-[10px] font-bold text-slate-700 cursor-pointer self-start sm:self-auto"
+                  >
+                    Copiar URL Webhook
+                  </button>
+                </div>
+              </div>
+
+              {/* 2. PARÂMETROS FISCAIS E NUMERAÇÃO PADRÃO */}
+              <div className="p-4 bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 rounded-xl space-y-4">
+                <h4 className="font-extrabold text-xs uppercase text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
+                  <FileText size={14} className="text-blue-600" />
+                  2. Parâmetros Tributários, RNTRC e Séries Padrão (CT-e / CT-e OS / MDF-e)
+                </h4>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 text-xs">
+                  <div>
+                    <label className="text-[10px] font-bold text-slate-500 uppercase block mb-1">
+                      Regime Tributário (CRT)
+                    </label>
+                    <select
+                      value={form.focus_regime_tributario || '1'}
+                      onChange={e => setForm(prev => ({ ...prev, focus_regime_tributario: e.target.value }))}
+                      className="input font-bold w-full bg-white dark:bg-slate-900 border-slate-300"
+                    >
+                      <option value="1">1 — Simples Nacional</option>
+                      <option value="2">2 — Simples Nacional (Excesso Sublimite)</option>
+                      <option value="3">3 — Regime Normal (Lucro Presumido / Real)</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] font-bold text-slate-500 uppercase block mb-1">
+                      RNTRC da Transportadora (ANTT — 8 dígitos)
+                    </label>
+                    <input
+                      type="text"
+                      maxLength={14}
+                      value={form.focus_rntrc || ''}
+                      onChange={e => setForm(prev => ({ ...prev, focus_rntrc: e.target.value.replace(/\D/g, '') }))}
+                      placeholder="Ex: 12345678"
+                      className="input font-mono w-full bg-white dark:bg-slate-900 border-slate-300"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] font-bold text-slate-500 uppercase block mb-1">
+                      Inscrição Estadual do Emitente
+                    </label>
+                    <input
+                      type="text"
+                      value={form.focus_inscricao_estadual || ''}
+                      onChange={e => setForm(prev => ({ ...prev, focus_inscricao_estadual: e.target.value }))}
+                      placeholder="Ex: 282920153"
+                      className="input font-mono w-full bg-white dark:bg-slate-900 border-slate-300"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] font-bold text-slate-500 uppercase block mb-1">
+                      Alíquota ICMS Padrão (%)
+                    </label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={form.focus_aliquota_icms_padrao ?? 12}
+                      onChange={e => setForm(prev => ({ ...prev, focus_aliquota_icms_padrao: Number(e.target.value) }))}
+                      className="input font-mono w-full bg-white dark:bg-slate-900 border-slate-300"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] font-bold text-slate-500 uppercase block mb-1">
+                      Série Padrão CT-e / CT-e OS
+                    </label>
+                    <input
+                      type="text"
+                      value={form.focus_serie_cte || '1'}
+                      onChange={e => setForm(prev => ({ ...prev, focus_serie_cte: e.target.value }))}
+                      className="input font-mono w-full bg-white dark:bg-slate-900 border-slate-300"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] font-bold text-slate-500 uppercase block mb-1">
+                      Série Padrão MDF-e
+                    </label>
+                    <input
+                      type="text"
+                      value={form.focus_serie_mdfe || '1'}
+                      onChange={e => setForm(prev => ({ ...prev, focus_serie_mdfe: e.target.value }))}
+                      className="input font-mono w-full bg-white dark:bg-slate-900 border-slate-300"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] font-bold text-slate-500 uppercase block mb-1">
+                      CFOP Padrão CT-e
+                    </label>
+                    <input
+                      type="text"
+                      maxLength={4}
+                      value={form.focus_cfop_padrao || '5353'}
+                      onChange={e => setForm(prev => ({ ...prev, focus_cfop_padrao: e.target.value.replace(/\D/g, '') }))}
+                      placeholder="Ex: 5353 ou 6353"
+                      className="input font-mono w-full bg-white dark:bg-slate-900 border-slate-300"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] font-bold text-slate-500 uppercase block mb-1">
+                      Natureza da Operação Padrão
+                    </label>
+                    <input
+                      type="text"
+                      value={form.focus_natureza_padrao || 'PRESTACAO DE SERVICO DE TRANSPORTE'}
+                      onChange={e => setForm(prev => ({ ...prev, focus_natureza_padrao: e.target.value }))}
+                      className="input w-full bg-white dark:bg-slate-900 border-slate-300"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* 3. LOCALIDADE FISCAL DO EMITENTE (CÓDIGO IBGE E ENDEREÇO SEFAZ) */}
+              <div className="p-4 bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 rounded-xl space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h4 className="font-extrabold text-xs uppercase text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
+                    <MapPin size={14} className="text-blue-600" />
+                    3. Endereço e Município IBGE do Emitente (Obrigatório SEFAZ CT-e / MDF-e)
+                  </h4>
+                  <button
+                    type="button"
+                    onClick={() => navigate('/transporte/emitentes')}
+                    className="text-[11px] font-bold text-blue-600 hover:underline cursor-pointer"
+                  >
+                    Gerenciar Múltiplos Emitentes / Certificados A1 →
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 text-xs">
+                  <div>
+                    <label className="text-[10px] font-bold text-slate-500 uppercase block mb-1">
+                      UF do Emitente *
+                    </label>
+                    <input
+                      type="text"
+                      maxLength={2}
+                      value={form.focus_uf || 'MS'}
+                      onChange={e => setForm(prev => ({ ...prev, focus_uf: e.target.value.toUpperCase() }))}
+                      placeholder="MS"
+                      className="input font-mono uppercase w-full bg-white dark:bg-slate-900 border-slate-300"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] font-bold text-slate-500 uppercase block mb-1">
+                      Município do Emitente *
+                    </label>
+                    <input
+                      type="text"
+                      value={form.focus_municipio || ''}
+                      onChange={e => setForm(prev => ({ ...prev, focus_municipio: e.target.value }))}
+                      placeholder="Ex: Campo Grande"
+                      className="input w-full bg-white dark:bg-slate-900 border-slate-300"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] font-bold text-slate-500 uppercase block mb-1">
+                      Código Município IBGE (7 dígitos) *
+                    </label>
+                    <input
+                      type="text"
+                      maxLength={7}
+                      value={form.focus_codigo_municipio || ''}
+                      onChange={e => setForm(prev => ({ ...prev, focus_codigo_municipio: e.target.value.replace(/\D/g, '') }))}
+                      placeholder="Ex: 5002704"
+                      className="input font-mono w-full bg-white dark:bg-slate-900 border-slate-300"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] font-bold text-slate-500 uppercase block mb-1">
+                      CEP *
+                    </label>
+                    <input
+                      type="text"
+                      maxLength={9}
+                      value={form.focus_cep || ''}
+                      onChange={e => setForm(prev => ({ ...prev, focus_cep: e.target.value }))}
+                      placeholder="79004-000"
+                      className="input font-mono w-full bg-white dark:bg-slate-900 border-slate-300"
+                    />
+                  </div>
+
+                  <div className="sm:col-span-2">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase block mb-1">
+                      Logradouro (Rua / Avenida) *
+                    </label>
+                    <input
+                      type="text"
+                      value={form.focus_logradouro || ''}
+                      onChange={e => setForm(prev => ({ ...prev, focus_logradouro: e.target.value }))}
+                      placeholder="Ex: AVENIDA EDUARDO ELIAS ZAHRAN"
+                      className="input w-full bg-white dark:bg-slate-900 border-slate-300"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] font-bold text-slate-500 uppercase block mb-1">
+                      Número *
+                    </label>
+                    <input
+                      type="text"
+                      value={form.focus_numero || ''}
+                      onChange={e => setForm(prev => ({ ...prev, focus_numero: e.target.value }))}
+                      placeholder="Ex: 807"
+                      className="input w-full bg-white dark:bg-slate-900 border-slate-300"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] font-bold text-slate-500 uppercase block mb-1">
+                      Bairro *
+                    </label>
+                    <input
+                      type="text"
+                      value={form.focus_bairro || ''}
+                      onChange={e => setForm(prev => ({ ...prev, focus_bairro: e.target.value }))}
+                      placeholder="Ex: JARDIM PAULISTA"
+                      className="input w-full bg-white dark:bg-slate-900 border-slate-300"
+                    />
+                  </div>
+                </div>
+
+                <p className="text-[11px] text-slate-500">
+                  💡 Ao clicar em <strong>Salvar Configurações</strong> abaixo, estes dados e tokens são sincronizados automaticamente com o cadastro de Emitente do módulo Transporte.
+                </p>
               </div>
             </div>
           )}
