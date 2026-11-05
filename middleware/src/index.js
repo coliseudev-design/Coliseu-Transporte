@@ -9,8 +9,8 @@ const path = require('path');
 
 async function startServer() {
     try {
-        // 1. Inicia o servidor HTTP IMEDIATAMENTE na porta 3200 para garantir que o Coolify/Nginx não retornem 502 Bad Gateway no boot
-        const server = app.listen(config.server.port, () => {
+        // 1. Inicia o servidor HTTP IMEDIATAMENTE na porta 3200 (0.0.0.0) para garantir que o Coolify/Nginx não retornem 502 Bad Gateway no boot
+        const server = app.listen(config.server.port, '0.0.0.0', () => {
             logger.info(`[App] Dashboard Middleware rodando na porta ${config.server.port} [${config.server.nodeEnv}]`);
         });
 

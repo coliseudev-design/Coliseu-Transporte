@@ -74,12 +74,15 @@ services:
     ports:
       - "3100:3200"   # Exposto em 3100 para não conflitar com a VPS
     healthcheck:
-      test: ["CMD-SHELL", "wget --no-verbose --spider http://localhost:3200/health/liveness || exit 1"]
+      test: ["CMD-SHELL", "wget --no-verbose --spider http://127.0.0.1:3200/health/liveness || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 5
     networks:
-      - coliseu-local
+      coliseu-local:
+        aliases:
+          - middleware
+          - coliseu-transporte-middleware
 
   # -------------------------------------------------------
   # Frontend React (aponta para middleware-local)

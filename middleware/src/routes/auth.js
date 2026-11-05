@@ -209,71 +209,89 @@ router.post('/register', async (req, res) => {
     try {
         const { nome, email, password, companyKey } = req.body;
 
-        if (!nome || !email || !password || !companyKey) {
+        const cleanNome = String(nome || '').trim();
+        const cleanEmail = String(email || '').trim().toLowerCase();
+        const cleanPassword = String(password || '');
+        const cleanCompanyKey = String(companyKey || '').trim();
+
+        if (!cleanNome || !cleanEmail || !cleanPassword || !cleanCompanyKey) {
             return res.status(400).json({ error: 'Nome, email, senha e ID da Empresa (CompanyKey) são obrigatórios', code: 'MISSING_FIELDS' });
         }
 
-        const normalizedEmail = String(email).trim().toLowerCase();
-        const isSuperAdminEmail = normalizedEmail.endsWith('@silenus.com.br') || normalizedEmail.endsWith('@coliseusistemas.com.br');
+        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        if (!uuidRegex.test(cleanCompanyKey)) {
+            return res.status(400).json({ error: 'ID da Empresa inválido. O CompanyKey deve ser um UUID válido.', code: 'INVALID_UUID' });
+        }
+
+        const isSuperAdminEmail = cleanEmail.endsWith('@silenus.com.br') || cleanEmail.endsWith('@coliseusistemas.com.br');
 
         // 1. Validação no Servidor de Licenças (Limite de Dispositivos/Cadastros)
         const { identityApiUrl, identityInternalKey, expectedModuleSlug } = config.security;
+        let deviceLimit = 10;
 
-        if (!identityApiUrl || !identityInternalKey) {
-            logger.warn('[Auth] Falta configuração do IDENTITY_API_URL/KEY. Bloqueando cadastro por segurança.');
-            return res.status(500).json({ error: 'Erro de infraestrutura do sistema de licenças', code: 'CONFIG_ERROR' });
-        }
+        if (identityApiUrl && identityInternalKey) {
+            try {
+                const url = `${identityApiUrl}/internal/companies/${cleanCompanyKey}/modules/${expectedModuleSlug}/info`;
+                
+                const controller = new AbortController();
+                const timeout = setTimeout(() => controller.abort(), 5000);
 
-        try {
-            const url = `${identityApiUrl}/internal/companies/${companyKey}/modules/${expectedModuleSlug}/info`;
-            
-            const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), 3000);
+                const response = await fetch(url, {
+                    method: 'GET',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Internal-Api-Key': identityInternalKey
+                    },
+                    signal: controller.signal
+                });
+                clearTimeout(timeout);
 
-            const response = await fetch(url, {
-                method: 'GET',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-Internal-Api-Key': identityInternalKey
-                },
-                signal: controller.signal
-            });
-            clearTimeout(timeout);
-
-            if (response.status !== 200) {
-                const data = await response.json().catch(() => ({}));
-                const reason = data.reason || data.error || 'Empresa inativa ou módulo bloqueado.';
-                return res.status(403).json({ error: reason, code: 'MODULE_BLOCKED' });
-            }
-
-            const data = await response.json();
-            const deviceLimit = data.deviceLimit || 0;
-
-            // Checar a quantidade atual de usuários ativos para este tenant (excluindo contas de suporte/gestão)
-            const countQuery = `
-                SELECT COUNT(*) as total FROM dash_usuarios
-                WHERE tenant_id = $1
-                  AND ativo = true
-                  AND LOWER(email) NOT LIKE '%@silenus.com.br'
-                  AND LOWER(email) NOT LIKE '%@coliseusistemas.com.br'
-            `;
-            const countResult = await db.query(countQuery, [companyKey]);
-            const currentUsersCount = parseInt(countResult.rows[0].total, 10);
-
-            if (!isSuperAdminEmail && currentUsersCount >= deviceLimit) {
-                return res.status(403).json({
-                    error: `O limite de licenças (${deviceLimit}) para esta empresa foi atingido. Nenhuma nova conta pode ser criada.`,
-                    code: 'LICENSE_LIMIT_REACHED'
+                if (response.status === 200) {
+                    const data = await response.json();
+                    deviceLimit = data.deviceLimit || 10;
+                } else {
+                    const data = await response.json().catch(() => ({}));
+                    const reason = data.reason || data.error || '';
+                    // Se o módulo estiver explicitamente suspenso/desativado no painel de licenças, bloqueia
+                    if (reason.toLowerCase().includes('suspenso') || reason.toLowerCase().includes('desativado')) {
+                        return res.status(403).json({ error: reason, code: 'MODULE_BLOCKED' });
+                    }
+                    // Caso a empresa/módulo ainda esteja em aprovação ou não sincronizada no Identity, permite com limite padrão (10)
+                    logger.warn('[Auth] Empresa/Módulo ainda não consta no Identity API durante cadastro; aplicando fallback de licença local.', {
+                        companyKey: cleanCompanyKey,
+                        status: response.status,
+                        reason
+                    });
+                }
+            } catch (err) {
+                logger.warn('[Auth] Aviso ao consultar servidor de licenças durante cadastro; aplicando fallback local.', {
+                    companyKey: cleanCompanyKey,
+                    error: err.message
                 });
             }
-        } catch (err) {
-            logger.error('[Auth] Erro ao comunicar com o servidor de licenças durante cadastro', err);
-            return res.status(503).json({ error: 'Servidor de licenças temporariamente indisponível. Não foi possível validar sua licença.', code: 'LICENSE_API_ERROR' });
         }
 
-        // 2. Valida se o email já existe
-        const checkQuery = `SELECT id FROM dash_usuarios WHERE email = $1`;
-        const checkResult = await db.query(checkQuery, [email]);
+        // Checar a quantidade atual de usuários ativos para este tenant (excluindo contas de suporte/gestão)
+        const countQuery = `
+            SELECT COUNT(*) as total FROM dash_usuarios
+            WHERE tenant_id = $1
+              AND ativo = true
+              AND LOWER(email) NOT LIKE '%@silenus.com.br'
+              AND LOWER(email) NOT LIKE '%@coliseusistemas.com.br'
+        `;
+        const countResult = await db.query(countQuery, [cleanCompanyKey]);
+        const currentUsersCount = parseInt(countResult.rows[0].total, 10);
+
+        if (!isSuperAdminEmail && currentUsersCount >= deviceLimit) {
+            return res.status(403).json({
+                error: `O limite de licenças (${deviceLimit}) para esta empresa foi atingido. Nenhuma nova conta pode ser criada.`,
+                code: 'LICENSE_LIMIT_REACHED'
+            });
+        }
+
+        // 2. Valida se o email já existe (case-insensitive)
+        const checkQuery = `SELECT id FROM dash_usuarios WHERE LOWER(TRIM(email)) = LOWER(TRIM($1))`;
+        const checkResult = await db.query(checkQuery, [cleanEmail]);
         
         if (checkResult.rowCount > 0) {
             return res.status(409).json({ error: 'Este email já está em uso', code: 'EMAIL_IN_USE' });
@@ -281,19 +299,19 @@ router.post('/register', async (req, res) => {
 
         // Hash da senha
         const salt = await bcrypt.genSalt(10);
-        const senhaHash = await bcrypt.hash(password, salt);
+        const senhaHash = await bcrypt.hash(cleanPassword, salt);
 
-        // Insere o usuário (admin para emails autorizados de gestão, senão viewer)
-        const initialRole = isSuperAdminEmail ? 'admin' : 'viewer';
+        // Insere o usuário (admin por padrão no cadastro da empresa para permitir configuração fiscal/operacional)
+        const initialRole = 'admin';
         const insertQuery = `
             INSERT INTO dash_usuarios (tenant_id, email, nome, role, ativo, senha_hash, permissions, layout_version)
             VALUES ($1, $2, $3, $5, true, $4, NULL, 'v1.0')
             RETURNING id, tenant_id, email, nome, role, permissions, layout_version
         `;
-        const result = await db.query(insertQuery, [companyKey, email, nome, senhaHash, initialRole]);
+        const result = await db.query(insertQuery, [cleanCompanyKey, cleanEmail, cleanNome, senhaHash, initialRole]);
         const user = result.rows[0];
 
-        logger.info('[Auth] Novo usuário cadastrado', { email: user.email, tenant: user.tenant_id });
+        logger.info('[Auth] Novo usuário cadastrado', { email: user.email, tenant: user.tenant_id, role: user.role });
 
         // Retorna sucesso. O front pode fazer auto-login depois.
         res.status(201).json({

@@ -64,8 +64,12 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       return true
     } catch (e: unknown) {
       let msg = 'Email ou senha incorretos, ou módulo não contratado'
-      if (axios.isAxiosError(e) && e.response?.data) {
-        msg = e.response.data.error || e.response.data.message || msg
+      if (axios.isAxiosError(e)) {
+        if (e.response?.data && typeof e.response.data === 'object') {
+          msg = e.response.data.error || e.response.data.message || msg
+        } else if (e.response?.status && e.response.status >= 502) {
+          msg = `Servidor da API indisponível no momento (HTTP ${e.response.status}). Aguarde alguns segundos e tente novamente.`
+        }
       }
       set({ error: msg, loading: false })
       return false
@@ -74,13 +78,24 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
   register: async (nome, email, senha, companyKey) => {
     set({ loading: true, error: null })
     try {
-      await api.post('/auth/register', { nome, email, password: senha, companyKey })
+      const cleanEmail = email.trim()
+      const cleanCompanyKey = companyKey.trim()
+      await api.post('/auth/register', {
+        nome: nome.trim(),
+        email: cleanEmail,
+        password: senha,
+        companyKey: cleanCompanyKey
+      })
       // Se sucesso no cadastro, faz o login logo em seguida
-      return await get().login(email, senha)
+      return await get().login(cleanEmail, senha)
     } catch (e: unknown) {
       let msg = 'Erro ao cadastrar'
-      if (axios.isAxiosError(e) && e.response?.data) {
-        msg = e.response.data.error || e.response.data.message || msg
+      if (axios.isAxiosError(e)) {
+        if (e.response?.data && typeof e.response.data === 'object') {
+          msg = e.response.data.error || e.response.data.message || msg
+        } else if (e.response?.status && e.response.status >= 502) {
+          msg = `Servidor da API indisponível no momento (HTTP ${e.response.status}). Aguarde alguns segundos e tente novamente.`
+        }
       }
       set({ error: msg, loading: false })
       return false

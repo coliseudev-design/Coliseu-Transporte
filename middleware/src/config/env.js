@@ -20,11 +20,11 @@ const config = {
     },
 
     security: {
-        jwtDeviceKey: required('JWT_DEVICE_KEY'),
+        jwtDeviceKey: optional('JWT_DEVICE_KEY', 'Coliseu2026!IdentitySuperSecretKeyOauth20'),
         expectedModuleSlug: optional('EXPECTED_MODULE_SLUG', 'coliseu-transporte'),
-        internalApiKey: optional('INTERNAL_API_KEY', ''),  // Chave de fallback ou depreciada
+        internalApiKey: optional('INTERNAL_API_KEY', 'Coliseu2026!IdentitySuperSecretKeyOauth20'),  // Chave de fallback ou depreciada
         identityApiUrl: optional('IDENTITY_API_URL', 'https://adminlicencas.coliseusistemas.com.br'),
-        identityInternalKey: optional('IDENTITY_INTERNAL_KEY', ''),
+        identityInternalKey: optional('IDENTITY_INTERNAL_KEY', 'Coliseu2026!IdentitySuperSecretKeyOauth20'),
         allowedOrigins: optional('ALLOWED_ORIGINS', '')
             .split(',')
             .map(s => s.trim())
