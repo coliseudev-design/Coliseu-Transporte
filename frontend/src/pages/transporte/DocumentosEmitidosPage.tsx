@@ -86,6 +86,37 @@ export default function DocumentosEmitidosPage() {
     setDataFim('');
   };
 
+  const handleBaixarArquivo = async (
+    tipoDoc: 'CTE' | 'MDFE',
+    idDoc: number,
+    formato: 'pdf' | 'xml',
+    fallbackUrl?: string
+  ) => {
+    try {
+      const res = await api.get(`/transporte/documentos/${tipoDoc}/${idDoc}/download/${formato}`, {
+        responseType: 'blob'
+      });
+      const mime = formato === 'xml' ? 'application/xml' : 'application/pdf';
+      const blob = new Blob([res.data], { type: mime });
+      const blobUrl = URL.createObjectURL(blob);
+      if (formato === 'pdf') {
+        window.open(blobUrl, '_blank', 'noopener,noreferrer');
+      } else {
+        const link = document.createElement('a');
+        link.href = blobUrl;
+        link.download = `${tipoDoc.toLowerCase()}-${idDoc}.xml`;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+      }
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+    } catch {
+      if (fallbackUrl) {
+        window.open(fallbackUrl, '_blank', 'noopener,noreferrer');
+      }
+    }
+  };
+
   return (
     <div className="space-y-4 pb-20">
       {/* Cabeçalho */}
@@ -318,26 +349,24 @@ export default function DocumentosEmitidosPage() {
                         <span className="hidden xl:inline">Detalhes</span>
                       </button>
                       {d.caminho_pdf && (
-                        <a
-                          href={d.caminho_pdf}
-                          target="_blank"
-                          rel="noreferrer"
+                        <button
+                          type="button"
+                          onClick={() => handleBaixarArquivo(d.tipo_documento, d.id, 'pdf', d.caminho_pdf)}
                           className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-200 text-[11px] font-medium transition-colors"
                         >
                           <Eye className="w-3 h-3" />
                           <span className="hidden xl:inline">PDF</span>
-                        </a>
+                        </button>
                       )}
                       {d.caminho_xml && (
-                        <a
-                          href={d.caminho_xml}
-                          target="_blank"
-                          rel="noreferrer"
+                        <button
+                          type="button"
+                          onClick={() => handleBaixarArquivo(d.tipo_documento, d.id, 'xml', d.caminho_xml)}
                           className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-200 text-[11px] font-medium transition-colors"
                         >
                           <Download className="w-3 h-3" />
                           <span className="hidden xl:inline">XML</span>
-                        </a>
+                        </button>
                       )}
                     </div>
                   )

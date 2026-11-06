@@ -4,6 +4,7 @@ import api from '../services/api'
 
 export interface User {
   id?: number
+  tenant_id?: string
   email: string
   nome: string
   role?: string

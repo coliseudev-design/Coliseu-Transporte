@@ -316,9 +316,49 @@ async function requireSyncOrWebAuth(req, res, next) {
     });
 }
 
+/**
+ * Verifica se o usuário autenticado possui privilégio Super Admin / Master da Software House.
+ */
+function isSuperAdminMaster(req) {
+    const role = String(req.user?.role || '').toLowerCase();
+    const email = String(req.user?.email || '').toLowerCase();
+    const isMasterTenant = req.tenant?.id === MASTER_TENANT_ID;
+
+    if (isMasterTenant || role === 'master') {
+        return true;
+    }
+    if (role === 'admin' && (email.endsWith('@coliseusistemas.com.br') || email.endsWith('@silenus.com.br'))) {
+        return true;
+    }
+    return false;
+}
+
+/**
+ * Middleware exclusivo para configurações globais da Software House (ex: Token Principal Focus NFe).
+ */
+function requireSuperAdminMaster(req, res, next) {
+    if (isSuperAdminMaster(req)) {
+        return next();
+    }
+    logger.warn('[RBAC] Tentativa de acesso Super Admin Master bloqueada', {
+        userId: req.user?.id,
+        email: req.user?.email,
+        tenantId: req.tenant?.id,
+        role: req.user?.role,
+        path: req.originalUrl
+    });
+    return res.status(403).json({
+        error: 'Acesso restrito ao administrador Master da plataforma (Coliseu Sistemas).',
+        code: 'FORBIDDEN_MASTER_ONLY'
+    });
+}
+
 module.exports = {
+    MASTER_TENANT_ID,
     requireWebJwt,
     requireAdmin,
+    requireSuperAdminMaster,
+    isSuperAdminMaster,
     requireInternalAuth,
     requireSyncOrWebAuth,
     invalidateUserAuthCache,

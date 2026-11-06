@@ -1,10 +1,186 @@
 'use strict';
 
+const crypto = require('crypto');
 const db = require('../db/postgres');
+const config = require('../config/env');
 const logger = require('../config/logger');
 const FocusClient = require('./focus/focusClient');
 const { safeCompare } = require('../middleware/auth');
-const { decryptSecret, decryptBuffer, isMaskedValue } = require('../utils/cryptoVault');
+const {
+  encryptSecret,
+  decryptSecret,
+  decryptBuffer,
+  isMaskedValue,
+  maskSecret,
+  resolveSecretForSave,
+} = require('../utils/cryptoVault');
+
+const IBGE_UF_BY_CODE = {
+  '11': 'RO', '12': 'AC', '13': 'AM', '14': 'RR', '15': 'PA', '16': 'AP', '17': 'TO',
+  '21': 'MA', '22': 'PI', '23': 'CE', '24': 'RN', '25': 'PB', '26': 'PE', '27': 'AL',
+  '28': 'SE', '29': 'BA', '31': 'MG', '32': 'ES', '33': 'RJ', '35': 'SP',
+  '41': 'PR', '42': 'SC', '43': 'RS', '50': 'MS', '51': 'MT', '52': 'GO', '53': 'DF',
+};
+
+function validarCnpjReal(cnpjInput) {
+  const cnpj = String(cnpjInput || '').replace(/\D/g, '');
+  if (cnpj.length !== 14) return false;
+  if (/^(\d)\1{13}$/.test(cnpj)) return false;
+
+  const calcDv = (base, weights) => {
+    let sum = 0;
+    for (let i = 0; i < weights.length; i++) {
+      sum += Number(base[i]) * weights[i];
+    }
+    const rem = sum % 11;
+    return rem < 2 ? 0 : 11 - rem;
+  };
+
+  const dv1 = calcDv(cnpj.slice(0, 12), [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]);
+  const dv2 = calcDv(cnpj.slice(0, 12) + String(dv1), [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]);
+  return Number(cnpj[12]) === dv1 && Number(cnpj[13]) === dv2;
+}
+
+function extrairTagXml(bloco, tag) {
+  if (!bloco || !tag) return '';
+  const re = new RegExp(`<(?:\\w+:)?${tag}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/(?:\\w+:)?${tag}>`, 'i');
+  const m = String(bloco).match(re);
+  if (!m) return '';
+  return m[1]
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .trim();
+}
+
+function extrairBlocosXml(bloco, tag) {
+  if (!bloco || !tag) return [];
+  const re = new RegExp(`<(?:\\w+:)?${tag}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/(?:\\w+:)?${tag}>`, 'gi');
+  return Array.from(String(bloco).matchAll(re), (m) => m[1]);
+}
+
+function parseNfeXml(xmlString) {
+  const raw = String(xmlString || '').trim();
+  if (!raw || !raw.includes('infNFe')) {
+    throw new Error('Conteúdo XML inválido ou não corresponde a uma NF-e (bloco <infNFe> ausente).');
+  }
+
+  const chaveAttrMatch = raw.match(/Id\s*=\s*["']NFe(\d{44})["']/i);
+  const chNfeTag = extrairTagXml(raw, 'chNFe');
+  const chave = digitsOnly(chaveAttrMatch?.[1] || chNfeTag);
+  if (chave.length !== 44) {
+    throw new Error('Chave de acesso de 44 dígitos não encontrada no XML da NF-e.');
+  }
+
+  const ide = extrairTagXml(raw, 'ide');
+  const emit = extrairTagXml(raw, 'emit');
+  const enderEmit = extrairTagXml(emit, 'enderEmit');
+  const dest = extrairTagXml(raw, 'dest');
+  const enderDest = extrairTagXml(dest, 'enderDest');
+  const icmsTot = extrairTagXml(raw, 'ICMSTot');
+  const transp = extrairTagXml(raw, 'transp');
+  const prot = extrairTagXml(raw, 'infProt');
+
+  const vols = extrairBlocosXml(transp, 'vol');
+  let pesoBruto = 0;
+  let pesoLiquido = 0;
+  let qtdVolumes = 0;
+  let especie = 'VOLUMES';
+  for (const v of vols) {
+    pesoBruto += parseFloat(extrairTagXml(v, 'pesoB') || '0') || 0;
+    pesoLiquido += parseFloat(extrairTagXml(v, 'pesoL') || '0') || 0;
+    qtdVolumes += parseInt(extrairTagXml(v, 'qVol') || '0', 10) || 0;
+    const esp = extrairTagXml(v, 'esp');
+    if (esp) especie = esp;
+  }
+
+  const dets = extrairBlocosXml(raw, 'det');
+  const itens = dets.map((d, idx) => {
+    const prod = extrairTagXml(d, 'prod');
+    return {
+      id_item: idx + 1,
+      codigo: extrairTagXml(prod, 'cProd'),
+      descricao: extrairTagXml(prod, 'xProd'),
+      ncm: extrairTagXml(prod, 'NCM'),
+      cfop: extrairTagXml(prod, 'CFOP'),
+      unidade: extrairTagXml(prod, 'uCom'),
+      quantidade: parseFloat(extrairTagXml(prod, 'qCom') || '0') || 0,
+      valor_unitario: parseFloat(extrairTagXml(prod, 'vUnCom') || '0') || 0,
+      valor_total: parseFloat(extrairTagXml(prod, 'vProd') || '0') || 0,
+    };
+  });
+
+  const itemMaiorValor = itens
+    .slice()
+    .sort((a, b) => (b.valor_total || 0) - (a.valor_total || 0))[0];
+
+  const emitDoc = digitsOnly(extrairTagXml(emit, 'CNPJ') || extrairTagXml(emit, 'CPF'));
+  const destDoc = digitsOnly(extrairTagXml(dest, 'CNPJ') || extrairTagXml(dest, 'CPF'));
+
+  const numero = extrairTagXml(ide, 'nNF') || String(parseInt(chave.slice(25, 34), 10));
+  const serie = extrairTagXml(ide, 'serie') || String(parseInt(chave.slice(22, 25), 10));
+  const dataEmissao =
+    extrairTagXml(ide, 'dhEmi') || extrairTagXml(ide, 'dEmi') || new Date().toISOString();
+
+  const remetente = {
+    documento: emitDoc,
+    cnpj: emitDoc.length === 14 ? emitDoc : undefined,
+    cpf: emitDoc.length === 11 ? emitDoc : undefined,
+    razao_social: extrairTagXml(emit, 'xNome'),
+    nome_fantasia: extrairTagXml(emit, 'xFant') || extrairTagXml(emit, 'xNome'),
+    inscricao_estadual: extrairTagXml(emit, 'IE'),
+    logradouro: extrairTagXml(enderEmit, 'xLgr'),
+    numero: extrairTagXml(enderEmit, 'nro'),
+    complemento: extrairTagXml(enderEmit, 'xCpl'),
+    bairro: extrairTagXml(enderEmit, 'xBairro'),
+    codigo_municipio: digitsOnly(extrairTagXml(enderEmit, 'cMun')),
+    municipio: extrairTagXml(enderEmit, 'xMun'),
+    uf: (extrairTagXml(enderEmit, 'UF') || IBGE_UF_BY_CODE[chave.slice(0, 2)] || 'MS').toUpperCase(),
+    cep: digitsOnly(extrairTagXml(enderEmit, 'CEP')),
+    telefone: digitsOnly(extrairTagXml(enderEmit, 'fone')),
+  };
+
+  const destinatario = {
+    documento: destDoc,
+    cnpj: destDoc.length === 14 ? destDoc : undefined,
+    cpf: destDoc.length === 11 ? destDoc : undefined,
+    razao_social: extrairTagXml(dest, 'xNome'),
+    inscricao_estadual: extrairTagXml(dest, 'IE'),
+    indicador_ie: extrairTagXml(dest, 'indIEDest') || '9',
+    logradouro: extrairTagXml(enderDest, 'xLgr'),
+    numero: extrairTagXml(enderDest, 'nro'),
+    complemento: extrairTagXml(enderDest, 'xCpl'),
+    bairro: extrairTagXml(enderDest, 'xBairro'),
+    codigo_municipio: digitsOnly(extrairTagXml(enderDest, 'cMun')),
+    municipio: extrairTagXml(enderDest, 'xMun'),
+    uf: (extrairTagXml(enderDest, 'UF') || 'MS').toUpperCase(),
+    cep: digitsOnly(extrairTagXml(enderDest, 'CEP')),
+    telefone: digitsOnly(extrairTagXml(enderDest, 'fone')),
+    email: extrairTagXml(dest, 'email'),
+  };
+
+  return {
+    chave_acesso: chave,
+    numero,
+    serie,
+    data_emissao: dataEmissao,
+    natureza: extrairTagXml(ide, 'natOp'),
+    protocolo: extrairTagXml(prot, 'nProt'),
+    valor_total: parseFloat(extrairTagXml(icmsTot, 'vNF') || '0') || 0,
+    valor_produtos: parseFloat(extrairTagXml(icmsTot, 'vProd') || '0') || 0,
+    peso_bruto: pesoBruto,
+    peso_liquido: pesoLiquido,
+    volumes: qtdVolumes || 1,
+    especie,
+    produto_predominante: itemMaiorValor?.descricao || 'MERCADORIA EM GERAL',
+    remetente,
+    destinatario,
+    itens,
+  };
+}
 
 const CAPITAIS_IBGE_FALLBACK = {
   AC: { codigo: '1200401', nome: 'Rio Branco' },
@@ -925,8 +1101,14 @@ class TransporteService {
         resFocus.mensagem_sefaz || null,
         resFocus.chave_cte || resFocus.chave || null,
         resFocus.protocolo || null,
-        resFocus.caminho_xml_nota_fiscal || resFocus.caminho_xml || null,
-        resFocus.caminho_dacte || resFocus.caminho_danfe || null,
+        FocusClient.normalizarUrlArquivo(
+          resFocus.caminho_xml_nota_fiscal || resFocus.caminho_xml,
+          client.ambiente
+        ),
+        FocusClient.normalizarUrlArquivo(
+          resFocus.caminho_dacte || resFocus.caminho_danfe,
+          client.ambiente
+        ),
         JSON.stringify(resFocus),
         cteId,
       ]
@@ -978,8 +1160,14 @@ class TransporteService {
         st.numero ? parseInt(st.numero, 10) : null,
         st.serie ? String(st.serie) : null,
         st.protocolo || null,
-        st.caminho_xml_nota_fiscal || st.caminho_xml || null,
-        st.caminho_dacte || st.caminho_danfe || null,
+        FocusClient.normalizarUrlArquivo(
+          st.caminho_xml_nota_fiscal || st.caminho_xml,
+          client.ambiente
+        ),
+        FocusClient.normalizarUrlArquivo(
+          st.caminho_dacte || st.caminho_danfe,
+          client.ambiente
+        ),
         JSON.stringify(st),
         cteId,
       ]
@@ -1510,8 +1698,11 @@ class TransporteService {
         resFocus.mensagem_sefaz || null,
         resFocus.chave_mdfe || resFocus.chave || null,
         resFocus.protocolo || null,
-        resFocus.caminho_xml_nota_fiscal || resFocus.caminho_xml || null,
-        resFocus.caminho_damdfe || null,
+        FocusClient.normalizarUrlArquivo(
+          resFocus.caminho_xml_nota_fiscal || resFocus.caminho_xml,
+          client.ambiente
+        ),
+        FocusClient.normalizarUrlArquivo(resFocus.caminho_damdfe, client.ambiente),
         JSON.stringify(resFocus),
         mdfeId,
       ]
@@ -1557,8 +1748,11 @@ class TransporteService {
         st.numero ? parseInt(st.numero, 10) : null,
         st.serie ? String(st.serie) : null,
         st.protocolo || null,
-        st.caminho_xml_nota_fiscal || st.caminho_xml || null,
-        st.caminho_damdfe || null,
+        FocusClient.normalizarUrlArquivo(
+          st.caminho_xml_nota_fiscal || st.caminho_xml,
+          client.ambiente
+        ),
+        FocusClient.normalizarUrlArquivo(st.caminho_damdfe, client.ambiente),
         JSON.stringify(st),
         mdfeId,
       ]
@@ -1995,6 +2189,14 @@ class TransporteService {
       }
     }
 
+    let emitAmb = 'homologacao';
+    try {
+      const em = await this.getEmitente(docRecord.tenant_id, docRecord.emitente_id);
+      emitAmb = em?.focus_ambiente || 'homologacao';
+    } catch (_) {
+      emitAmb = 'homologacao';
+    }
+
     const effStatus = authoritative.status || status;
     const chaveFinal =
       authoritative.chave_cte ||
@@ -2004,14 +2206,22 @@ class TransporteService {
       chave_mdfe ||
       chave ||
       null;
-    const xmlFinal =
+    const xmlFinal = FocusClient.normalizarUrlArquivo(
       authoritative.caminho_xml_nota_fiscal ||
-      authoritative.caminho_xml ||
-      caminho_xml_nota_fiscal ||
-      caminho_xml ||
-      null;
-    const dacteFinal = authoritative.caminho_dacte || caminho_dacte || null;
-    const damdfeFinal = authoritative.caminho_damdfe || caminho_damdfe || null;
+        authoritative.caminho_xml ||
+        caminho_xml_nota_fiscal ||
+        caminho_xml ||
+        null,
+      emitAmb
+    );
+    const dacteFinal = FocusClient.normalizarUrlArquivo(
+      authoritative.caminho_dacte || caminho_dacte || null,
+      emitAmb
+    );
+    const damdfeFinal = FocusClient.normalizarUrlArquivo(
+      authoritative.caminho_damdfe || caminho_damdfe || null,
+      emitAmb
+    );
     const protocoloFinal = authoritative.protocolo || protocolo || null;
     const statusSefazFinal = authoritative.status_sefaz || status_sefaz || null;
     const msgSefazFinal = authoritative.mensagem_sefaz || mensagem_sefaz || null;
@@ -2091,6 +2301,964 @@ class TransporteService {
 
     return { success: true, tipo: 'MDFE', id: mdfeRes.rows[0]?.id || docRecord.id };
   }
+
+  // ─────────────────────────────────────────────────────────
+  // SOFTWARE HOUSE / CONTA PARCEIRO FOCUS NFe (/v2/empresas & /v2/hooks)
+  // ─────────────────────────────────────────────────────────
+
+  static async _ensurePlataformaConfigTable() {
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS dash_plataforma_config (
+        chave VARCHAR(100) PRIMARY KEY,
+        valor TEXT,
+        updated_by VARCHAR(180),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      );
+    `);
+  }
+
+  /**
+   * Obtém a configuração global da conta Software House Focus NFe (Coliseu Sistemas),
+   * combinando cofre PostgreSQL AES-256-GCM com fallback para variável FOCUS_MASTER_TOKEN.
+   */
+  static async getMasterFocusConfig() {
+    let dbTokenEnc = null;
+    let dbWebhookUrl = null;
+    let updatedAt = null;
+    let updatedBy = null;
+
+    try {
+      await this._ensurePlataformaConfigTable();
+      const { rows } = await db.query(
+        `SELECT chave, valor, updated_by, updated_at
+         FROM dash_plataforma_config
+         WHERE chave IN ('focus_master_token', 'focus_webhook_base_url')`
+      );
+      for (const r of rows) {
+        if (r.chave === 'focus_master_token') {
+          dbTokenEnc = r.valor;
+          updatedAt = r.updated_at;
+          updatedBy = r.updated_by;
+        }
+        if (r.chave === 'focus_webhook_base_url') {
+          dbWebhookUrl = r.valor;
+        }
+      }
+    } catch (_) {
+      // ignora em bancos sem permissão DDL
+    }
+
+    const plainDbToken = decryptSecret(dbTokenEnc || '');
+    const envToken = String(config.security.focusMasterToken || '').trim();
+    const masterToken = String(plainDbToken || envToken || '').trim();
+    const origem = plainDbToken ? 'cofre_db' : envToken ? 'env' : 'ausente';
+
+    const webhookBaseUrl = String(
+      dbWebhookUrl || config.security.publicApiUrl || 'https://transporte.coliseusistemas.com.br'
+    )
+      .trim()
+      .replace(/\/+$/, '');
+
+    return {
+      masterToken,
+      temMasterToken: Boolean(masterToken),
+      masterTokenMasked: masterToken ? maskSecret(dbTokenEnc || masterToken) : '',
+      masterTokenPreview: masterToken ? `${masterToken.slice(0, 4)}••••` : null,
+      origem,
+      webhookBaseUrl,
+      webhookEndpoint: `${webhookBaseUrl}/api/webhooks/focus`,
+      updatedAt,
+      updatedBy,
+    };
+  }
+
+  /**
+   * Salva o Token Principal da Software House cifrado em AES-256-GCM e a URL pública de Webhooks.
+   */
+  static async salvarMasterFocusConfig({ masterToken, webhookBaseUrl, updatedBy = 'master' } = {}) {
+    await this._ensurePlataformaConfigTable();
+    const existingRes = await db.query(
+      `SELECT valor FROM dash_plataforma_config WHERE chave = 'focus_master_token' LIMIT 1`
+    );
+    const existingVal = existingRes.rows[0]?.valor || null;
+    const encryptedToken = resolveSecretForSave(masterToken, existingVal);
+
+    if (encryptedToken !== null) {
+      await db.query(
+        `INSERT INTO dash_plataforma_config (chave, valor, updated_by, updated_at)
+         VALUES ('focus_master_token', $1, $2, NOW())
+         ON CONFLICT (chave) DO UPDATE SET
+           valor = EXCLUDED.valor,
+           updated_by = EXCLUDED.updated_by,
+           updated_at = NOW()`,
+        [encryptedToken, updatedBy]
+      );
+    }
+
+    if (webhookBaseUrl !== undefined && String(webhookBaseUrl).trim()) {
+      const cleanUrl = String(webhookBaseUrl).trim().replace(/\/+$/, '');
+      if (!/^https?:\/\//i.test(cleanUrl)) {
+        throw new Error('A URL pública de Webhook deve iniciar com https:// ou http://.');
+      }
+      await db.query(
+        `INSERT INTO dash_plataforma_config (chave, valor, updated_by, updated_at)
+         VALUES ('focus_webhook_base_url', $1, $2, NOW())
+         ON CONFLICT (chave) DO UPDATE SET
+           valor = EXCLUDED.valor,
+           updated_by = EXCLUDED.updated_by,
+           updated_at = NOW()`,
+        [cleanUrl, updatedBy]
+      );
+    }
+
+    return this.getMasterFocusConfig();
+  }
+
+  /**
+   * Testa o Token Principal da Software House consultando /v2/empresas na Focus NFe.
+   */
+  static async testarMasterFocusToken(tokenOpcional = null) {
+    const cfg = await this.getMasterFocusConfig();
+    const candidate =
+      tokenOpcional && !isMaskedValue(tokenOpcional)
+        ? decryptSecret(String(tokenOpcional).trim())
+        : cfg.masterToken;
+
+    if (!candidate) {
+      throw new Error(
+        'Token Principal Focus NFe não informado. Cole o "Token principal produção" do Painel API da Focus NFe.'
+      );
+    }
+
+    const reseller = FocusClient.forReseller(candidate);
+    return reseller.testarMasterToken();
+  }
+
+  /**
+   * Monta o payload oficial de cadastro/atualização de empresa em /v2/empresas da Focus NFe v2.
+   */
+  static montarPayloadEmpresaFocus(emitente, certDecifrado = null, { isNew = false } = {}) {
+    const cnpj = digitsOnly(emitente?.cnpj);
+    if (!validarCnpjReal(cnpj)) {
+      throw new Error(
+        `CNPJ "${emitente?.cnpj || ''}" inválido. Informe um CNPJ real de 14 dígitos da transportadora antes de provisionar na Focus NFe.`
+      );
+    }
+
+    const razaoSocial = String(emitente?.razao_social || '').trim();
+    if (!razaoSocial || razaoSocial.length < 3) {
+      throw new Error('Razão Social da transportadora é obrigatória para provisionamento na Focus NFe.');
+    }
+
+    const ieRaw = String(emitente?.inscricao_estadual || '').trim();
+    if (!ieRaw) {
+      throw new Error(
+        'Inscrição Estadual (IE) é obrigatória para habilitar CT-e e MDF-e na SEFAZ (ou informe ISENTO quando aplicável).'
+      );
+    }
+
+    const cep = digitsOnly(emitente?.cep);
+    if (cep.length !== 8) {
+      throw new Error('CEP válido de 8 dígitos é obrigatório para cadastrar o emitente na Focus NFe.');
+    }
+
+    const uf = String(emitente?.uf || '').toUpperCase().trim();
+    if (uf.length !== 2) {
+      throw new Error('UF de 2 letras é obrigatória para cadastrar o emitente na Focus NFe.');
+    }
+
+    const municipio = String(emitente?.municipio || '').trim();
+    if (!municipio) {
+      throw new Error('Município fiscal é obrigatório para cadastrar o emitente na Focus NFe.');
+    }
+
+    const serieCte = Number(digitsOnly(emitente?.serie_cte) || 1) || 1;
+    const serieMdfe = Number(digitsOnly(emitente?.serie_mdfe) || 1) || 1;
+
+    const payload = {
+      nome: razaoSocial,
+      nome_fantasia: String(emitente?.nome_fantasia || razaoSocial).trim(),
+      cnpj,
+      inscricao_estadual: ieRaw.toUpperCase() === 'ISENTO' ? 'ISENTO' : digitsOnly(ieRaw),
+      ...(emitente?.inscricao_municipal
+        ? { inscricao_municipal: digitsOnly(emitente.inscricao_municipal) }
+        : {}),
+      regime_tributario: ['1', '2', '3'].includes(String(emitente?.regime_tributario))
+        ? Number(emitente.regime_tributario)
+        : 1,
+      logradouro: String(emitente?.logradouro || 'RUA PRINCIPAL').trim(),
+      numero: String(emitente?.numero || 'SN').trim(),
+      ...(emitente?.complemento ? { complemento: String(emitente.complemento).trim() } : {}),
+      bairro: String(emitente?.bairro || 'CENTRO').trim(),
+      cep,
+      municipio,
+      uf,
+      ...(emitente?.telefone && digitsOnly(emitente.telefone).length >= 8
+        ? { telefone: digitsOnly(emitente.telefone) }
+        : {}),
+      ...(emitente?.email && String(emitente.email).includes('@')
+        ? { email: String(emitente.email).trim(), enviar_email_destinatario: true }
+        : { enviar_email_destinatario: false }),
+      habilita_cte: true,
+      habilita_cteos: true,
+      habilita_mdfe: true,
+      habilita_manifestacao: true,
+      serie_cte_producao: serieCte,
+      serie_cte_homologacao: serieCte,
+      serie_mdfe_producao: serieMdfe,
+      serie_mdfe_homologacao: serieMdfe,
+    };
+
+    if (isNew) {
+      const proxCte = Math.max(1, Number(emitente?.ultimo_numero_cte || 0) + 1);
+      const proxMdfe = Math.max(1, Number(emitente?.ultimo_numero_mdfe || 0) + 1);
+      payload.proximo_numero_cte_producao = proxCte;
+      payload.proximo_numero_cte_homologacao = proxCte;
+      payload.proximo_numero_cteos_producao = 1;
+      payload.proximo_numero_cteos_homologacao = 1;
+      payload.proximo_numero_mdfe_producao = proxMdfe;
+      payload.proximo_numero_mdfe_homologacao = proxMdfe;
+    }
+
+    if (
+      certDecifrado &&
+      Buffer.isBuffer(certDecifrado.arquivo_pfx) &&
+      certDecifrado.arquivo_pfx.length > 0 &&
+      certDecifrado.senha
+    ) {
+      payload.arquivo_certificado_base64 = certDecifrado.arquivo_pfx.toString('base64');
+      payload.senha_certificado = certDecifrado.senha;
+    }
+
+    return payload;
+  }
+
+  /**
+   * Provisiona ou sincroniza automaticamente uma transportadora na conta parceira Focus NFe (/v2/empresas),
+   * envia o Certificado Digital A1 (se houver), salva os tokens de Homologação e Produção no cofre AES-256-GCM
+   * e registra os Webhooks de CT-e e MDF-e (/v2/hooks).
+   */
+  static async provisionarEmpresaFocus(
+    tenantId,
+    emitenteId = null,
+    { registrarWebhooks = true, incluirCertificado = true } = {}
+  ) {
+    const emitente = await this.getEmitente(tenantId, emitenteId);
+    if (!emitente || !emitente.id) {
+      throw new Error('Salve os Dados da Empresa antes de sincronizar com a Focus NFe.');
+    }
+
+    const masterCfg = await this.getMasterFocusConfig();
+    if (!masterCfg.temMasterToken) {
+      throw new Error(
+        'Token Principal Focus NFe (Software House) ainda não foi configurado pelo administrador Master.'
+      );
+    }
+
+    const reseller = FocusClient.forReseller(masterCfg.masterToken);
+    const cert = incluirCertificado ? await this.getCertificadoEmitente(tenantId, emitente.id) : null;
+
+    // 1. Verifica se a empresa já existe na Focus NFe (por focus_empresa_id ou CNPJ)
+    let existingFocus = null;
+    if (emitente.focus_empresa_id) {
+      try {
+        existingFocus = await reseller.consultarEmpresa(emitente.focus_empresa_id);
+      } catch (err) {
+        if (err.statusCode !== 404) throw err;
+      }
+    }
+    if (!existingFocus) {
+      const encontradas = await reseller.listarEmpresas({ cnpj: emitente.cnpj });
+      existingFocus =
+        encontradas.find((e) => digitsOnly(e.cnpj) === digitsOnly(emitente.cnpj)) || null;
+    }
+
+    const payload = this.montarPayloadEmpresaFocus(emitente, cert, {
+      isNew: !existingFocus,
+    });
+
+    let resEmpresa;
+    try {
+      resEmpresa = existingFocus
+        ? await reseller.atualizarEmpresa(existingFocus.id, payload)
+        : await reseller.criarEmpresa(payload);
+    } catch (focusErr) {
+      await db
+        .query(
+          `UPDATE dash_emitentes SET focus_ultimo_erro = $1, updated_at = NOW() WHERE id = $2 AND tenant_id = $3`,
+          [focusErr.message, emitente.id, tenantId]
+        )
+        .catch(() => {});
+      throw focusErr;
+    }
+
+    const focusEmpresaId = String(resEmpresa.id || existingFocus?.id || '');
+    const plainHomolog = String(
+      resEmpresa.token_homologacao ||
+        existingFocus?.token_homologacao ||
+        emitente.focus_token_homologacao ||
+        ''
+    ).trim();
+    const plainProd = String(
+      resEmpresa.token_producao ||
+        existingFocus?.token_producao ||
+        emitente.focus_token_producao ||
+        ''
+    ).trim();
+
+    const encHomolog = plainHomolog ? encryptSecret(plainHomolog) : null;
+    const encProd = plainProd ? encryptSecret(plainProd) : null;
+    const ambienteAtivo = emitente.focus_ambiente === 'producao' ? 'producao' : 'homologacao';
+    const encAtivo = ambienteAtivo === 'producao' ? encProd || encHomolog : encHomolog || encProd;
+
+    const certValidoAte = resEmpresa.certificado_valido_ate || null;
+    const certValidoDe = resEmpresa.certificado_valido_de || null;
+
+    await db.query(
+      `UPDATE dash_emitentes SET
+          focus_empresa_id = COALESCE($1, focus_empresa_id),
+          focus_token_homologacao = COALESCE($2, focus_token_homologacao),
+          focus_token_producao = COALESCE($3, focus_token_producao),
+          focus_token = COALESCE($4, focus_token),
+          focus_ambiente = $5,
+          certificado_valido_ate = COALESCE($6::timestamptz, certificado_valido_ate),
+          focus_sincronizado_em = NOW(),
+          focus_ultimo_erro = NULL,
+          updated_at = NOW()
+       WHERE id = $7 AND tenant_id = $8`,
+      [
+        focusEmpresaId || null,
+        encHomolog,
+        encProd,
+        encAtivo,
+        ambienteAtivo,
+        certValidoAte,
+        emitente.id,
+        tenantId,
+      ]
+    );
+
+    await db
+      .query(
+        `UPDATE dash_integracoes_config SET
+            focus_ambiente = $1,
+            focus_token_homologacao = COALESCE($2, focus_token_homologacao),
+            focus_token_producao = COALESCE($3, focus_token_producao),
+            updated_at = NOW()
+         WHERE tenant_id = $4`,
+        [ambienteAtivo, encHomolog, encProd, tenantId]
+      )
+      .catch(() => {});
+
+    if (cert && cert.id) {
+      const vencFinal = certValidoAte ? new Date(certValidoAte) : cert.valido_ate;
+      const diasParaVencer = vencFinal
+        ? Math.ceil((new Date(vencFinal).getTime() - Date.now()) / (1000 * 3600 * 24))
+        : null;
+      await db
+        .query(
+          `UPDATE dash_certificados SET
+              valido_de = COALESCE($1::timestamptz, valido_de),
+              valido_ate = COALESCE($2::timestamptz, valido_ate),
+              dias_para_vencer = COALESCE($3, dias_para_vencer),
+              focus_sincronizado = TRUE,
+              focus_sincronizado_em = NOW(),
+              updated_at = NOW()
+           WHERE id = $4 AND tenant_id = $5`,
+          [certValidoDe, certValidoAte, diasParaVencer, cert.id, tenantId]
+        )
+        .catch(() => {});
+    }
+
+    let hooksResult = null;
+    if (registrarWebhooks && (plainHomolog || plainProd)) {
+      try {
+        hooksResult = await this.registrarWebhooksFocus(tenantId, emitente.id);
+      } catch (hookErr) {
+        logger.warn('[Focus Provisionamento] Empresa criada/atualizada, mas falha ao registrar hooks:', {
+          tenantId,
+          emitenteId: emitente.id,
+          erro: hookErr.message,
+        });
+        hooksResult = { ok: false, erro: hookErr.message };
+      }
+    }
+
+    return {
+      success: true,
+      acao: existingFocus ? 'ATUALIZADA' : 'CRIADA',
+      focus_empresa_id: focusEmpresaId,
+      ambiente_ativo: ambienteAtivo,
+      tem_token_homologacao: Boolean(plainHomolog),
+      tem_token_producao: Boolean(plainProd),
+      certificado_enviado: Boolean(cert),
+      certificado_valido_ate: certValidoAte,
+      webhooks: hooksResult,
+      mensagem: existingFocus
+        ? `Empresa sincronizada com sucesso na Focus NFe (ID #${focusEmpresaId}).`
+        : `Empresa cadastrada e habilitada com sucesso na Focus NFe (ID #${focusEmpresaId})!`,
+    };
+  }
+
+  /**
+   * Registra automaticamente os Webhooks de CT-e e MDF-e (/v2/hooks) nos ambientes com token disponível,
+   * protegendo o endpoint público com segredo criptográfico por tenant (header X-Focus-Token).
+   */
+  static async registrarWebhooksFocus(tenantId, emitenteId = null) {
+    const emitente = await this.getEmitente(tenantId, emitenteId);
+    if (!emitente || !validarCnpjReal(emitente.cnpj)) {
+      throw new Error('Cadastre um CNPJ válido de 14 dígitos na empresa antes de registrar webhooks.');
+    }
+
+    const masterCfg = await this.getMasterFocusConfig();
+    const webhookUrl = masterCfg.webhookEndpoint;
+
+    // Garante segredo exclusivo por tenant em dash_integracoes_config
+    const cfgRes = await db
+      .query(
+        `SELECT focus_webhook_secret FROM dash_integracoes_config WHERE tenant_id = $1 LIMIT 1`,
+        [tenantId]
+      )
+      .catch(() => ({ rows: [] }));
+
+    let plainWebhookSecret = decryptSecret(cfgRes.rows[0]?.focus_webhook_secret || '');
+    if (!plainWebhookSecret) {
+      plainWebhookSecret = crypto.randomBytes(24).toString('hex');
+      const encSecret = encryptSecret(plainWebhookSecret);
+      if (cfgRes.rows.length > 0) {
+        await db.query(
+          `UPDATE dash_integracoes_config SET focus_webhook_secret = $1, updated_at = NOW() WHERE tenant_id = $2`,
+          [encSecret, tenantId]
+        );
+      } else {
+        await db
+          .query(
+            `INSERT INTO dash_integracoes_config (tenant_id, focus_webhook_secret, updated_at)
+             VALUES ($1, $2, NOW())`,
+            [tenantId, encSecret]
+          )
+          .catch(() => {});
+      }
+    }
+
+    const ambientesAlvo = [];
+    if (emitente.focus_token_homologacao) {
+      ambientesAlvo.push({ ambiente: 'homologacao', token: emitente.focus_token_homologacao });
+    }
+    if (emitente.focus_token_producao) {
+      ambientesAlvo.push({ ambiente: 'producao', token: emitente.focus_token_producao });
+    }
+    if (ambientesAlvo.length === 0 && emitente.focus_token) {
+      ambientesAlvo.push({ ambiente: emitente.focus_ambiente, token: emitente.focus_token });
+    }
+    if (ambientesAlvo.length === 0) {
+      throw new Error('Nenhum token Focus NFe configurado para registrar webhooks.');
+    }
+
+    const detalhes = [];
+    let registradosCount = 0;
+
+    for (const alvo of ambientesAlvo) {
+      const client = new FocusClient({
+        token: alvo.token,
+        ambiente: alvo.ambiente,
+      });
+
+      let hooksExistentes = [];
+      try {
+        hooksExistentes = await client.listarHooks();
+      } catch (_) {
+        hooksExistentes = [];
+      }
+
+      for (const event of ['cte', 'mdfe']) {
+        const jaExiste = hooksExistentes.some(
+          (h) =>
+            String(h.event || '').toLowerCase() === event &&
+            digitsOnly(h.cnpj || '') === emitente.cnpj &&
+            String(h.url || '').replace(/\/+$/, '') === webhookUrl.replace(/\/+$/, '')
+        );
+
+        if (jaExiste) {
+          detalhes.push({ ambiente: alvo.ambiente, event, status: 'JA_ATIVO' });
+          registradosCount++;
+          continue;
+        }
+
+        const criado = await client.criarHook({
+          cnpj: emitente.cnpj,
+          event,
+          url: webhookUrl,
+          authorization: plainWebhookSecret,
+          authorization_header: 'X-Focus-Token',
+        });
+        detalhes.push({ ambiente: alvo.ambiente, event, status: 'CRIADO', id: criado?.id });
+        registradosCount++;
+      }
+    }
+
+    if (emitente.id && registradosCount > 0) {
+      await db
+        .query(
+          `UPDATE dash_emitentes SET focus_hooks_ativos = TRUE, updated_at = NOW() WHERE id = $1 AND tenant_id = $2`,
+          [emitente.id, tenantId]
+        )
+        .catch(() => {});
+    }
+
+    return {
+      ok: true,
+      url: webhookUrl,
+      registrados: registradosCount,
+      detalhes,
+    };
+  }
+
+  /**
+   * Baixa o XML ou PDF (DACTE / DAMDFE) de um documento autorizado como Buffer autenticado.
+   */
+  static async baixarArtefatoDocumento(tenantId, tipo, docId, formato = 'pdf') {
+    const tipoUpper = String(tipo || 'CTE').toUpperCase();
+    const tabela = tipoUpper === 'MDFE' ? 'dash_mdfes' : 'dash_ctes';
+    const { rows } = await db.query(
+      `SELECT * FROM ${tabela} WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
+      [docId, tenantId]
+    );
+    if (rows.length === 0) {
+      throw new Error('Documento fiscal não encontrado.');
+    }
+
+    const doc = rows[0];
+    const fmt = String(formato || 'pdf').toLowerCase();
+    const rawPath =
+      fmt === 'xml'
+        ? doc.caminho_xml
+        : tipoUpper === 'MDFE'
+        ? doc.caminho_damdfe
+        : doc.caminho_dacte;
+
+    if (!rawPath) {
+      throw new Error(
+        `Arquivo ${fmt.toUpperCase()} ainda não disponível para este documento (aguarde autorização da SEFAZ).`
+      );
+    }
+
+    const { client } = await this.getFocusClient(tenantId, doc.emitente_id);
+    const buffer = await client.downloadArquivo(rawPath);
+    const chaveOuRef = doc.chave_cte || doc.chave_mdfe || doc.ref || doc.id;
+    return {
+      buffer,
+      contentType: fmt === 'xml' ? 'application/xml; charset=utf-8' : 'application/pdf',
+      filename: `${tipoUpper.toLowerCase()}-${chaveOuRef}.${fmt === 'xml' ? 'xml' : 'pdf'}`,
+    };
+  }
+
+  // ─────────────────────────────────────────────────────────
+  // MDe (/v2/nfes_recebidas) & IMPORTAÇÃO DE XML DE NF-e NA CENTRAL DE CARGAS
+  // ─────────────────────────────────────────────────────────
+
+  static async upsertCargaFromNfeData(tenantId, nfeParsed, { origem = 'XML', extraMeta = {} } = {}) {
+    const chave = digitsOnly(nfeParsed?.chave_acesso);
+    if (chave.length !== 44) {
+      throw new Error('Chave de acesso inválida para registro na Central de Cargas.');
+    }
+
+    const rem = nfeParsed.remetente || {};
+    const dest = nfeParsed.destinatario || {};
+    const dadosNfe = {
+      origem,
+      natureza: nfeParsed.natureza || '',
+      protocolo: nfeParsed.protocolo || '',
+      remetente: rem,
+      destinatario: dest,
+      itens: Array.isArray(nfeParsed.itens) ? nfeParsed.itens : [],
+      ...extraMeta,
+    };
+
+    const { rows } = await db.query(
+      `INSERT INTO dash_cargas (
+          tenant_id, tipo_documento, chave_acesso, numero, serie, data_emissao,
+          remetente_documento, remetente_nome, remetente_municipio, remetente_uf,
+          destinatario_documento, destinatario_nome, destinatario_municipio, destinatario_uf,
+          valor_total, valor_produtos, peso_bruto, peso_liquido, volumes, especie,
+          produto_predominante, status, dados_nfe, sincronizado_em, updated_at
+       ) VALUES (
+          $1, 'NFE', $2, $3, $4, $5::timestamptz,
+          $6, $7, $8, $9,
+          $10, $11, $12, $13,
+          $14, $15, $16, $17, $18, $19,
+          $20, 'PENDENTE', $21::jsonb, NOW(), NOW()
+       )
+       ON CONFLICT (tenant_id, chave_acesso) DO UPDATE SET
+          numero = COALESCE(NULLIF(EXCLUDED.numero, ''), dash_cargas.numero),
+          serie = COALESCE(NULLIF(EXCLUDED.serie, ''), dash_cargas.serie),
+          data_emissao = COALESCE(EXCLUDED.data_emissao, dash_cargas.data_emissao),
+          remetente_documento = COALESCE(NULLIF(EXCLUDED.remetente_documento, ''), dash_cargas.remetente_documento),
+          remetente_nome = COALESCE(NULLIF(EXCLUDED.remetente_nome, ''), dash_cargas.remetente_nome),
+          remetente_municipio = COALESCE(NULLIF(EXCLUDED.remetente_municipio, ''), dash_cargas.remetente_municipio),
+          remetente_uf = COALESCE(NULLIF(EXCLUDED.remetente_uf, ''), dash_cargas.remetente_uf),
+          destinatario_documento = COALESCE(NULLIF(EXCLUDED.destinatario_documento, ''), dash_cargas.destinatario_documento),
+          destinatario_nome = COALESCE(NULLIF(EXCLUDED.destinatario_nome, ''), dash_cargas.destinatario_nome),
+          destinatario_municipio = COALESCE(NULLIF(EXCLUDED.destinatario_municipio, ''), dash_cargas.destinatario_municipio),
+          destinatario_uf = COALESCE(NULLIF(EXCLUDED.destinatario_uf, ''), dash_cargas.destinatario_uf),
+          valor_total = CASE WHEN EXCLUDED.valor_total > 0 THEN EXCLUDED.valor_total ELSE dash_cargas.valor_total END,
+          valor_produtos = CASE WHEN EXCLUDED.valor_produtos > 0 THEN EXCLUDED.valor_produtos ELSE dash_cargas.valor_produtos END,
+          peso_bruto = CASE WHEN EXCLUDED.peso_bruto > 0 THEN EXCLUDED.peso_bruto ELSE dash_cargas.peso_bruto END,
+          peso_liquido = CASE WHEN EXCLUDED.peso_liquido > 0 THEN EXCLUDED.peso_liquido ELSE dash_cargas.peso_liquido END,
+          volumes = CASE WHEN EXCLUDED.volumes > 0 THEN EXCLUDED.volumes ELSE dash_cargas.volumes END,
+          produto_predominante = COALESCE(NULLIF(EXCLUDED.produto_predominante, ''), dash_cargas.produto_predominante),
+          dados_nfe = dash_cargas.dados_nfe || EXCLUDED.dados_nfe,
+          sincronizado_em = NOW(),
+          updated_at = NOW()
+       RETURNING *`,
+      [
+        tenantId,
+        chave,
+        String(nfeParsed.numero || parseInt(chave.slice(25, 34), 10)),
+        String(nfeParsed.serie || parseInt(chave.slice(22, 25), 10)),
+        nfeParsed.data_emissao || new Date().toISOString(),
+        digitsOnly(rem.documento || '') || null,
+        rem.razao_social || null,
+        rem.municipio || null,
+        rem.uf ? String(rem.uf).slice(0, 2).toUpperCase() : null,
+        digitsOnly(dest.documento || '') || null,
+        dest.razao_social || null,
+        dest.municipio || null,
+        dest.uf ? String(dest.uf).slice(0, 2).toUpperCase() : null,
+        parseFloat(nfeParsed.valor_total || 0),
+        parseFloat(nfeParsed.valor_produtos || nfeParsed.valor_total || 0),
+        parseFloat(nfeParsed.peso_bruto || 0),
+        parseFloat(nfeParsed.peso_liquido || 0),
+        parseInt(nfeParsed.volumes || 1, 10) || 1,
+        nfeParsed.especie || 'VOLUMES',
+        nfeParsed.produto_predominante || 'MERCADORIA EM GERAL',
+        JSON.stringify(dadosNfe),
+      ]
+    );
+
+    // Atualiza também o catálogo dash_partes para remetente e destinatário quando completos
+    for (const p of [rem, dest]) {
+      const docLimpo = digitsOnly(p?.documento || '');
+      if ((docLimpo.length === 14 || docLimpo.length === 11) && p?.razao_social) {
+        await db
+          .query(
+            `INSERT INTO dash_partes (
+                tenant_id, documento, tipo_documento, razao_social, nome_fantasia,
+                inscricao_estadual, indicador_ie, logradouro, numero, complemento,
+                bairro, cep, codigo_municipio, municipio, uf, telefone, email
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+             ON CONFLICT (tenant_id, documento) DO UPDATE SET
+                razao_social = COALESCE(NULLIF(EXCLUDED.razao_social, ''), dash_partes.razao_social),
+                inscricao_estadual = COALESCE(NULLIF(EXCLUDED.inscricao_estadual, ''), dash_partes.inscricao_estadual),
+                logradouro = COALESCE(NULLIF(EXCLUDED.logradouro, ''), dash_partes.logradouro),
+                numero = COALESCE(NULLIF(EXCLUDED.numero, ''), dash_partes.numero),
+                bairro = COALESCE(NULLIF(EXCLUDED.bairro, ''), dash_partes.bairro),
+                cep = COALESCE(NULLIF(EXCLUDED.cep, ''), dash_partes.cep),
+                codigo_municipio = COALESCE(NULLIF(EXCLUDED.codigo_municipio, ''), dash_partes.codigo_municipio),
+                municipio = COALESCE(NULLIF(EXCLUDED.municipio, ''), dash_partes.municipio),
+                uf = COALESCE(NULLIF(EXCLUDED.uf, ''), dash_partes.uf),
+                updated_at = NOW()`,
+            [
+              tenantId,
+              docLimpo,
+              docLimpo.length === 11 ? 'CPF' : 'CNPJ',
+              p.razao_social,
+              p.nome_fantasia || p.razao_social,
+              p.inscricao_estadual || null,
+              p.indicador_ie || '9',
+              p.logradouro || null,
+              p.numero || null,
+              p.complemento || null,
+              p.bairro || null,
+              p.cep || null,
+              p.codigo_municipio || null,
+              p.municipio || null,
+              p.uf || null,
+              p.telefone || null,
+              p.email || null,
+            ]
+          )
+          .catch(() => {});
+      }
+    }
+
+    return rows[0];
+  }
+
+  /**
+   * Importa um lote de arquivos XML de NF-e enviados pelo operador direto para a Central de Cargas.
+   */
+  static async importarXmlsNfe(tenantId, arquivos = []) {
+    if (!Array.isArray(arquivos) || arquivos.length === 0) {
+      throw new Error('Envie ao menos um arquivo XML de NF-e para importar.');
+    }
+
+    let importadas = 0;
+    const erros = [];
+    const cargas = [];
+
+    for (const item of arquivos) {
+      const nomeArquivo = item?.nome || item?.filename || 'nfe.xml';
+      try {
+        const xmlTexto = item?.xml
+          ? String(item.xml)
+          : item?.base64
+          ? Buffer.from(String(item.base64), 'base64').toString('utf8')
+          : '';
+        const parsed = parseNfeXml(xmlTexto);
+        const carga = await this.upsertCargaFromNfeData(tenantId, parsed, {
+          origem: 'UPLOAD_XML',
+          extraMeta: { arquivo_xml: nomeArquivo },
+        });
+        cargas.push(carga);
+        importadas++;
+      } catch (err) {
+        erros.push({ arquivo: nomeArquivo, erro: err.message });
+      }
+    }
+
+    return {
+      success: importadas > 0 || erros.length === 0,
+      importadas,
+      total_enviadas: arquivos.length,
+      erros,
+      cargas,
+    };
+  }
+
+  /**
+   * Sincroniza NF-es destinadas/recebidas na SEFAZ via Focus MDe (/v2/nfes_recebidas),
+   * realizando Ciência da Operação opcional e importando automaticamente na Central de Cargas.
+   */
+  static async sincronizarNfesRecebidasFocus(
+    tenantId,
+    { emitenteId = null, ambiente = null, autoCiencia = true, desdeInicio = false } = {}
+  ) {
+    const emitente = await this.getEmitente(tenantId, emitenteId);
+    if (!validarCnpjReal(emitente.cnpj)) {
+      throw new Error(
+        'CNPJ do emitente inválido. Configure o CNPJ real de 14 dígitos em Dados da Empresa.'
+      );
+    }
+
+    // MDe SEFAZ opera prioritariamente em Produção; utiliza Produção se o token existir, senão usa o ambiente configurado
+    const ambEfetivo =
+      ambiente ||
+      (emitente.focus_token_producao ? 'producao' : emitente.focus_ambiente || 'homologacao');
+
+    const { client } = await this.getFocusClient(tenantId, emitente.id, {
+      ambiente: ambEfetivo,
+    });
+
+    const versaoInicial = desdeInicio ? 0 : Number(emitente.mde_ultima_versao || 0);
+    const { items, maxVersion, totalCount } = await client.listarNfesRecebidas({
+      cnpj: emitente.cnpj,
+      versao: versaoInicial,
+    });
+
+    let importadas = 0;
+    let xmlCompletos = 0;
+    let manifestadasCiencia = 0;
+    const notasProcessadas = [];
+
+    for (const nfeItem of items) {
+      const chave = digitsOnly(nfeItem.chave_nfe || nfeItem.chave);
+      if (chave.length !== 44) continue;
+
+      const situacao = String(nfeItem.situacao || 'autorizada').toLowerCase();
+      if (situacao === 'cancelada' || situacao === 'denegada') {
+        await db
+          .query(
+            `UPDATE dash_cargas SET status = 'CANCELADA', updated_at = NOW()
+             WHERE tenant_id = $1 AND chave_acesso = $2`,
+            [tenantId, chave]
+          )
+          .catch(() => {});
+        continue;
+      }
+
+      let manifestacaoAtual = nfeItem.manifestacao_destinatario || null;
+      if (autoCiencia && !manifestacaoAtual) {
+        try {
+          await client.manifestarNfeRecebida(chave, { tipo: 'ciencia' });
+          manifestacaoAtual = 'ciencia';
+          manifestadasCiencia++;
+        } catch (manErr) {
+          logger.info(`[MDe Focus] Ciência não aplicada na chave ${chave}: ${manErr.message}`);
+        }
+      }
+
+      let parsedFull = null;
+      try {
+        const xml = await client.baixarXmlNfeRecebida(chave);
+        if (xml && xml.includes('infNFe')) {
+          parsedFull = parseNfeXml(xml);
+          xmlCompletos++;
+        }
+      } catch (_) {
+        parsedFull = null;
+      }
+
+      if (parsedFull) {
+        const saved = await this.upsertCargaFromNfeData(tenantId, parsedFull, {
+          origem: 'FOCUS_MDE',
+          extraMeta: {
+            mde_versao: nfeItem.versao,
+            manifestacao_destinatario: manifestacaoAtual,
+            mde_completo: true,
+          },
+        });
+        notasProcessadas.push(saved);
+        importadas++;
+      } else {
+        // Salva resumo oficial da SEFAZ enquanto a Receita libera o XML completo após a Ciência
+        const docEmit = digitsOnly(nfeItem.documento_emitente || chave.slice(6, 20));
+        const ufEmit = IBGE_UF_BY_CODE[chave.slice(0, 2)] || emitente.uf || 'MS';
+        const resumoData = {
+          chave_acesso: chave,
+          numero: String(parseInt(chave.slice(25, 34), 10)),
+          serie: String(parseInt(chave.slice(22, 25), 10)),
+          data_emissao: nfeItem.data_emissao || new Date().toISOString(),
+          valor_total: parseFloat(nfeItem.valor_total || 0) || 0,
+          valor_produtos: parseFloat(nfeItem.valor_total || 0) || 0,
+          peso_bruto: 0,
+          volumes: 1,
+          produto_predominante: 'NF-E DESTINADA (SEFAZ MDE)',
+          remetente: {
+            documento: docEmit,
+            razao_social: nfeItem.nome_emitente || `EMITENTE CNPJ ${docEmit}`,
+            inscricao_estadual: nfeItem.inscricao_estadual_emitente || '',
+            uf: ufEmit,
+          },
+          destinatario: {
+            documento: emitente.cnpj,
+            razao_social: emitente.razao_social,
+            inscricao_estadual: emitente.inscricao_estadual,
+            logradouro: emitente.logradouro,
+            numero: emitente.numero,
+            bairro: emitente.bairro,
+            cep: emitente.cep,
+            codigo_municipio: emitente.codigo_municipio,
+            municipio: emitente.municipio,
+            uf: emitente.uf,
+          },
+        };
+        const saved = await this.upsertCargaFromNfeData(tenantId, resumoData, {
+          origem: 'FOCUS_MDE_RESUMO',
+          extraMeta: {
+            mde_versao: nfeItem.versao,
+            manifestacao_destinatario: manifestacaoAtual,
+            mde_completo: false,
+          },
+        });
+        notasProcessadas.push(saved);
+        importadas++;
+      }
+    }
+
+    if (emitente.id && maxVersion > versaoInicial) {
+      await db
+        .query(
+          `UPDATE dash_emitentes SET mde_ultima_versao = $1, updated_at = NOW() WHERE id = $2 AND tenant_id = $3`,
+          [maxVersion, emitente.id, tenantId]
+        )
+        .catch(() => {});
+    }
+
+    return {
+      success: true,
+      ambiente: ambEfetivo,
+      encontradas_lote: items.length,
+      total_disponivel_focus: totalCount,
+      importadas,
+      xml_completos: xmlCompletos,
+      manifestadas_ciencia: manifestadasCiencia,
+      nova_versao_mde: Math.max(maxVersion, versaoInicial),
+      notas: notasProcessadas,
+    };
+  }
+
+  /**
+   * Registra Manifestação do Destinatário (ciencia, confirmacao, desconhecimento, nao_realizada)
+   * para uma NF-e de 44 dígitos na Focus NFe e atualiza o XML completo se liberado pela SEFAZ.
+   */
+  static async manifestarNfeFocus(
+    tenantId,
+    chaveInput,
+    { tipo = 'ciencia', justificativa = '', emitenteId = null, ambiente = null } = {}
+  ) {
+    const chave = digitsOnly(chaveInput);
+    if (chave.length !== 44) {
+      throw new Error('Informe uma chave de acesso válida de 44 dígitos da NF-e.');
+    }
+
+    const tiposValidos = ['ciencia', 'confirmacao', 'desconhecimento', 'nao_realizada'];
+    const tipoNorm = String(tipo || '').toLowerCase().trim();
+    if (!tiposValidos.includes(tipoNorm)) {
+      throw new Error(`Tipo de manifestação inválido. Use: ${tiposValidos.join(', ')}.`);
+    }
+    if (tipoNorm === 'nao_realizada' && String(justificativa || '').trim().length < 15) {
+      throw new Error(
+        'Para "Operação não Realizada", a SEFAZ exige justificativa com no mínimo 15 caracteres.'
+      );
+    }
+
+    const emitente = await this.getEmitente(tenantId, emitenteId);
+    const ambEfetivo =
+      ambiente ||
+      (emitente.focus_token_producao ? 'producao' : emitente.focus_ambiente || 'homologacao');
+
+    const { client } = await this.getFocusClient(tenantId, emitente.id, {
+      ambiente: ambEfetivo,
+    });
+
+    const resManifesto = await client.manifestarNfeRecebida(chave, {
+      tipo: tipoNorm,
+      justificativa,
+    });
+
+    // Se for ciência ou confirmação, tenta enriquecer imediatamente com o XML completo caso já liberado
+    let xmlEnriquecido = false;
+    if (tipoNorm === 'ciencia' || tipoNorm === 'confirmacao') {
+      try {
+        const xml = await client.baixarXmlNfeRecebida(chave);
+        if (xml && xml.includes('infNFe')) {
+          const parsed = parseNfeXml(xml);
+          await this.upsertCargaFromNfeData(tenantId, parsed, {
+            origem: 'FOCUS_MDE',
+            extraMeta: { manifestacao_destinatario: tipoNorm, mde_completo: true },
+          });
+          xmlEnriquecido = true;
+        }
+      } catch (_) {
+        xmlEnriquecido = false;
+      }
+    }
+
+    if (!xmlEnriquecido) {
+      await db
+        .query(
+          `UPDATE dash_cargas
+           SET dados_nfe = jsonb_set(COALESCE(dados_nfe, '{}'::jsonb), '{manifestacao_destinatario}', to_jsonb($1::text)),
+               status = CASE WHEN $1 IN ('desconhecimento', 'nao_realizada') THEN 'CANCELADA' ELSE status END,
+               updated_at = NOW()
+           WHERE tenant_id = $2 AND chave_acesso = $3`,
+          [tipoNorm, tenantId, chave]
+        )
+        .catch(() => {});
+    }
+
+    return {
+      success: true,
+      chave,
+      tipo: tipoNorm,
+      xml_completo_importado: xmlEnriquecido,
+      focus: resManifesto,
+    };
+  }
 }
+
+TransporteService.validarCnpjReal = validarCnpjReal;
+TransporteService.parseNfeXml = parseNfeXml;
 
 module.exports = TransporteService;

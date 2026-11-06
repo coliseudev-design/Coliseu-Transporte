@@ -27,6 +27,9 @@ const config = {
         internalApiKey: optional('INTERNAL_API_KEY', 'Coliseu2026!IdentitySuperSecretKeyOauth20'),
         identityApiUrl: optional('IDENTITY_API_URL', 'https://adminlicencas.coliseusistemas.com.br'),
         identityInternalKey: optional('IDENTITY_INTERNAL_KEY', 'Coliseu2026!IdentitySuperSecretKeyOauth20'),
+        focusMasterToken: optional('FOCUS_MASTER_TOKEN', optional('FOCUS_RESELLER_TOKEN', '')),
+        focusWebhookSecret: optional('FOCUS_WEBHOOK_SECRET', ''),
+        publicApiUrl: optional('PUBLIC_API_URL', optional('FOCUS_WEBHOOK_BASE_URL', 'https://transporte.coliseusistemas.com.br')),
         allowedOrigins: optional('ALLOWED_ORIGINS', '')
             .split(',')
             .map(s => s.trim())

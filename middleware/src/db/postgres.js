@@ -302,8 +302,24 @@ async function runStartupMaintenance() {
             `, []);
 
             await query(`
+                CREATE TABLE IF NOT EXISTS dash_plataforma_config (
+                    chave VARCHAR(100) PRIMARY KEY,
+                    valor TEXT,
+                    updated_by VARCHAR(180),
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                );
+            `, []).catch(() => {});
+
+            await query(`
                 ALTER TABLE dash_emitentes ADD COLUMN IF NOT EXISTS focus_token_homologacao TEXT;
                 ALTER TABLE dash_emitentes ADD COLUMN IF NOT EXISTS focus_token_producao TEXT;
+                ALTER TABLE dash_emitentes ADD COLUMN IF NOT EXISTS focus_empresa_id VARCHAR(64);
+                ALTER TABLE dash_emitentes ADD COLUMN IF NOT EXISTS focus_sincronizado_em TIMESTAMPTZ;
+                ALTER TABLE dash_emitentes ADD COLUMN IF NOT EXISTS focus_ultimo_erro TEXT;
+                ALTER TABLE dash_emitentes ADD COLUMN IF NOT EXISTS focus_hooks_ativos BOOLEAN DEFAULT FALSE;
+                ALTER TABLE dash_emitentes ADD COLUMN IF NOT EXISTS mde_ultima_versao BIGINT DEFAULT 0;
+                ALTER TABLE dash_emitentes ADD COLUMN IF NOT EXISTS inscricao_municipal VARCHAR(30);
+                ALTER TABLE dash_emitentes ADD COLUMN IF NOT EXISTS certificado_valido_ate TIMESTAMPTZ;
                 ALTER TABLE dash_emitentes ALTER COLUMN focus_token TYPE TEXT;
                 ALTER TABLE dash_emitentes ALTER COLUMN focus_token_homologacao TYPE TEXT;
                 ALTER TABLE dash_emitentes ALTER COLUMN focus_token_producao TYPE TEXT;
@@ -311,6 +327,8 @@ async function runStartupMaintenance() {
 
             await query(`
                 ALTER TABLE dash_certificados ALTER COLUMN senha TYPE TEXT;
+                ALTER TABLE dash_certificados ADD COLUMN IF NOT EXISTS focus_sincronizado BOOLEAN DEFAULT FALSE;
+                ALTER TABLE dash_certificados ADD COLUMN IF NOT EXISTS focus_sincronizado_em TIMESTAMPTZ;
             `, []).catch(() => {});
         } catch (migErr) {
             logger.warn('[DB] Migração silenciosa falhou ou já executada', { erro: migErr.message });

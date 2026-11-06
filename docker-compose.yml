@@ -46,6 +46,11 @@ services:
       - EXPECTED_MODULE_SLUG=${EXPECTED_MODULE_SLUG:-coliseu-transporte}
       - IDENTITY_API_URL=${IDENTITY_API_URL:-https://adminlicencas.coliseusistemas.com.br}
       - IDENTITY_INTERNAL_KEY=${IDENTITY_INTERNAL_KEY:-}
+
+      # Integração Fiscal Focus NFe v2 (Conta Parceiro / Software House)
+      - FOCUS_MASTER_TOKEN=${FOCUS_MASTER_TOKEN:-}
+      - FOCUS_WEBHOOK_SECRET=${FOCUS_WEBHOOK_SECRET:-}
+      - PUBLIC_API_URL=${PUBLIC_API_URL:-https://transporte.coliseusistemas.com.br}
       
       # Comunicação com o Worker
       - INTERNAL_API_KEY=${INTERNAL_API_KEY:-}

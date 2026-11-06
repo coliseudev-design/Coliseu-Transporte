@@ -5,10 +5,13 @@ const router = express.Router();
 const db = require('../db/postgres');
 const logger = require('../config/logger');
 const TransporteService = require('../services/transporteService');
+const FocusClient = require('../services/focus/focusClient');
 const veiculoService = require('../services/veiculoService');
+const { requireSuperAdminMaster, isSuperAdminMaster } = require('../middleware/auth');
 const {
     decryptSecret,
     maskSecret,
+    encryptSecret,
     encryptBuffer,
     resolveSecretForSave
 } = require('../utils/cryptoVault');
@@ -18,15 +21,33 @@ async function ensureTransporteColumns() {
     if (_transporteColsReady) return;
     try {
         await db.query(`
+            CREATE TABLE IF NOT EXISTS dash_plataforma_config (
+                chave VARCHAR(100) PRIMARY KEY,
+                valor TEXT,
+                updated_by VARCHAR(180),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            );
+
             ALTER TABLE dash_emitentes
               ADD COLUMN IF NOT EXISTS focus_token_homologacao TEXT,
               ADD COLUMN IF NOT EXISTS focus_token_producao TEXT,
+              ADD COLUMN IF NOT EXISTS focus_empresa_id VARCHAR(60),
+              ADD COLUMN IF NOT EXISTS focus_sincronizado_em TIMESTAMPTZ,
+              ADD COLUMN IF NOT EXISTS focus_ultimo_erro TEXT,
+              ADD COLUMN IF NOT EXISTS focus_hooks_ativos BOOLEAN DEFAULT FALSE,
+              ADD COLUMN IF NOT EXISTS mde_ultima_versao BIGINT DEFAULT 0,
+              ADD COLUMN IF NOT EXISTS inscricao_municipal VARCHAR(30),
+              ADD COLUMN IF NOT EXISTS certificado_valido_ate TIMESTAMPTZ,
               ADD COLUMN IF NOT EXISTS regime_tributario VARCHAR(2) DEFAULT '1',
               ADD COLUMN IF NOT EXISTS cfop_padrao_cte VARCHAR(8) DEFAULT '5353',
               ADD COLUMN IF NOT EXISTS natureza_padrao_cte VARCHAR(255) DEFAULT 'PRESTACAO DE SERVICO DE TRANSPORTE',
               ADD COLUMN IF NOT EXISTS aliquota_icms_padrao NUMERIC(7,4) DEFAULT 12.00,
               ADD COLUMN IF NOT EXISTS complemento VARCHAR(120),
               ADD COLUMN IF NOT EXISTS email VARCHAR(255);
+
+            ALTER TABLE dash_certificados
+              ADD COLUMN IF NOT EXISTS focus_sincronizado BOOLEAN DEFAULT FALSE,
+              ADD COLUMN IF NOT EXISTS focus_sincronizado_em TIMESTAMPTZ;
 
             ALTER TABLE dash_emitentes ALTER COLUMN focus_token TYPE TEXT;
             ALTER TABLE dash_emitentes ALTER COLUMN focus_token_homologacao TYPE TEXT;
@@ -111,7 +132,68 @@ router.post('/focus/testar', async (req, res) => {
             token,
             emitenteId: emitente_id,
         });
-        return res.json({ success: true, ...result });
+        const payload = { conectado: true, ...result };
+        return res.json({ success: true, ...payload, data: payload });
+    } catch (err) {
+        return res.status(400).json({ error: err.message });
+    }
+});
+
+// ─────────────────────────────────────────────────────────────
+// 0. CONTA PARCEIRO / SOFTWARE HOUSE FOCUS NFe (Exclusivo Super Admin Master)
+// ─────────────────────────────────────────────────────────────
+
+router.get('/focus/master-config', requireSuperAdminMaster, async (_req, res) => {
+    try {
+        const cfg = await TransporteService.getMasterFocusConfig();
+        return res.json({
+            success: true,
+            data: {
+                tem_master_token: cfg.temMasterToken,
+                master_token_masked: cfg.masterTokenMasked,
+                master_token_preview: cfg.masterTokenPreview,
+                origem: cfg.origem,
+                webhook_base_url: cfg.webhookBaseUrl,
+                webhook_endpoint: cfg.webhookEndpoint,
+                updated_at: cfg.updatedAt,
+                updated_by: cfg.updatedBy,
+            }
+        });
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+});
+
+router.post('/focus/master-config', requireSuperAdminMaster, async (req, res) => {
+    try {
+        const cfg = await TransporteService.salvarMasterFocusConfig({
+            masterToken: req.body?.master_token,
+            webhookBaseUrl: req.body?.webhook_base_url,
+            updatedBy: req.user?.email || 'master',
+        });
+        return res.json({
+            success: true,
+            data: {
+                tem_master_token: cfg.temMasterToken,
+                master_token_masked: cfg.masterTokenMasked,
+                master_token_preview: cfg.masterTokenPreview,
+                origem: cfg.origem,
+                webhook_base_url: cfg.webhookBaseUrl,
+                webhook_endpoint: cfg.webhookEndpoint,
+                updated_at: cfg.updatedAt,
+                updated_by: cfg.updatedBy,
+            }
+        });
+    } catch (err) {
+        return res.status(400).json({ error: err.message });
+    }
+});
+
+router.post('/focus/master-testar', requireSuperAdminMaster, async (req, res) => {
+    try {
+        const result = await TransporteService.testarMasterFocusToken(req.body?.master_token);
+        const payload = { conectado: true, ...result };
+        return res.json({ success: true, ...payload, data: payload });
     } catch (err) {
         return res.status(400).json({ error: err.message });
     }
@@ -211,6 +293,56 @@ router.get('/cargas/:id/danfe', async (req, res) => {
     }
 });
 
+/**
+ * Importa um ou mais arquivos XML de NF-e direto na Central de Cargas.
+ */
+router.post('/cargas/importar-xml', async (req, res) => {
+    const tenantId = req.tenant.id;
+    try {
+        const result = await TransporteService.importarXmlsNfe(tenantId, req.body?.arquivos);
+        return res.json(result);
+    } catch (err) {
+        return res.status(400).json({ error: err.message });
+    }
+});
+
+/**
+ * Sincroniza NF-es recebidas/destinadas direto da SEFAZ via MDe Focus NFe (/v2/nfes_recebidas).
+ */
+router.post('/mde/sincronizar', async (req, res) => {
+    const tenantId = req.tenant.id;
+    try {
+        const result = await TransporteService.sincronizarNfesRecebidasFocus(tenantId, {
+            emitenteId: req.body?.emitente_id || null,
+            ambiente: req.body?.ambiente || null,
+            autoCiencia: req.body?.auto_ciencia !== false,
+            desdeInicio: Boolean(req.body?.desde_inicio),
+        });
+        return res.json(result);
+    } catch (err) {
+        return res.status(400).json({ error: err.message });
+    }
+});
+
+/**
+ * Registra Manifestação do Destinatário (ciencia, confirmacao, desconhecimento, nao_realizada)
+ * para uma chave NF-e de 44 dígitos na Focus NFe.
+ */
+router.post('/mde/:chave/manifestar', async (req, res) => {
+    const tenantId = req.tenant.id;
+    try {
+        const result = await TransporteService.manifestarNfeFocus(tenantId, req.params.chave, {
+            tipo: req.body?.tipo,
+            justificativa: req.body?.justificativa,
+            emitenteId: req.body?.emitente_id || null,
+            ambiente: req.body?.ambiente || null,
+        });
+        return res.json(result);
+    } catch (err) {
+        return res.status(400).json({ error: err.message });
+    }
+});
+
 // ─────────────────────────────────────────────────────────────
 // 1.5 DOCUMENTOS EMITIDOS (listagem unificada CT-e + MDF-e)
 // ─────────────────────────────────────────────────────────────
@@ -243,6 +375,7 @@ router.get('/documentos', async (req, res) => {
                    c.caminho_xml, c.caminho_dacte AS caminho_pdf, c.protocolo,
                    c.data_emissao, c.created_at,
                    e.razao_social AS emitente_nome,
+                   COALESCE(e.focus_ambiente, 'homologacao') AS focus_ambiente,
                    (SELECT COUNT(*)::int FROM dash_cte_cargas cc WHERE cc.cte_id = c.id) AS qtd_documentos
             FROM dash_ctes c
             LEFT JOIN dash_emitentes e ON e.id = c.emitente_id
@@ -262,6 +395,7 @@ router.get('/documentos', async (req, res) => {
                    m.caminho_xml, m.caminho_damdfe AS caminho_pdf, m.protocolo,
                    m.data_emissao, m.created_at,
                    e.razao_social AS emitente_nome,
+                   COALESCE(e.focus_ambiente, 'homologacao') AS focus_ambiente,
                    (SELECT COUNT(*)::int FROM dash_mdfe_documentos md WHERE md.mdfe_id = m.id) AS qtd_documentos
             FROM dash_mdfes m
             LEFT JOIN dash_emitentes e ON e.id = m.emitente_id
@@ -302,14 +436,47 @@ router.get('/documentos', async (req, res) => {
                 ${unionSql}
             ) docs
             ORDER BY data_emissao DESC NULLS LAST, id DESC
-            LIMIT ${params.length + 1} OFFSET ${params.length + 2}`;
+            LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
         params.push(parseInt(limit, 10), parseInt(offset, 10));
 
         const { rows } = await db.query(finalSql, params);
-        return res.json({ success: true, data: rows, total: rows.length });
+        const normalizedRows = rows.map((r) => ({
+            ...r,
+            caminho_xml: FocusClient.normalizarUrlArquivo(r.caminho_xml, r.focus_ambiente),
+            caminho_pdf: FocusClient.normalizarUrlArquivo(r.caminho_pdf, r.focus_ambiente),
+        }));
+        return res.json({ success: true, data: normalizedRows, total: normalizedRows.length });
     } catch (err) {
         logger.error('[Documentos API] Erro ao listar documentos:', err.message);
         return res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * Proxy autenticado para download de XML ou PDF (DACTE / DAMDFE) de CT-e ou MDF-e.
+ */
+router.get('/documentos/:tipo/:id/download/:formato', async (req, res) => {
+    const tenantId = req.tenant.id;
+    const tipo = String(req.params.tipo || 'CTE').toUpperCase();
+    const docId = parseInt(req.params.id, 10);
+    const formato = String(req.params.formato || 'pdf').toLowerCase();
+
+    if (!['xml', 'pdf'].includes(formato)) {
+        return res.status(400).json({ error: 'Formato inválido. Use xml ou pdf.' });
+    }
+
+    try {
+        const { buffer, contentType, filename } = await TransporteService.baixarArtefatoDocumento(
+            tenantId,
+            tipo,
+            docId,
+            formato
+        );
+        res.setHeader('Content-Type', contentType);
+        res.setHeader('Content-Disposition', `${formato === 'pdf' ? 'inline' : 'attachment'}; filename="${filename}"`);
+        return res.send(buffer);
+    } catch (err) {
+        return res.status(404).json({ error: err.message });
     }
 });
 
@@ -1263,7 +1430,9 @@ router.get('/emitentes', async (req, res) => {
     const tenantId = req.tenant.id;
     try {
         let { rows } = await db.query(
-            `SELECT * FROM dash_emitentes WHERE tenant_id = $1 ORDER BY id ASC`,
+            `SELECT * FROM dash_emitentes
+             WHERE tenant_id = $1
+             ORDER BY CASE WHEN LENGTH(REGEXP_REPLACE(COALESCE(cnpj, ''), '\\D', '', 'g')) = 14 THEN 0 ELSE 1 END, id ASC`,
             [tenantId]
         );
 
@@ -1326,6 +1495,8 @@ router.get('/emitentes', async (req, res) => {
             rows = insRes.rows;
         }
 
+        const masterCfg = await TransporteService.getMasterFocusConfig();
+
         const enriched = rows.map((r) => {
             const rawTokHomolog =
                 r.focus_token_homologacao ||
@@ -1337,16 +1508,20 @@ router.get('/emitentes', async (req, res) => {
                 cfg.focus_token_producao ||
                 (r.focus_ambiente === 'producao' ? r.focus_token : '') ||
                 '';
-            const plainHomolog = decryptSecret(rawTokHomolog);
-            const plainProd = decryptSecret(rawTokProd);
+            const plainHomolog = String(decryptSecret(rawTokHomolog) || '').trim();
+            const plainProd = String(decryptSecret(rawTokProd) || '').trim();
             return {
                 ...r,
                 focus_ambiente: r.focus_ambiente || cfg.focus_ambiente || 'homologacao',
                 focus_token: maskSecret(r.focus_token),
                 focus_token_homologacao: maskSecret(rawTokHomolog),
                 focus_token_producao: maskSecret(rawTokProd),
-                tem_token_homologacao: Boolean(plainHomolog && String(plainHomolog).trim()),
-                tem_token_producao: Boolean(plainProd && String(plainProd).trim()),
+                tem_token_homologacao: Boolean(plainHomolog),
+                tem_token_producao: Boolean(plainProd),
+                token_homologacao_preview: plainHomolog ? `${plainHomolog.slice(0, 4)}••••` : null,
+                token_producao_preview: plainProd ? `${plainProd.slice(0, 4)}••••` : null,
+                cnpj_valido: TransporteService.validarCnpjReal(r.cnpj),
+                software_house_disponivel: masterCfg.temMasterToken,
                 regime_tributario: r.regime_tributario || cfg.focus_regime_tributario || '1',
                 serie_cte: r.serie_cte || cfg.focus_serie_cte || '1',
                 serie_mdfe: r.serie_mdfe || cfg.focus_serie_mdfe || '1',
@@ -1357,7 +1532,15 @@ router.get('/emitentes', async (req, res) => {
             };
         });
 
-        return res.json({ success: true, data: enriched });
+        return res.json({
+            success: true,
+            data: enriched,
+            meta: {
+                software_house_disponivel: masterCfg.temMasterToken,
+                is_super_admin_master: isSuperAdminMaster(req),
+                webhook_endpoint: masterCfg.webhookEndpoint,
+            },
+        });
     } catch (err) {
         return res.status(500).json({ error: err.message });
     }
@@ -1479,20 +1662,31 @@ router.post('/emitentes', async (req, res) => {
     if (!cleanCnpj) {
         return res.status(400).json({ error: 'CNPJ é obrigatório.' });
     }
+    if (!TransporteService.validarCnpjReal(cleanCnpj)) {
+        return res.status(400).json({
+            error: `O CNPJ informado ("${b.cnpj}") é inválido. Informe o CNPJ real de 14 dígitos da transportadora.`
+        });
+    }
 
     try {
         const ambiente = String(b.focus_ambiente || 'homologacao').toLowerCase() === 'producao'
             ? 'producao'
             : 'homologacao';
 
-        const existingRes = await db.query(
-            `SELECT focus_token, focus_token_homologacao, focus_token_producao
-             FROM dash_emitentes
-             WHERE tenant_id = $1 AND cnpj = $2
-             LIMIT 1`,
+        const byIdRes = b.id
+            ? await db.query(
+                `SELECT * FROM dash_emitentes WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
+                [parseInt(b.id, 10), tenantId]
+            )
+            : { rows: [] };
+        const byCnpjRes = await db.query(
+            `SELECT * FROM dash_emitentes WHERE tenant_id = $1 AND cnpj = $2 LIMIT 1`,
             [tenantId, cleanCnpj]
         );
-        const existingEmit = existingRes.rows[0] || {};
+
+        const targetById = byIdRes.rows[0] || null;
+        const targetByCnpj = byCnpjRes.rows[0] || null;
+        const existingEmit = targetByCnpj || targetById || {};
 
         const incomingHomolog =
             b.focus_token_homologacao !== undefined
@@ -1511,80 +1705,150 @@ router.post('/emitentes', async (req, res) => {
             (ambiente === 'producao' ? tokProd : tokHomolog) ||
             resolveSecretForSave(null, existingEmit.focus_token);
 
-        const { rows } = await db.query(
-            `INSERT INTO dash_emitentes (
-                tenant_id, cnpj, razao_social, nome_fantasia, inscricao_estadual,
-                rntrc, regime_tributario,
-                logradouro, numero, complemento, bairro, cep,
-                uf, municipio, codigo_municipio, telefone, email,
-                focus_token, focus_token_homologacao, focus_token_producao, focus_ambiente,
-                serie_cte, serie_mdfe, cfop_padrao_cte, natureza_padrao_cte, aliquota_icms_padrao
-             ) VALUES (
-                $1, $2, $3, $4, $5,
-                $6, $7,
-                $8, $9, $10, $11, $12,
-                $13, $14, $15, $16, $17,
-                $18, $19, $20, $21,
-                $22, $23, $24, $25, $26
-             )
-             ON CONFLICT (tenant_id, cnpj) DO UPDATE SET
-                razao_social = EXCLUDED.razao_social,
-                nome_fantasia = COALESCE(NULLIF(EXCLUDED.nome_fantasia, ''), dash_emitentes.nome_fantasia),
-                inscricao_estadual = COALESCE(EXCLUDED.inscricao_estadual, dash_emitentes.inscricao_estadual),
-                rntrc = COALESCE(EXCLUDED.rntrc, dash_emitentes.rntrc),
-                regime_tributario = COALESCE(EXCLUDED.regime_tributario, dash_emitentes.regime_tributario),
-                logradouro = COALESCE(NULLIF(EXCLUDED.logradouro, ''), dash_emitentes.logradouro),
-                numero = COALESCE(NULLIF(EXCLUDED.numero, ''), dash_emitentes.numero),
-                complemento = COALESCE(EXCLUDED.complemento, dash_emitentes.complemento),
-                bairro = COALESCE(NULLIF(EXCLUDED.bairro, ''), dash_emitentes.bairro),
-                cep = COALESCE(NULLIF(EXCLUDED.cep, ''), dash_emitentes.cep),
-                uf = COALESCE(NULLIF(EXCLUDED.uf, ''), dash_emitentes.uf),
-                municipio = COALESCE(NULLIF(EXCLUDED.municipio, ''), dash_emitentes.municipio),
-                codigo_municipio = COALESCE(NULLIF(EXCLUDED.codigo_municipio, ''), dash_emitentes.codigo_municipio),
-                telefone = COALESCE(NULLIF(EXCLUDED.telefone, ''), dash_emitentes.telefone),
-                email = COALESCE(NULLIF(EXCLUDED.email, ''), dash_emitentes.email),
-                focus_token = COALESCE(NULLIF(EXCLUDED.focus_token, ''), dash_emitentes.focus_token),
-                focus_token_homologacao = COALESCE(NULLIF(EXCLUDED.focus_token_homologacao, ''), dash_emitentes.focus_token_homologacao),
-                focus_token_producao = COALESCE(NULLIF(EXCLUDED.focus_token_producao, ''), dash_emitentes.focus_token_producao),
-                focus_ambiente = EXCLUDED.focus_ambiente,
-                serie_cte = COALESCE(NULLIF(EXCLUDED.serie_cte, ''), dash_emitentes.serie_cte),
-                serie_mdfe = COALESCE(NULLIF(EXCLUDED.serie_mdfe, ''), dash_emitentes.serie_mdfe),
-                cfop_padrao_cte = COALESCE(NULLIF(EXCLUDED.cfop_padrao_cte, ''), dash_emitentes.cfop_padrao_cte),
-                natureza_padrao_cte = COALESCE(NULLIF(EXCLUDED.natureza_padrao_cte, ''), dash_emitentes.natureza_padrao_cte),
-                aliquota_icms_padrao = COALESCE(EXCLUDED.aliquota_icms_padrao, dash_emitentes.aliquota_icms_padrao),
-                updated_at = NOW()
-             RETURNING *`,
-            [
-                tenantId,
-                cleanCnpj,
-                b.razao_social || 'EMPRESA EMITENTE',
-                b.nome_fantasia || b.razao_social || 'EMPRESA EMITENTE',
-                b.inscricao_estadual || '',
-                b.rntrc || '',
-                b.regime_tributario || '1',
-                b.logradouro || null,
-                b.numero || null,
-                b.complemento || null,
-                b.bairro || null,
-                b.cep ? String(b.cep).replace(/\D/g, '') : null,
-                b.uf ? String(b.uf).toUpperCase().slice(0, 2) : null,
-                b.municipio || null,
-                b.codigo_municipio ? String(b.codigo_municipio).replace(/\D/g, '') : null,
-                b.telefone ? String(b.telefone).replace(/\D/g, '') : null,
-                b.email || null,
-                tokAtivo,
-                tokHomolog,
-                tokProd,
-                ambiente,
-                b.serie_cte || '1',
-                b.serie_mdfe || '1',
-                b.cfop_padrao_cte || '5353',
-                b.natureza_padrao_cte || 'PRESTACAO DE SERVICO DE TRANSPORTE',
-                b.aliquota_icms_padrao !== undefined ? parseFloat(b.aliquota_icms_padrao) : 12.0,
-            ]
-        );
+        let saved = null;
 
-        const saved = rows[0];
+        // Se está editando o emitente atual (ex: corrigindo CNPJ placeholder 00000000000100 ou "1"), atualiza in-place mantendo o ID!
+        if (targetById && (!targetByCnpj || targetByCnpj.id === targetById.id)) {
+            const { rows } = await db.query(
+                `UPDATE dash_emitentes SET
+                    cnpj = $1,
+                    razao_social = $2,
+                    nome_fantasia = $3,
+                    inscricao_estadual = $4,
+                    inscricao_municipal = $5,
+                    rntrc = $6,
+                    regime_tributario = $7,
+                    logradouro = $8,
+                    numero = $9,
+                    complemento = $10,
+                    bairro = $11,
+                    cep = $12,
+                    uf = $13,
+                    municipio = $14,
+                    codigo_municipio = $15,
+                    telefone = $16,
+                    email = $17,
+                    focus_token = COALESCE(NULLIF($18, ''), focus_token),
+                    focus_token_homologacao = COALESCE(NULLIF($19, ''), focus_token_homologacao),
+                    focus_token_producao = COALESCE(NULLIF($20, ''), focus_token_producao),
+                    focus_ambiente = $21,
+                    serie_cte = $22,
+                    serie_mdfe = $23,
+                    cfop_padrao_cte = $24,
+                    natureza_padrao_cte = $25,
+                    aliquota_icms_padrao = $26,
+                    updated_at = NOW()
+                 WHERE id = $27 AND tenant_id = $28
+                 RETURNING *`,
+                [
+                    cleanCnpj,
+                    b.razao_social || 'EMPRESA EMITENTE',
+                    b.nome_fantasia || b.razao_social || 'EMPRESA EMITENTE',
+                    b.inscricao_estadual || '',
+                    b.inscricao_municipal ? String(b.inscricao_municipal).replace(/\D/g, '') : (targetById.inscricao_municipal || null),
+                    b.rntrc || '',
+                    b.regime_tributario || '1',
+                    b.logradouro || null,
+                    b.numero || null,
+                    b.complemento || null,
+                    b.bairro || null,
+                    b.cep ? String(b.cep).replace(/\D/g, '') : null,
+                    b.uf ? String(b.uf).toUpperCase().slice(0, 2) : null,
+                    b.municipio || null,
+                    b.codigo_municipio ? String(b.codigo_municipio).replace(/\D/g, '') : null,
+                    b.telefone ? String(b.telefone).replace(/\D/g, '') : null,
+                    b.email || null,
+                    tokAtivo,
+                    tokHomolog,
+                    tokProd,
+                    ambiente,
+                    b.serie_cte || '1',
+                    b.serie_mdfe || '1',
+                    b.cfop_padrao_cte || '5353',
+                    b.natureza_padrao_cte || 'PRESTACAO DE SERVICO DE TRANSPORTE',
+                    b.aliquota_icms_padrao !== undefined ? parseFloat(b.aliquota_icms_padrao) : 12.0,
+                    targetById.id,
+                    tenantId,
+                ]
+            );
+            saved = rows[0];
+        } else {
+            const { rows } = await db.query(
+                `INSERT INTO dash_emitentes (
+                    tenant_id, cnpj, razao_social, nome_fantasia, inscricao_estadual, inscricao_municipal,
+                    rntrc, regime_tributario,
+                    logradouro, numero, complemento, bairro, cep,
+                    uf, municipio, codigo_municipio, telefone, email,
+                    focus_token, focus_token_homologacao, focus_token_producao, focus_ambiente,
+                    serie_cte, serie_mdfe, cfop_padrao_cte, natureza_padrao_cte, aliquota_icms_padrao
+                 ) VALUES (
+                    $1, $2, $3, $4, $5, $6,
+                    $7, $8,
+                    $9, $10, $11, $12, $13,
+                    $14, $15, $16, $17, $18,
+                    $19, $20, $21, $22,
+                    $23, $24, $25, $26, $27
+                 )
+                 ON CONFLICT (tenant_id, cnpj) DO UPDATE SET
+                    razao_social = EXCLUDED.razao_social,
+                    nome_fantasia = COALESCE(NULLIF(EXCLUDED.nome_fantasia, ''), dash_emitentes.nome_fantasia),
+                    inscricao_estadual = COALESCE(EXCLUDED.inscricao_estadual, dash_emitentes.inscricao_estadual),
+                    inscricao_municipal = COALESCE(EXCLUDED.inscricao_municipal, dash_emitentes.inscricao_municipal),
+                    rntrc = COALESCE(EXCLUDED.rntrc, dash_emitentes.rntrc),
+                    regime_tributario = COALESCE(EXCLUDED.regime_tributario, dash_emitentes.regime_tributario),
+                    logradouro = COALESCE(NULLIF(EXCLUDED.logradouro, ''), dash_emitentes.logradouro),
+                    numero = COALESCE(NULLIF(EXCLUDED.numero, ''), dash_emitentes.numero),
+                    complemento = COALESCE(EXCLUDED.complemento, dash_emitentes.complemento),
+                    bairro = COALESCE(NULLIF(EXCLUDED.bairro, ''), dash_emitentes.bairro),
+                    cep = COALESCE(NULLIF(EXCLUDED.cep, ''), dash_emitentes.cep),
+                    uf = COALESCE(NULLIF(EXCLUDED.uf, ''), dash_emitentes.uf),
+                    municipio = COALESCE(NULLIF(EXCLUDED.municipio, ''), dash_emitentes.municipio),
+                    codigo_municipio = COALESCE(NULLIF(EXCLUDED.codigo_municipio, ''), dash_emitentes.codigo_municipio),
+                    telefone = COALESCE(NULLIF(EXCLUDED.telefone, ''), dash_emitentes.telefone),
+                    email = COALESCE(NULLIF(EXCLUDED.email, ''), dash_emitentes.email),
+                    focus_token = COALESCE(NULLIF(EXCLUDED.focus_token, ''), dash_emitentes.focus_token),
+                    focus_token_homologacao = COALESCE(NULLIF(EXCLUDED.focus_token_homologacao, ''), dash_emitentes.focus_token_homologacao),
+                    focus_token_producao = COALESCE(NULLIF(EXCLUDED.focus_token_producao, ''), dash_emitentes.focus_token_producao),
+                    focus_ambiente = EXCLUDED.focus_ambiente,
+                    serie_cte = COALESCE(NULLIF(EXCLUDED.serie_cte, ''), dash_emitentes.serie_cte),
+                    serie_mdfe = COALESCE(NULLIF(EXCLUDED.serie_mdfe, ''), dash_emitentes.serie_mdfe),
+                    cfop_padrao_cte = COALESCE(NULLIF(EXCLUDED.cfop_padrao_cte, ''), dash_emitentes.cfop_padrao_cte),
+                    natureza_padrao_cte = COALESCE(NULLIF(EXCLUDED.natureza_padrao_cte, ''), dash_emitentes.natureza_padrao_cte),
+                    aliquota_icms_padrao = COALESCE(EXCLUDED.aliquota_icms_padrao, dash_emitentes.aliquota_icms_padrao),
+                    updated_at = NOW()
+                 RETURNING *`,
+                [
+                    tenantId,
+                    cleanCnpj,
+                    b.razao_social || 'EMPRESA EMITENTE',
+                    b.nome_fantasia || b.razao_social || 'EMPRESA EMITENTE',
+                    b.inscricao_estadual || '',
+                    b.inscricao_municipal ? String(b.inscricao_municipal).replace(/\D/g, '') : null,
+                    b.rntrc || '',
+                    b.regime_tributario || '1',
+                    b.logradouro || null,
+                    b.numero || null,
+                    b.complemento || null,
+                    b.bairro || null,
+                    b.cep ? String(b.cep).replace(/\D/g, '') : null,
+                    b.uf ? String(b.uf).toUpperCase().slice(0, 2) : null,
+                    b.municipio || null,
+                    b.codigo_municipio ? String(b.codigo_municipio).replace(/\D/g, '') : null,
+                    b.telefone ? String(b.telefone).replace(/\D/g, '') : null,
+                    b.email || null,
+                    tokAtivo,
+                    tokHomolog,
+                    tokProd,
+                    ambiente,
+                    b.serie_cte || '1',
+                    b.serie_mdfe || '1',
+                    b.cfop_padrao_cte || '5353',
+                    b.natureza_padrao_cte || 'PRESTACAO DE SERVICO DE TRANSPORTE',
+                    b.aliquota_icms_padrao !== undefined ? parseFloat(b.aliquota_icms_padrao) : 12.0,
+                ]
+            );
+            saved = rows[0];
+        }
 
         // Sincronizar de volta com dash_integracoes_config para manter a aba Fiscal em Configurações atualizada
         await db.query(
@@ -1634,14 +1898,105 @@ router.post('/emitentes', async (req, res) => {
             ]
         ).catch(() => {});
 
+        const plainHomologSaved = String(decryptSecret(saved.focus_token_homologacao) || '').trim();
+        const plainProdSaved = String(decryptSecret(saved.focus_token_producao) || '').trim();
+
         const maskedSaved = {
             ...saved,
             focus_token: maskSecret(saved.focus_token),
             focus_token_homologacao: maskSecret(saved.focus_token_homologacao),
             focus_token_producao: maskSecret(saved.focus_token_producao),
+            tem_token_homologacao: Boolean(plainHomologSaved),
+            tem_token_producao: Boolean(plainProdSaved),
+            token_homologacao_preview: plainHomologSaved ? `${plainHomologSaved.slice(0, 4)}••••` : null,
+            token_producao_preview: plainProdSaved ? `${plainProdSaved.slice(0, 4)}••••` : null,
+            cnpj_valido: true,
         };
 
         return res.json({ success: true, data: maskedSaved });
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * Provisiona ou sincroniza automaticamente a empresa na conta parceira Focus NFe (/v2/empresas),
+ * envia o Certificado Digital A1, captura os tokens (Homologação e Produção) cifrados em AES-256-GCM
+ * e registra os Webhooks (/v2/hooks).
+ */
+router.post('/emitentes/provisionar-focus', async (req, res) => {
+    const tenantId = req.tenant.id;
+    const { emitente_id, registrar_webhooks = true, incluir_certificado = true } = req.body || {};
+    try {
+        const result = await TransporteService.provisionarEmpresaFocus(tenantId, emitente_id || null, {
+            registrarWebhooks: registrar_webhooks !== false,
+            incluirCertificado: incluir_certificado !== false,
+        });
+        return res.json(result);
+    } catch (err) {
+        return res.status(400).json({ error: err.message });
+    }
+});
+
+/**
+ * Registra / revalida os Webhooks de CT-e e MDF-e (/v2/hooks) da transportadora na Focus NFe.
+ */
+router.post('/emitentes/:id/webhooks-focus', async (req, res) => {
+    const tenantId = req.tenant.id;
+    try {
+        const result = await TransporteService.registrarWebhooksFocus(tenantId, parseInt(req.params.id, 10));
+        return res.json({ success: true, ...result });
+    } catch (err) {
+        return res.status(400).json({ error: err.message });
+    }
+});
+
+/**
+ * Alternância rápida 1-clique entre Homologação e Produção para o emitente fiscal.
+ */
+router.patch('/emitentes/:id/ambiente', async (req, res) => {
+    const tenantId = req.tenant.id;
+    const emitenteId = parseInt(req.params.id, 10);
+    const novoAmbiente = String(req.body?.ambiente || '').toLowerCase() === 'producao'
+        ? 'producao'
+        : 'homologacao';
+
+    try {
+        const { rows: curRows } = await db.query(
+            `SELECT * FROM dash_emitentes WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
+            [emitenteId, tenantId]
+        );
+        if (curRows.length === 0) {
+            return res.status(404).json({ error: 'Emitente não encontrado.' });
+        }
+
+        const cur = curRows[0];
+        const novoTokenAtivo =
+            novoAmbiente === 'producao'
+                ? cur.focus_token_producao || cur.focus_token
+                : cur.focus_token_homologacao || cur.focus_token;
+
+        await db.query(
+            `UPDATE dash_emitentes
+             SET focus_ambiente = $1, focus_token = $2, updated_at = NOW()
+             WHERE id = $3 AND tenant_id = $4`,
+            [novoAmbiente, novoTokenAtivo || null, emitenteId, tenantId]
+        );
+
+        await db.query(
+            `UPDATE dash_integracoes_config
+             SET focus_ambiente = $1, updated_at = NOW()
+             WHERE tenant_id = $2`,
+            [novoAmbiente, tenantId]
+        ).catch(() => {});
+
+        return res.json({
+            success: true,
+            ambiente: novoAmbiente,
+            mensagem: novoAmbiente === 'producao'
+                ? 'Ambiente alterado para Produção (SEFAZ Real com validade jurídica).'
+                : 'Ambiente alterado para Homologação (Testes SEFAZ sem valor fiscal).',
+        });
     } catch (err) {
         return res.status(500).json({ error: err.message });
     }
@@ -2519,7 +2874,16 @@ router.get('/certificados', async (req, res) => {
     try {
         const { rows } = await db.query(
             `SELECT c.id, c.emitente_id, e.razao_social AS emitente_nome, e.cnpj,
-                    c.nome_arquivo, c.valido_de, c.valido_ate, c.dias_para_vencer, c.status
+                    c.nome_arquivo, c.valido_de, c.valido_ate,
+                    COALESCE(
+                        CASE WHEN c.valido_ate IS NOT NULL
+                             THEN GREATEST(-9999, CEIL(EXTRACT(EPOCH FROM (c.valido_ate - NOW())) / 86400))::int
+                        END,
+                        c.dias_para_vencer
+                    ) AS dias_para_vencer,
+                    c.status,
+                    COALESCE(c.focus_sincronizado, FALSE) AS focus_sincronizado,
+                    c.focus_sincronizado_em
              FROM dash_certificados c
              JOIN dash_emitentes e ON e.id = c.emitente_id
              WHERE c.tenant_id = $1
@@ -2534,7 +2898,7 @@ router.get('/certificados', async (req, res) => {
 
 router.post('/certificados', async (req, res) => {
     const tenantId = req.tenant.id;
-    const { emitente_id, nome_arquivo, senha, arquivo_base64, valido_ate } = req.body || {};
+    const { emitente_id, nome_arquivo, senha, arquivo_base64, valido_ate, sincronizar_focus = true } = req.body || {};
 
     if (!emitente_id || !nome_arquivo || !senha) {
         return res.status(400).json({ error: 'emitente_id, nome_arquivo e senha são obrigatórios.' });
@@ -2542,7 +2906,7 @@ router.post('/certificados', async (req, res) => {
 
     try {
         const emitCheck = await db.query(
-            `SELECT id FROM dash_emitentes WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
+            `SELECT id, cnpj FROM dash_emitentes WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
             [emitente_id, tenantId]
         );
         if (emitCheck.rowCount === 0) {
@@ -2566,8 +2930,8 @@ router.post('/certificados', async (req, res) => {
         const { rows } = await db.query(
             `INSERT INTO dash_certificados (
                 tenant_id, emitente_id, nome_arquivo, arquivo_pfx, senha,
-                valido_de, valido_ate, dias_para_vencer, status
-             ) VALUES ($1, $2, $3, $4, $5, NOW(), $6, $7, 'ATIVO')
+                valido_de, valido_ate, dias_para_vencer, status, focus_sincronizado
+             ) VALUES ($1, $2, $3, $4, $5, NOW(), $6, $7, 'ATIVO', FALSE)
              ON CONFLICT (tenant_id, emitente_id) DO UPDATE SET
                 nome_arquivo = EXCLUDED.nome_arquivo,
                 arquivo_pfx = EXCLUDED.arquivo_pfx,
@@ -2575,14 +2939,51 @@ router.post('/certificados', async (req, res) => {
                 valido_ate = EXCLUDED.valido_ate,
                 dias_para_vencer = EXCLUDED.dias_para_vencer,
                 status = 'ATIVO',
+                focus_sincronizado = FALSE,
                 updated_at = NOW()
-             RETURNING id, emitente_id, nome_arquivo, valido_ate, dias_para_vencer, status`,
+             RETURNING id, emitente_id, nome_arquivo, valido_ate, dias_para_vencer, status, focus_sincronizado`,
             [tenantId, emitente_id, nome_arquivo, encryptedPfx, encryptedSenha, dataVenc, diffDias]
         );
 
-        return res.status(201).json({ success: true, data: rows[0] });
+        let focusSync = null;
+        if (sincronizar_focus !== false) {
+            const masterCfg = await TransporteService.getMasterFocusConfig();
+            const cnpjEmit = emitCheck.rows[0]?.cnpj;
+            if (masterCfg.temMasterToken && TransporteService.validarCnpjReal(cnpjEmit)) {
+                try {
+                    focusSync = await TransporteService.provisionarEmpresaFocus(tenantId, emitente_id, {
+                        incluirCertificado: true,
+                        registrarWebhooks: true,
+                    });
+                } catch (syncErr) {
+                    focusSync = { success: false, erro: syncErr.message };
+                }
+            }
+        }
+
+        return res.status(201).json({ success: true, data: rows[0], focus_sync: focusSync });
     } catch (err) {
         return res.status(500).json({ error: err.message });
+    }
+});
+
+router.post('/certificados/:id/sincronizar-focus', async (req, res) => {
+    const tenantId = req.tenant.id;
+    try {
+        const { rows } = await db.query(
+            `SELECT id, emitente_id FROM dash_certificados WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
+            [parseInt(req.params.id, 10), tenantId]
+        );
+        if (rows.length === 0) {
+            return res.status(404).json({ error: 'Certificado não encontrado.' });
+        }
+        const result = await TransporteService.provisionarEmpresaFocus(tenantId, rows[0].emitente_id, {
+            incluirCertificado: true,
+            registrarWebhooks: true,
+        });
+        return res.json(result);
+    } catch (err) {
+        return res.status(400).json({ error: err.message });
     }
 });
 
@@ -2775,6 +3176,17 @@ router.get('/timeline/:tipo/:id', async (req, res) => {
         if (rows.length === 0) return res.status(404).json({ error: 'Documento não encontrado.' });
 
         const doc = rows[0];
+        let emitAmb = 'homologacao';
+        if (doc.emitente_id) {
+            const emAmbRes = await db.query(
+                `SELECT focus_ambiente FROM dash_emitentes WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
+                [doc.emitente_id, tenantId]
+            ).catch(() => ({ rows: [] }));
+            emitAmb = emAmbRes.rows[0]?.focus_ambiente || 'homologacao';
+        }
+        doc.caminho_xml = FocusClient.normalizarUrlArquivo(doc.caminho_xml, emitAmb);
+        if (doc.caminho_dacte) doc.caminho_dacte = FocusClient.normalizarUrlArquivo(doc.caminho_dacte, emitAmb);
+        if (doc.caminho_damdfe) doc.caminho_damdfe = FocusClient.normalizarUrlArquivo(doc.caminho_damdfe, emitAmb);
         const eventos = [];
 
         // Evento de criação

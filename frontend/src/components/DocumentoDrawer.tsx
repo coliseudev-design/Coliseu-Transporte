@@ -119,6 +119,33 @@ export default function DocumentoDrawer({ tipo, documentoId, onClose, onVerRotei
     return cores[status] || 'bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300';
   };
 
+  const handleBaixarArquivo = async (formato: 'pdf' | 'xml', fallbackUrl?: string) => {
+    if (!doc?.id) return;
+    try {
+      const res = await api.get(`/transporte/documentos/${tipo}/${doc.id}/download/${formato}`, {
+        responseType: 'blob'
+      });
+      const mime = formato === 'xml' ? 'application/xml' : 'application/pdf';
+      const blob = new Blob([res.data], { type: mime });
+      const blobUrl = URL.createObjectURL(blob);
+      if (formato === 'pdf') {
+        window.open(blobUrl, '_blank', 'noopener,noreferrer');
+      } else {
+        const link = document.createElement('a');
+        link.href = blobUrl;
+        link.download = `${tipo.toLowerCase()}-${doc.chave_cte || doc.chave_mdfe || doc.id}.xml`;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+      }
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+    } catch {
+      if (fallbackUrl) {
+        window.open(fallbackUrl, '_blank', 'noopener,noreferrer');
+      }
+    }
+  };
+
   return (
     <>
       {/* Backdrop */}
@@ -321,27 +348,25 @@ export default function DocumentoDrawer({ tipo, documentoId, onClose, onVerRotei
                   <div>
                     <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-2">Arquivos</p>
                     <div className="flex flex-wrap gap-2">
-                      {(tipo === 'CTE' ? doc.caminho_xml : doc.caminho_xml) && (
-                        <a
-                          href={doc.caminho_xml}
-                          target="_blank"
-                          rel="noreferrer"
+                      {doc.caminho_xml && (
+                        <button
+                          type="button"
+                          onClick={() => handleBaixarArquivo('xml', doc.caminho_xml)}
                           className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 text-xs font-medium text-slate-700 dark:text-slate-200"
                         >
                           <Download className="w-3.5 h-3.5" />
                           XML
-                        </a>
+                        </button>
                       )}
                       {(tipo === 'CTE' ? doc.caminho_dacte : doc.caminho_damdfe) && (
-                        <a
-                          href={tipo === 'CTE' ? doc.caminho_dacte : doc.caminho_damdfe}
-                          target="_blank"
-                          rel="noreferrer"
+                        <button
+                          type="button"
+                          onClick={() => handleBaixarArquivo('pdf', tipo === 'CTE' ? doc.caminho_dacte : doc.caminho_damdfe)}
                           className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 text-xs font-medium text-slate-700 dark:text-slate-200"
                         >
                           <Eye className="w-3.5 h-3.5" />
                           {tipo === 'CTE' ? 'DACTE (PDF)' : 'DAMDFE (PDF)'}
-                        </a>
+                        </button>
                       )}
                       {!doc.caminho_xml && !(tipo === 'CTE' ? doc.caminho_dacte : doc.caminho_damdfe) && (
                         <span className="text-xs text-slate-400 italic">

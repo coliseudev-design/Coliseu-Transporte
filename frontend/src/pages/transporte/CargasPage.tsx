@@ -1,11 +1,12 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import api from '../../services/api';
 import TabelaResponsiva from '../../components/TabelaResponsiva';
 import {
   Package, Truck, FileText, ChevronRight,
-  Search, List, LayoutGrid, Calendar, User, Printer, Copy, X, MapPin
+  Search, List, LayoutGrid, Calendar, User, Printer, Copy, X, MapPin,
+  Upload, CloudDownload, Loader2, CheckCircle2, AlertTriangle, ShieldCheck
 } from 'lucide-react';
 
 interface CargaItem {
@@ -148,6 +149,117 @@ export default function CargasPage() {
   const [mdfeUfInicio, setMdfeUfInicio] = useState('MS');
   const [mdfeUfFim, setMdfeUfFim] = useState('MS');
   const [submittingMdfe, setSubmittingMdfe] = useState(false);
+
+  // Importação de XML de NF-e e Busca Automática MDe na SEFAZ (Focus NFe /v2/nfes_recebidas)
+  const xmlInputRef = useRef<HTMLInputElement>(null);
+  const [importandoXml, setImportandoXml] = useState(false);
+  const [cargasBanner, setCargasBanner] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [modalMdeOpen, setModalMdeOpen] = useState(false);
+  const [sincronizandoMde, setSincronizandoMde] = useState(false);
+  const [mdeAutoCiencia, setMdeAutoCiencia] = useState(true);
+  const [mdeDesdeInicio, setMdeDesdeInicio] = useState(false);
+  const [mdeChaveInput, setMdeChaveInput] = useState('');
+  const [mdeTipoManifesto, setMdeTipoManifesto] = useState<'ciencia' | 'confirmacao' | 'desconhecimento' | 'nao_realizada'>('ciencia');
+  const [mdeJustificativa, setMdeJustificativa] = useState('');
+  const [manifestandoChave, setManifestandoChave] = useState(false);
+  const [mdeFeedback, setMdeFeedback] = useState<{ ok: boolean; msg: string } | null>(null);
+
+  const handleImportarXmls = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+    setImportandoXml(true);
+    setCargasBanner(null);
+    try {
+      const arquivos = await Promise.all(
+        files.map(async (f) => ({
+          nome: f.name,
+          xml: await f.text()
+        }))
+      );
+      const res = await api.post('/transporte/cargas/importar-xml', { arquivos });
+      const d = res.data;
+      await refetch();
+      if (d?.erros?.length > 0 && d?.importadas === 0) {
+        setCargasBanner({
+          ok: false,
+          msg: `Falha ao importar XML: ${d.erros[0]?.erro || 'Arquivo XML inválido.'}`
+        });
+      } else {
+        const avisoErros = d?.erros?.length ? ` (${d.erros.length} com aviso)` : '';
+        setCargasBanner({
+          ok: true,
+          msg: `${d?.importadas || 0} NF-e(s) importada(s) via XML com sucesso e prontas para emissão de CT-e ou MDF-e!${avisoErros}`
+        });
+      }
+    } catch (err: any) {
+      setCargasBanner({
+        ok: false,
+        msg: err.response?.data?.error || err.message || 'Erro ao importar arquivos XML de NF-e.'
+      });
+    } finally {
+      setImportandoXml(false);
+      if (xmlInputRef.current) xmlInputRef.current.value = '';
+    }
+  };
+
+  const handleSincronizarMdeSefaz = async () => {
+    setSincronizandoMde(true);
+    setMdeFeedback(null);
+    try {
+      const res = await api.post('/transporte/mde/sincronizar', {
+        emitente_id: emitenteId ? Number(emitenteId) : (emitentes[0]?.id || undefined),
+        auto_ciencia: mdeAutoCiencia,
+        desde_inicio: mdeDesdeInicio
+      });
+      const d = res.data;
+      await refetch();
+      setMdeFeedback({
+        ok: true,
+        msg: `Sincronização SEFAZ concluída (${d?.ambiente || 'producao'}): ${d?.importadas || 0} NF-e(s) processada(s), ${d?.xml_completos || 0} XML(s) completo(s) e ${d?.manifestadas_ciencia || 0} Ciência(s) automática(s).`
+      });
+    } catch (err: any) {
+      setMdeFeedback({
+        ok: false,
+        msg: err.response?.data?.error || err.message || 'Falha ao consultar NF-es recebidas na Focus NFe / SEFAZ.'
+      });
+    } finally {
+      setSincronizandoMde(false);
+    }
+  };
+
+  const handleManifestarChaveMde = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const chaveLimpa = mdeChaveInput.replace(/\D/g, '');
+    if (chaveLimpa.length !== 44) {
+      setMdeFeedback({ ok: false, msg: 'Informe uma chave de acesso válida de 44 dígitos da NF-e.' });
+      return;
+    }
+    setManifestandoChave(true);
+    setMdeFeedback(null);
+    try {
+      const res = await api.post(`/transporte/mde/${chaveLimpa}/manifestar`, {
+        tipo: mdeTipoManifesto,
+        justificativa: mdeJustificativa || undefined,
+        emitente_id: emitenteId ? Number(emitenteId) : (emitentes[0]?.id || undefined)
+      });
+      await refetch();
+      setMdeChaveInput('');
+      setMdeJustificativa('');
+      setMdeFeedback({
+        ok: true,
+        msg: res.data?.xml_completo_importado
+          ? `Manifestação (${mdeTipoManifesto}) registrada na SEFAZ e XML completo da NF-e importado na Central de Cargas!`
+          : `Manifestação (${mdeTipoManifesto}) registrada na SEFAZ! Assim que a Receita liberar o XML completo, clique em Sincronizar NF-es.`
+      });
+    } catch (err: any) {
+      setMdeFeedback({
+        ok: false,
+        msg: err.response?.data?.error || err.message || 'Falha ao registrar manifestação na SEFAZ.'
+      });
+    } finally {
+      setManifestandoChave(false);
+    }
+  };
 
   // Cargas carregadas e seleção atual
   const cargas: Carga[] = data?.data || [];
@@ -371,6 +483,36 @@ export default function CargasPage() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+          <input
+            ref={xmlInputRef}
+            type="file"
+            accept=".xml,text/xml,application/xml"
+            multiple
+            onChange={handleImportarXmls}
+            className="hidden"
+          />
+
+          <button
+            type="button"
+            onClick={() => xmlInputRef.current?.click()}
+            disabled={importandoXml}
+            className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-semibold text-slate-700 dark:text-slate-200 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-700 disabled:opacity-50 transition-all"
+            title="Importar arquivos XML de NF-e para emissão imediata de CT-e ou MDF-e"
+          >
+            {importandoXml ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4 text-sky-600" />}
+            {importandoXml ? 'Importando...' : 'Importar XML NF-e'}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => { setMdeFeedback(null); setModalMdeOpen(true); }}
+            className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-semibold text-teal-700 dark:text-teal-300 bg-teal-50 dark:bg-teal-950/50 border border-teal-200 dark:border-teal-800 hover:bg-teal-100 dark:hover:bg-teal-900/50 transition-all"
+            title="Buscar NF-es emitidas contra o CNPJ na SEFAZ e registrar Ciência da Operação (Focus MDe)"
+          >
+            <CloudDownload className="w-4 h-4" />
+            Buscar SEFAZ (MDe)
+          </button>
+
           {/* ÚNICO par de botões de emissão — reage à seleção */}
           <button
             onClick={() => {
@@ -405,6 +547,28 @@ export default function CargasPage() {
           </button>
         </div>
       </div>
+
+      {cargasBanner && (
+        <div className={`flex items-center justify-between gap-3 p-4 rounded-2xl text-xs font-medium ${
+          cargasBanner.ok
+            ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-800 dark:text-emerald-200 border border-emerald-200 dark:border-emerald-800/60'
+            : 'bg-red-50 dark:bg-red-950/40 text-red-800 dark:text-red-200 border border-red-200 dark:border-red-800/60'
+        }`}>
+          <div className="flex items-center gap-2">
+            {cargasBanner.ok
+              ? <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+              : <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" />}
+            <span>{cargasBanner.msg}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setCargasBanner(null)}
+            className="p-1 rounded-lg hover:bg-black/5 dark:hover:bg-white/10"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
 
       {/* Barra de Filtros e Busca */}
       <div className="bg-white dark:bg-slate-800 p-4 rounded-2xl border border-slate-200/80 dark:border-slate-700/80 space-y-3">
@@ -538,6 +702,26 @@ export default function CargasPage() {
               Ajuste os filtros de período, cliente ou busca. O Worker continua sincronizando novas notas automaticamente.
             </p>
           )}
+
+          <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
+            <button
+              type="button"
+              onClick={() => xmlInputRef.current?.click()}
+              disabled={importandoXml}
+              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-bold shadow-sm transition-colors"
+            >
+              <Upload className="w-4 h-4" />
+              Importar XML de NF-e
+            </button>
+            <button
+              type="button"
+              onClick={() => { setMdeFeedback(null); setModalMdeOpen(true); }}
+              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-teal-600 hover:bg-teal-700 text-white text-xs font-bold shadow-sm transition-colors"
+            >
+              <CloudDownload className="w-4 h-4" />
+              Buscar NF-es Destinadas na SEFAZ (MDe)
+            </button>
+          </div>
         </div>
       ) : viewMode === 'lista' ? (
         /* MODO LISTA (TABELA OPERACIONAL DENSIDADE PRO - PADRÃO) */
@@ -1382,6 +1566,160 @@ export default function CargasPage() {
             >
               Limpar
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Busca Automática de NF-es Recebidas & Manifestação do Destinatário (Focus MDe /v2/nfes_recebidas) */}
+      {modalMdeOpen && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-slate-800 rounded-3xl shadow-2xl w-full max-w-2xl border border-slate-200 dark:border-slate-700 overflow-hidden max-h-[90vh] flex flex-col">
+            <div className="p-6 border-b border-slate-100 dark:border-slate-700/60 flex items-center justify-between bg-teal-50/50 dark:bg-teal-950/30">
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 rounded-2xl bg-teal-600 text-white">
+                  <CloudDownload className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-slate-900 dark:text-white">
+                    Busca de NF-es na SEFAZ & Manifestação (MDe)
+                  </h3>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    Sincroniza notas destinadas ao CNPJ via Focus NFe (<code>/v2/nfes_recebidas</code>) e registra Ciência da Operação.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setModalMdeOpen(false)}
+                className="p-2 rounded-xl text-slate-400 hover:bg-slate-200/70 dark:hover:bg-slate-700"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-6 overflow-y-auto text-sm">
+              {mdeFeedback && (
+                <div className={`flex items-start gap-2.5 p-3.5 rounded-2xl text-xs font-medium ${
+                  mdeFeedback.ok
+                    ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-800 dark:text-emerald-200 border border-emerald-200 dark:border-emerald-800/60'
+                    : 'bg-red-50 dark:bg-red-950/40 text-red-800 dark:text-red-200 border border-red-200 dark:border-red-800/60'
+                }`}>
+                  {mdeFeedback.ok
+                    ? <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                    : <AlertTriangle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />}
+                  <span>{mdeFeedback.msg}</span>
+                </div>
+              )}
+
+              {/* Bloco 1: Sincronização Automática do Lote MDe */}
+              <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900/50 border border-slate-200/80 dark:border-slate-700/80 space-y-3">
+                <h4 className="text-xs font-bold text-slate-800 dark:text-slate-200 uppercase tracking-wider flex items-center gap-2">
+                  <ShieldCheck className="w-4 h-4 text-teal-600" />
+                  1. Sincronizar Notas Emitidas contra o CNPJ
+                </h4>
+                <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+                  A Focus NFe consulta continuamente o Ambiente Nacional da SEFAZ usando seu Certificado Digital A1 e importa todas as NF-es destinadas direto para a Central de Cargas.
+                </p>
+
+                <label className="flex items-center gap-2.5 text-xs text-slate-700 dark:text-slate-300 cursor-pointer pt-1">
+                  <input
+                    type="checkbox"
+                    checked={mdeAutoCiencia}
+                    onChange={e => setMdeAutoCiencia(e.target.checked)}
+                    className="rounded border-slate-300 text-teal-600 focus:ring-teal-500"
+                  />
+                  <span>Dar <strong>Ciência da Emissão</strong> automaticamente para liberar o download do XML completo na SEFAZ</span>
+                </label>
+
+                <label className="flex items-center gap-2.5 text-xs text-slate-700 dark:text-slate-300 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={mdeDesdeInicio}
+                    onChange={e => setMdeDesdeInicio(e.target.checked)}
+                    className="rounded border-slate-300 text-teal-600 focus:ring-teal-500"
+                  />
+                  <span>Reprocessar desde a versão inicial (<code>versao=0</code>)</span>
+                </label>
+
+                <div className="pt-2">
+                  <button
+                    type="button"
+                    onClick={handleSincronizarMdeSefaz}
+                    disabled={sincronizandoMde}
+                    className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-teal-600 hover:bg-teal-700 text-white text-xs font-bold shadow-sm disabled:opacity-50 transition-all"
+                  >
+                    {sincronizandoMde ? <Loader2 className="w-4 h-4 animate-spin" /> : <CloudDownload className="w-4 h-4" />}
+                    {sincronizandoMde ? 'Consultando SEFAZ via Focus NFe...' : 'Sincronizar NF-es Destinadas Agora'}
+                  </button>
+                </div>
+              </div>
+
+              {/* Bloco 2: Manifestação Individual por Chave de 44 Dígitos */}
+              <form onSubmit={handleManifestarChaveMde} className="p-4 rounded-2xl border border-slate-200/80 dark:border-slate-700/80 space-y-3">
+                <h4 className="text-xs font-bold text-slate-800 dark:text-slate-200 uppercase tracking-wider">
+                  2. Manifestar NF-e Específica por Chave de Acesso (44 dígitos)
+                </h4>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div className="sm:col-span-2">
+                    <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
+                      Chave de Acesso da NF-e (44 dígitos)
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="Ex: 50260400000000000100550010000012341000012345"
+                      value={mdeChaveInput}
+                      onChange={e => setMdeChaveInput(e.target.value.replace(/\D/g, '').slice(0, 44))}
+                      className="w-full px-3.5 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-xs font-mono text-slate-900 dark:text-white"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
+                      Evento SEFAZ
+                    </label>
+                    <select
+                      value={mdeTipoManifesto}
+                      onChange={e => setMdeTipoManifesto(e.target.value as any)}
+                      className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-xs text-slate-900 dark:text-white"
+                    >
+                      <option value="ciencia">Ciência da Emissão</option>
+                      <option value="confirmacao">Confirmação da Operação</option>
+                      <option value="desconhecimento">Desconhecimento</option>
+                      <option value="nao_realizada">Operação não Realizada</option>
+                    </select>
+                  </div>
+                </div>
+
+                {mdeTipoManifesto === 'nao_realizada' && (
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
+                      Justificativa SEFAZ (mínimo 15 caracteres) *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      minLength={15}
+                      value={mdeJustificativa}
+                      onChange={e => setMdeJustificativa(e.target.value)}
+                      placeholder="Informe o motivo da não realização da operação..."
+                      className="w-full px-3.5 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-xs text-slate-900 dark:text-white"
+                    />
+                  </div>
+                )}
+
+                <div className="flex justify-end pt-1">
+                  <button
+                    type="submit"
+                    disabled={manifestandoChave || mdeChaveInput.replace(/\D/g, '').length !== 44}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-slate-900 dark:bg-slate-700 hover:bg-slate-800 text-white text-xs font-semibold disabled:opacity-50 transition-colors"
+                  >
+                    {manifestandoChave ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
+                    Registrar Manifestação na SEFAZ
+                  </button>
+                </div>
+              </form>
+            </div>
           </div>
         </div>
       )}

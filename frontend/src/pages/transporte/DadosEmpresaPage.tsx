@@ -1,9 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import api from '../../services/api';
+import { useAuthStore } from '../../store/authStore';
 import {
   Building2, ShieldCheck, KeyRound, Save,
-  CheckCircle2, MapPin, FileText, Wifi, Loader2, AlertTriangle
+  CheckCircle2, MapPin, FileText, Wifi, Loader2, AlertTriangle,
+  Zap, Webhook, ChevronDown, ChevronUp, Lock, RefreshCw, Search
 } from 'lucide-react';
 
 interface EmitenteForm {
@@ -12,6 +14,7 @@ interface EmitenteForm {
   razao_social: string;
   nome_fantasia: string;
   inscricao_estadual: string;
+  inscricao_municipal: string;
   regime_tributario: string;
   rntrc: string;
   focus_token: string;
@@ -35,16 +38,55 @@ interface EmitenteForm {
   aliquota_icms_padrao: string;
 }
 
+function validarCnpj14(valor: string): boolean {
+  const c = String(valor || '').replace(/\D/g, '');
+  if (c.length !== 14) return false;
+  if (/^(\d)\1{13}$/.test(c)) return false;
+  const calc = (base: string, pesos: number[]) => {
+    let soma = 0;
+    for (let i = 0; i < pesos.length; i++) soma += Number(base[i]) * pesos[i];
+    const resto = soma % 11;
+    return resto < 2 ? 0 : 11 - resto;
+  };
+  const d1 = calc(c.slice(0, 12), [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]);
+  const d2 = calc(c.slice(0, 12) + String(d1), [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]);
+  return Number(c[12]) === d1 && Number(c[13]) === d2;
+}
+
+function formatarCnpjMask(valor: string): string {
+  const d = String(valor || '').replace(/\D/g, '').slice(0, 14);
+  if (d.length <= 2) return d;
+  if (d.length <= 5) return `${d.slice(0, 2)}.${d.slice(2)}`;
+  if (d.length <= 8) return `${d.slice(0, 2)}.${d.slice(2, 5)}.${d.slice(5)}`;
+  if (d.length <= 12) return `${d.slice(0, 2)}.${d.slice(2, 5)}.${d.slice(5, 8)}/${d.slice(8)}`;
+  return `${d.slice(0, 2)}.${d.slice(2, 5)}.${d.slice(5, 8)}/${d.slice(8, 12)}-${d.slice(12)}`;
+}
+
 export default function DadosEmpresaPage() {
   const qc = useQueryClient();
+  const user = useAuthStore(s => s.user);
+
   const [testingAmb, setTestingAmb] = useState<'homologacao' | 'producao' | null>(null);
   const [testResult, setTestResult] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [feedbackBanner, setFeedbackBanner] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [manualTokensOpen, setManualTokensOpen] = useState(false);
+  const [provisionando, setProvisionando] = useState(false);
+  const [registrandoHooks, setRegistrandoHooks] = useState(false);
+  const [trocandoAmb, setTrocandoAmb] = useState(false);
+  const [buscandoCep, setBuscandoCep] = useState(false);
+
+  // Estado Super Admin Master (Software House Focus NFe)
+  const [masterTokenInput, setMasterTokenInput] = useState('');
+  const [webhookBaseUrlInput, setWebhookBaseUrlInput] = useState('');
+  const [masterFeedback, setMasterFeedback] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [testingMaster, setTestingMaster] = useState(false);
 
   const [form, setForm] = useState<EmitenteForm>({
     cnpj: '',
     razao_social: '',
     nome_fantasia: '',
     inscricao_estadual: '',
+    inscricao_municipal: '',
     regime_tributario: '3',
     rntrc: '',
     focus_token: '',
@@ -74,16 +116,38 @@ export default function DadosEmpresaPage() {
   });
 
   const emitentes = data?.data || [];
+  const meta = data?.meta || {};
   const emAtual = emitentes[0];
+
+  const isMasterAdmin = Boolean(
+    meta?.is_super_admin_master ||
+    user?.role === 'master' ||
+    user?.tenant_id === '00000000-0000-0000-0000-000000000000'
+  );
+
+  const { data: masterCfgResp, refetch: refetchMasterCfg } = useQuery({
+    queryKey: ['focus-master-config'],
+    queryFn: async () => (await api.get('/transporte/focus/master-config')).data,
+    enabled: isMasterAdmin,
+    retry: false
+  });
+  const masterCfg = masterCfgResp?.data;
+
+  useEffect(() => {
+    if (masterCfg?.webhook_base_url && !webhookBaseUrlInput) {
+      setWebhookBaseUrlInput(masterCfg.webhook_base_url);
+    }
+  }, [masterCfg?.webhook_base_url]);
 
   useEffect(() => {
     if (emAtual) {
       setForm({
         id: emAtual.id,
-        cnpj: emAtual.cnpj || '',
+        cnpj: formatarCnpjMask(emAtual.cnpj || ''),
         razao_social: emAtual.razao_social || '',
         nome_fantasia: emAtual.nome_fantasia || '',
         inscricao_estadual: emAtual.inscricao_estadual || '',
+        inscricao_municipal: emAtual.inscricao_municipal || '',
         regime_tributario: String(emAtual.regime_tributario || '3'),
         rntrc: emAtual.rntrc || '',
         focus_token: '',
@@ -107,20 +171,170 @@ export default function DadosEmpresaPage() {
         aliquota_icms_padrao: String(emAtual.aliquota_icms_padrao ?? '12.00')
       });
     }
-  }, [emAtual?.id]);
+  }, [emAtual?.id, emAtual?.cnpj]);
 
-  const salvar = useMutation({
-    mutationFn: async (payload: EmitenteForm) => api.post('/transporte/emitentes', payload),
+  const cnpjDigitos = String(form.cnpj || '').replace(/\D/g, '');
+  const cnpjValido = validarCnpj14(cnpjDigitos);
+  const softwareHouseAtiva = Boolean(meta?.software_house_disponivel || masterCfg?.tem_master_token);
+
+  const invalidarConsultas = () => {
+    qc.invalidateQueries({ queryKey: ['empresa-emitente'] });
+    qc.invalidateQueries({ queryKey: ['emitentes'] });
+    qc.invalidateQueries({ queryKey: ['emitentes-cargas'] });
+    qc.invalidateQueries({ queryKey: ['emitentes-certificados'] });
+  };
+
+  const salvarMasterMutation = useMutation({
+    mutationFn: async () =>
+      api.post('/transporte/focus/master-config', {
+        master_token: masterTokenInput.trim() || undefined,
+        webhook_base_url: webhookBaseUrlInput.trim() || undefined
+      }),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['empresa-emitente'] });
-      qc.invalidateQueries({ queryKey: ['emitentes'] });
-      qc.invalidateQueries({ queryKey: ['emitentes-cargas'] });
-      alert('Dados fiscais e credenciais Focus NFe atualizados com sucesso!');
+      setMasterTokenInput('');
+      refetchMasterCfg();
+      invalidarConsultas();
+      setMasterFeedback({
+        ok: true,
+        msg: 'Token Principal da Conta Parceiro Focus NFe cifrado em AES-256-GCM e salvo com sucesso!'
+      });
     },
     onError: (err: any) => {
-      alert('Erro ao salvar dados: ' + (err.response?.data?.error || err.message));
+      setMasterFeedback({
+        ok: false,
+        msg: err.response?.data?.error || err.message || 'Erro ao salvar Token Principal.'
+      });
     }
   });
+
+  const handleTestarMasterToken = async () => {
+    setTestingMaster(true);
+    setMasterFeedback(null);
+    try {
+      const res = await api.post('/transporte/focus/master-testar', {
+        master_token: masterTokenInput.trim() || undefined
+      });
+      const d = res.data?.data || res.data;
+      setMasterFeedback({
+        ok: Boolean(d?.conectado),
+        msg: d?.mensagem || 'Token Principal validado com sucesso na Focus NFe!'
+      });
+    } catch (err: any) {
+      setMasterFeedback({
+        ok: false,
+        msg: err.response?.data?.error || err.message || 'Falha ao validar Token Principal.'
+      });
+    } finally {
+      setTestingMaster(false);
+    }
+  };
+
+  const salvar = useMutation({
+    mutationFn: async (payload: EmitenteForm) =>
+      api.post('/transporte/emitentes', {
+        ...payload,
+        cnpj: String(payload.cnpj || '').replace(/\D/g, '')
+      }),
+    onSuccess: () => {
+      invalidarConsultas();
+      setForm(prev => ({ ...prev, focus_token_homologacao: '', focus_token_producao: '' }));
+      setFeedbackBanner({
+        ok: true,
+        msg: 'Dados fiscais da transportadora e credenciais Focus NFe salvos com sucesso!'
+      });
+    },
+    onError: (err: any) => {
+      setFeedbackBanner({
+        ok: false,
+        msg: 'Erro ao salvar dados: ' + (err.response?.data?.error || err.message)
+      });
+    }
+  });
+
+  const handleAlternarAmbiente = async (novoAmb: 'homologacao' | 'producao') => {
+    setForm(prev => ({ ...prev, focus_ambiente: novoAmb }));
+    if (!form.id) return;
+    setTrocandoAmb(true);
+    setFeedbackBanner(null);
+    try {
+      const res = await api.patch(`/transporte/emitentes/${form.id}/ambiente`, { ambiente: novoAmb });
+      invalidarConsultas();
+      setFeedbackBanner({
+        ok: true,
+        msg: res.data?.mensagem || `Ambiente alterado para ${novoAmb.toUpperCase()}.`
+      });
+    } catch (err: any) {
+      setFeedbackBanner({
+        ok: false,
+        msg: err.response?.data?.error || err.message || 'Falha ao alternar ambiente.'
+      });
+    } finally {
+      setTrocandoAmb(false);
+    }
+  };
+
+  const handleProvisionarAutomatico = async () => {
+    setFeedbackBanner(null);
+    setTestResult(null);
+
+    if (!cnpjValido) {
+      setFeedbackBanner({
+        ok: false,
+        msg: 'Informe um CNPJ real de 14 dígitos (ex: 00.000.000/0001-00) antes de provisionar a empresa na Focus NFe.'
+      });
+      return;
+    }
+
+    setProvisionando(true);
+    try {
+      // 1. Persiste os dados fiscais atuais primeiro
+      const saveRes = await api.post('/transporte/emitentes', {
+        ...form,
+        cnpj: cnpjDigitos
+      });
+      const savedEmitenteId = saveRes.data?.data?.id || form.id;
+
+      // 2. Provisiona / sincroniza na conta Focus NFe (/v2/empresas + certificado A1 + /v2/hooks)
+      const provRes = await api.post('/transporte/emitentes/provisionar-focus', {
+        emitente_id: savedEmitenteId,
+        registrar_webhooks: true,
+        incluir_certificado: true
+      });
+      invalidarConsultas();
+      setFeedbackBanner({
+        ok: true,
+        msg: provRes.data?.mensagem || 'Transportadora provisionada e tokens Focus NFe sincronizados com sucesso!'
+      });
+    } catch (err: any) {
+      setFeedbackBanner({
+        ok: false,
+        msg: err.response?.data?.error || err.message || 'Falha ao provisionar empresa na Focus NFe.'
+      });
+    } finally {
+      setProvisionando(false);
+    }
+  };
+
+  const handleRegistrarWebhooks = async () => {
+    if (!form.id) return;
+    setRegistrandoHooks(true);
+    setFeedbackBanner(null);
+    try {
+      const res = await api.post(`/transporte/emitentes/${form.id}/webhooks-focus`);
+      invalidarConsultas();
+      setFeedbackBanner({
+        ok: true,
+        msg: `Webhooks de CT-e e MDF-e registrados/validados com sucesso (${res.data?.registrados || 0} gatilho(s) ativo(s))!`
+      });
+    } catch (err: any) {
+      setFeedbackBanner({
+        ok: false,
+        msg: err.response?.data?.error || err.message || 'Erro ao registrar webhooks na Focus NFe.'
+      });
+    } finally {
+      setRegistrandoHooks(false);
+    }
+  };
 
   const handleTestarFocus = async (ambiente: 'homologacao' | 'producao') => {
     setTestingAmb(ambiente);
@@ -132,7 +346,7 @@ export default function DadosEmpresaPage() {
         ambiente,
         token: tokenDigitado || undefined
       });
-      const d = res.data?.data;
+      const d = res.data?.data || res.data;
       setTestResult({
         ok: Boolean(d?.conectado),
         msg: d?.mensagem || (d?.conectado ? `Conexão Focus NFe (${ambiente}) validada!` : 'Falha na autenticação Focus NFe')
@@ -147,13 +361,47 @@ export default function DadosEmpresaPage() {
     }
   };
 
+  const handleBuscarCep = async (cepValor?: string) => {
+    const limpo = String(cepValor ?? form.cep ?? '').replace(/\D/g, '');
+    if (limpo.length !== 8) return;
+    setBuscandoCep(true);
+    try {
+      const resp = await fetch(`https://viacep.com.br/ws/${limpo}/json/`);
+      const json = await resp.json();
+      if (json && !json.erro) {
+        setForm(prev => ({
+          ...prev,
+          cep: limpo,
+          logradouro: json.logradouro || prev.logradouro,
+          bairro: json.bairro || prev.bairro,
+          municipio: json.localidade || prev.municipio,
+          uf: (json.uf || prev.uf).toUpperCase(),
+          codigo_municipio: json.ibge || prev.codigo_municipio
+        }));
+      }
+    } catch {
+      // silencioso caso offline
+    } finally {
+      setBuscandoCep(false);
+    }
+  };
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    setFeedbackBanner(null);
+    if (!cnpjValido) {
+      setFeedbackBanner({
+        ok: false,
+        msg: 'O CNPJ informado é inválido. Digite os 14 dígitos reais do CNPJ da transportadora.'
+      });
+      return;
+    }
     salvar.mutate(form);
   };
 
   return (
     <div className="space-y-6 pb-20 max-w-5xl mx-auto">
+      {/* Cabeçalho */}
       <div className="bg-white dark:bg-slate-800 p-6 rounded-2xl shadow-sm border border-slate-200/80 dark:border-slate-700/80 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-white flex items-center gap-3">
@@ -161,10 +409,10 @@ export default function DadosEmpresaPage() {
             Dados da Empresa (Emitente Fiscal CT-e / MDF-e)
           </h1>
           <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
-            Configurações fiscais da transportadora junto à SEFAZ e tokens de Homologação e Produção da Focus NFe.
+            Provisionamento automático na Focus NFe v2, Certificado A1, Webhooks SEFAZ e parâmetros fiscais.
           </p>
         </div>
-        <span className={`px-3 py-1.5 rounded-full text-xs font-bold uppercase tracking-wider self-start sm:self-auto ${
+        <span className={`px-3.5 py-1.5 rounded-full text-xs font-bold uppercase tracking-wider self-start sm:self-auto ${
           form.focus_ambiente === 'producao'
             ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300'
             : 'bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300'
@@ -173,89 +421,326 @@ export default function DadosEmpresaPage() {
         </span>
       </div>
 
-      <form onSubmit={handleSubmit} className="bg-white dark:bg-slate-800 p-8 rounded-2xl shadow-sm border border-slate-200/80 dark:border-slate-700/80 space-y-7 text-sm">
-        {/* 1. Credenciais Focus NFe (Homologação e Produção) */}
-        <div className="p-5 rounded-2xl bg-slate-50 dark:bg-slate-900/50 border border-slate-200/80 dark:border-slate-700/80 space-y-4">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-            <h3 className="text-xs font-bold text-slate-700 dark:text-slate-200 uppercase tracking-wider flex items-center gap-2">
-              <KeyRound className="w-4 h-4 text-brand-600" />
-              Credenciais e Ambiente Focus NFe v2 (CT-e / CT-e OS / MDF-e)
-            </h3>
-            <div className="flex items-center gap-2 text-[11px]">
-              <span className={`px-2 py-0.5 rounded font-semibold ${emAtual?.tem_token_homologacao ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300' : 'bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-400'}`}>
-                Homologação: {emAtual?.tem_token_homologacao ? `Configurado (${emAtual.token_homologacao_preview})` : 'Pendente'}
+      {/* Painel Exclusivo Super Admin Master — Conta Software House Focus NFe (Coliseu Sistemas) */}
+      {isMasterAdmin && (
+        <div className="bg-slate-900 text-white p-6 rounded-2xl shadow-md border border-slate-700/80 space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-teal-500/20 text-teal-300 border border-teal-500/30 mb-1.5">
+                <Lock className="w-3 h-3" />
+                Exclusivo Super Admin Master · Cofre AES-256-GCM
               </span>
-              <span className={`px-2 py-0.5 rounded font-semibold ${emAtual?.tem_token_producao ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300' : 'bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-400'}`}>
-                Produção: {emAtual?.tem_token_producao ? `Configurado (${emAtual.token_producao_preview})` : 'Pendente'}
+              <h2 className="text-base font-bold text-white flex items-center gap-2">
+                Conta Parceiro Focus NFe — Software House (Coliseu Sistemas)
+              </h2>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Informe o <strong>Token principal produção</strong> do Painel API da Focus NFe (<code>/v2/empresas</code>) para criar empresas, enviar certificados A1 e gerar tokens automaticamente.
+              </p>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <span className={`px-3 py-1 rounded-xl text-xs font-bold ${
+                masterCfg?.tem_master_token
+                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                  : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+              }`}>
+                {masterCfg?.tem_master_token
+                  ? `Ativo (${masterCfg.master_token_preview} · ${masterCfg.origem === 'cofre_db' ? 'Cofre DB' : 'ENV'})`
+                  : 'Token Principal Pendente'}
               </span>
             </div>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div>
-              <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1.5">
-                Ambiente Ativo de Emissão *
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-3 pt-1">
+            <div className="md:col-span-6">
+              <label className="block text-[11px] font-semibold text-slate-300 mb-1">
+                Token Principal Produção (Revenda / Software House Focus NFe)
               </label>
-              <select
-                value={form.focus_ambiente}
-                onChange={e => setForm({ ...form, focus_ambiente: e.target.value as 'homologacao' | 'producao' })}
-                className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white font-semibold focus:ring-2 focus:ring-brand-500"
+              <input
+                type="password"
+                placeholder={
+                  masterCfg?.tem_master_token
+                    ? `Salvo no cofre (${masterCfg.master_token_preview}) — cole novo token p/ substituir`
+                    : 'Cole o Token principal produção do Painel API Focus NFe...'
+                }
+                value={masterTokenInput}
+                onChange={e => setMasterTokenInput(e.target.value)}
+                className="w-full px-3.5 py-2.5 bg-slate-950/80 border border-slate-700 rounded-xl text-white font-mono text-xs focus:outline-none focus:ring-2 focus:ring-teal-500"
+              />
+            </div>
+
+            <div className="md:col-span-6">
+              <label className="block text-[11px] font-semibold text-slate-300 mb-1">
+                URL Pública da Plataforma (Destino automático dos Webhooks SEFAZ)
+              </label>
+              <input
+                type="url"
+                placeholder="https://transporte.coliseusistemas.com.br"
+                value={webhookBaseUrlInput}
+                onChange={e => setWebhookBaseUrlInput(e.target.value)}
+                className="w-full px-3.5 py-2.5 bg-slate-950/80 border border-slate-700 rounded-xl text-white font-mono text-xs focus:outline-none focus:ring-2 focus:ring-teal-500"
+              />
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+            <span className="text-[11px] text-slate-400 font-mono truncate">
+              Webhook: {masterCfg?.webhook_endpoint || 'https://transporte.coliseusistemas.com.br/api/webhooks/focus'}
+            </span>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleTestarMasterToken}
+                disabled={testingMaster || (!masterCfg?.tem_master_token && !masterTokenInput.trim())}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 text-xs font-semibold disabled:opacity-50 transition-colors"
               >
-                <option value="homologacao">Homologação (Testes SEFAZ)</option>
-                <option value="producao">Produção (Validade Jurídica)</option>
-              </select>
-            </div>
+                {testingMaster ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Wifi className="w-3.5 h-3.5 text-teal-400" />}
+                Testar Token Principal
+              </button>
 
-            <div>
-              <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1.5">
-                Token Focus NFe — Homologação
-              </label>
-              <div className="flex gap-2">
-                <input
-                  type="password"
-                  placeholder={emAtual?.tem_token_homologacao ? `Salvo (${emAtual.token_homologacao_preview}) — digite p/ alterar` : 'Cole o token de Homologação'}
-                  value={form.focus_token_homologacao}
-                  onChange={e => setForm({ ...form, focus_token_homologacao: e.target.value })}
-                  className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white font-mono text-xs focus:ring-2 focus:ring-brand-500"
-                />
-                <button
-                  type="button"
-                  onClick={() => handleTestarFocus('homologacao')}
-                  disabled={testingAmb !== null}
-                  title="Testar conexão em Homologação"
-                  className="px-3 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold shrink-0 flex items-center gap-1 disabled:opacity-50"
-                >
-                  {testingAmb === 'homologacao' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Wifi className="w-3.5 h-3.5" />}
-                  Testar
-                </button>
-              </div>
-            </div>
-
-            <div>
-              <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1.5">
-                Token Focus NFe — Produção
-              </label>
-              <div className="flex gap-2">
-                <input
-                  type="password"
-                  placeholder={emAtual?.tem_token_producao ? `Salvo (${emAtual.token_producao_preview}) — digite p/ alterar` : 'Cole o token de Produção'}
-                  value={form.focus_token_producao}
-                  onChange={e => setForm({ ...form, focus_token_producao: e.target.value })}
-                  className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white font-mono text-xs focus:ring-2 focus:ring-brand-500"
-                />
-                <button
-                  type="button"
-                  onClick={() => handleTestarFocus('producao')}
-                  disabled={testingAmb !== null}
-                  title="Testar conexão em Produção"
-                  className="px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold shrink-0 flex items-center gap-1 disabled:opacity-50"
-                >
-                  {testingAmb === 'producao' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Wifi className="w-3.5 h-3.5" />}
-                  Testar
-                </button>
-              </div>
+              <button
+                type="button"
+                onClick={() => salvarMasterMutation.mutate()}
+                disabled={salvarMasterMutation.isPending || (!masterTokenInput.trim() && !webhookBaseUrlInput.trim())}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-teal-600 hover:bg-teal-500 text-white text-xs font-bold disabled:opacity-50 transition-colors shadow-sm"
+              >
+                {salvarMasterMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ShieldCheck className="w-3.5 h-3.5" />}
+                Salvar no Cofre Master
+              </button>
             </div>
           </div>
+
+          {masterFeedback && (
+            <div className={`flex items-center gap-2 p-3 rounded-xl text-xs font-medium ${
+              masterFeedback.ok
+                ? 'bg-emerald-950/70 text-emerald-200 border border-emerald-700/60'
+                : 'bg-red-950/70 text-red-200 border border-red-700/60'
+            }`}>
+              {masterFeedback.ok
+                ? <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                : <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />}
+              <span>{masterFeedback.msg}</span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Formulário Principal da Transportadora */}
+      <form onSubmit={handleSubmit} className="bg-white dark:bg-slate-800 p-8 rounded-2xl shadow-sm border border-slate-200/80 dark:border-slate-700/80 space-y-7 text-sm">
+        {feedbackBanner && (
+          <div className={`flex items-start gap-2.5 p-4 rounded-2xl text-xs font-medium ${
+            feedbackBanner.ok
+              ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-800 dark:text-emerald-200 border border-emerald-200 dark:border-emerald-800/60'
+              : 'bg-red-50 dark:bg-red-950/40 text-red-800 dark:text-red-200 border border-red-200 dark:border-red-800/60'
+          }`}>
+            {feedbackBanner.ok
+              ? <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+              : <AlertTriangle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />}
+            <span>{feedbackBanner.msg}</span>
+          </div>
+        )}
+
+        {/* 1. Provisionamento Automático, Ambiente e Credenciais Focus NFe v2 */}
+        <div className="p-5 rounded-2xl bg-slate-50 dark:bg-slate-900/50 border border-slate-200/80 dark:border-slate-700/80 space-y-4">
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+            <div>
+              <h3 className="text-xs font-bold text-slate-800 dark:text-slate-100 uppercase tracking-wider flex items-center gap-2">
+                <KeyRound className="w-4 h-4 text-brand-600" />
+                Credenciais e Provisionamento Focus NFe v2 (CT-e / CT-e OS / MDF-e / MDe)
+              </h3>
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                {emAtual?.focus_empresa_id
+                  ? `Vinculada na Focus NFe (Empresa ID #${emAtual.focus_empresa_id}) · Última sinc.: ${emAtual.focus_sincronizado_em ? new Date(emAtual.focus_sincronizado_em).toLocaleString('pt-BR') : '—'}`
+                  : 'Preencha o CNPJ real, IE e endereço fiscal abaixo e clique em Provisionar Automaticamente.'}
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 text-[11px]">
+              <span className={`px-2.5 py-1 rounded-lg font-semibold ${
+                emAtual?.tem_token_homologacao
+                  ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300'
+                  : 'bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-400'
+              }`}>
+                Homologação: {emAtual?.tem_token_homologacao ? `Ativo (${emAtual.token_homologacao_preview})` : 'Pendente'}
+              </span>
+              <span className={`px-2.5 py-1 rounded-lg font-semibold ${
+                emAtual?.tem_token_producao
+                  ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300'
+                  : 'bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-400'
+              }`}>
+                Produção: {emAtual?.tem_token_producao ? `Ativo (${emAtual.token_producao_preview})` : 'Pendente'}
+              </span>
+              <span className={`px-2.5 py-1 rounded-lg font-semibold ${
+                emAtual?.focus_hooks_ativos
+                  ? 'bg-sky-100 text-sky-700 dark:bg-sky-950/60 dark:text-sky-300'
+                  : 'bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-400'
+              }`}>
+                Webhooks: {emAtual?.focus_hooks_ativos ? 'Ativos' : 'Pendentes'}
+              </span>
+            </div>
+          </div>
+
+          {/* Chave Seletora Rápida de Ambiente (Homologação <-> Produção) */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <button
+              type="button"
+              disabled={trocandoAmb}
+              onClick={() => handleAlternarAmbiente('homologacao')}
+              className={`p-3.5 rounded-xl border text-left transition-all flex items-center justify-between ${
+                form.focus_ambiente === 'homologacao'
+                  ? 'bg-amber-50 dark:bg-amber-950/40 border-amber-400 dark:border-amber-600 ring-2 ring-amber-400/30'
+                  : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 hover:border-amber-300'
+              }`}
+            >
+              <div>
+                <p className="text-xs font-bold text-slate-900 dark:text-white">
+                  Homologação (Testes SEFAZ)
+                </p>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                  Emissões sem valor fiscal para validação de CT-e e MDF-e
+                </p>
+              </div>
+              {form.focus_ambiente === 'homologacao' && (
+                <CheckCircle2 className="w-5 h-5 text-amber-600 dark:text-amber-400 shrink-0" />
+              )}
+            </button>
+
+            <button
+              type="button"
+              disabled={trocandoAmb}
+              onClick={() => handleAlternarAmbiente('producao')}
+              className={`p-3.5 rounded-xl border text-left transition-all flex items-center justify-between ${
+                form.focus_ambiente === 'producao'
+                  ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-500 dark:border-emerald-600 ring-2 ring-emerald-500/30'
+                  : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 hover:border-emerald-300'
+              }`}
+            >
+              <div>
+                <p className="text-xs font-bold text-slate-900 dark:text-white">
+                  Produção (Validade Jurídica SEFAZ)
+                </p>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                  Autorização oficial com valor fiscal e protocolo SEFAZ
+                </p>
+              </div>
+              {form.focus_ambiente === 'producao' && (
+                <CheckCircle2 className="w-5 h-5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+              )}
+            </button>
+          </div>
+
+          {/* Barra de Ações Automáticas via Conta Parceiro Focus NFe */}
+          <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-200/70 dark:border-slate-800">
+            <div className="flex flex-wrap items-center gap-2.5">
+              <button
+                type="button"
+                onClick={handleProvisionarAutomatico}
+                disabled={provisionando || !softwareHouseAtiva}
+                title={
+                  softwareHouseAtiva
+                    ? 'Salva os dados fiscais, cadastra/atualiza a empresa na Focus NFe, envia o Certificado A1 e configura os Webhooks'
+                    : 'Aguardando configuração do Token Principal pelo Super Admin Master'
+                }
+                className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-sm disabled:opacity-50 transition-all"
+              >
+                {provisionando ? <Loader2 className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
+                {provisionando
+                  ? 'Sincronizando com Focus NFe...'
+                  : emAtual?.focus_empresa_id
+                  ? 'Sincronizar Dados, Certificado e Tokens na Focus NFe'
+                  : 'Provisionar Automaticamente na Focus NFe'}
+              </button>
+
+              {(emAtual?.tem_token_homologacao || emAtual?.tem_token_producao) && form.id && (
+                <button
+                  type="button"
+                  onClick={handleRegistrarWebhooks}
+                  disabled={registrandoHooks}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 text-xs font-semibold disabled:opacity-50 transition-colors"
+                >
+                  {registrandoHooks ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Webhook className="w-3.5 h-3.5 text-sky-600" />}
+                  Registrar Webhooks SEFAZ
+                </button>
+              )}
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setManualTokensOpen(v => !v)}
+              className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white"
+            >
+              {manualTokensOpen ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+              Informar ou testar tokens manualmente
+            </button>
+          </div>
+
+          {!softwareHouseAtiva && !emAtual?.tem_token_homologacao && !emAtual?.tem_token_producao && (
+            <p className="text-[11px] text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/50 rounded-xl px-3 py-2">
+              O Token Principal da Software House ainda não está configurado. Peça ao administrador Master para configurar acima ou informe os tokens manualmente.
+            </p>
+          )}
+
+          {emAtual?.focus_ultimo_erro && (
+            <div className="flex items-start gap-2 p-3 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 text-xs text-amber-800 dark:text-amber-200">
+              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+              <span>Último aviso Focus NFe: {emAtual.focus_ultimo_erro}</span>
+            </div>
+          )}
+
+          {/* Painel Colapsável para Tokens Manuais e Teste Individual */}
+          {manualTokensOpen && (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-3 border-t border-slate-200/70 dark:border-slate-800">
+              <div>
+                <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1.5">
+                  Token Focus NFe — Homologação (Opcional se provisionado)
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    type="password"
+                    placeholder={emAtual?.tem_token_homologacao ? `Salvo (${emAtual.token_homologacao_preview}) — digite p/ alterar` : 'Cole o token de Homologação'}
+                    value={form.focus_token_homologacao}
+                    onChange={e => setForm({ ...form, focus_token_homologacao: e.target.value })}
+                    className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white font-mono text-xs focus:ring-2 focus:ring-brand-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => handleTestarFocus('homologacao')}
+                    disabled={testingAmb !== null}
+                    title="Testar conexão em Homologação"
+                    className="px-3.5 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold shrink-0 flex items-center gap-1.5 disabled:opacity-50"
+                  >
+                    {testingAmb === 'homologacao' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Wifi className="w-3.5 h-3.5" />}
+                    Testar
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1.5">
+                  Token Focus NFe — Produção (Opcional se provisionado)
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    type="password"
+                    placeholder={emAtual?.tem_token_producao ? `Salvo (${emAtual.token_producao_preview}) — digite p/ alterar` : 'Cole o token de Produção'}
+                    value={form.focus_token_producao}
+                    onChange={e => setForm({ ...form, focus_token_producao: e.target.value })}
+                    className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white font-mono text-xs focus:ring-2 focus:ring-brand-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => handleTestarFocus('producao')}
+                    disabled={testingAmb !== null}
+                    title="Testar conexão em Produção"
+                    className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold shrink-0 flex items-center gap-1.5 disabled:opacity-50"
+                  >
+                    {testingAmb === 'producao' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Wifi className="w-3.5 h-3.5" />}
+                    Testar
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {testResult && (
             <div className={`flex items-center gap-2 p-3 rounded-xl text-xs font-medium ${
@@ -278,11 +763,21 @@ export default function DadosEmpresaPage() {
             <input
               type="text"
               required
-              placeholder="00.000.000/0000-00"
+              placeholder="00.000.000/0001-00"
               value={form.cnpj}
-              onChange={e => setForm({ ...form, cnpj: e.target.value })}
-              className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white font-mono focus:ring-2 focus:ring-brand-500"
+              onChange={e => setForm({ ...form, cnpj: formatarCnpjMask(e.target.value) })}
+              className={`w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border rounded-xl text-slate-900 dark:text-white font-mono focus:ring-2 focus:ring-brand-500 ${
+                cnpjDigitos.length > 0 && !cnpjValido
+                  ? 'border-red-400 dark:border-red-600'
+                  : 'border-slate-200 dark:border-slate-700'
+              }`}
             />
+            {cnpjDigitos.length > 0 && !cnpjValido && (
+              <p className="text-[11px] text-red-600 dark:text-red-400 mt-1 flex items-center gap-1">
+                <AlertTriangle className="w-3 h-3 shrink-0" />
+                CNPJ inválido ({cnpjDigitos.length}/14 dígitos). Informe o CNPJ real da transportadora.
+              </p>
+            )}
           </div>
 
           <div>
@@ -292,7 +787,7 @@ export default function DadosEmpresaPage() {
             <input
               type="text"
               required
-              placeholder="Inscrição Estadual SEFAZ"
+              placeholder="Inscrição Estadual SEFAZ ou ISENTO"
               value={form.inscricao_estadual}
               onChange={e => setForm({ ...form, inscricao_estadual: e.target.value })}
               className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white font-mono focus:ring-2 focus:ring-brand-500"
@@ -308,7 +803,7 @@ export default function DadosEmpresaPage() {
               required
               placeholder="8 dígitos (ex: 12345678)"
               value={form.rntrc}
-              onChange={e => setForm({ ...form, rntrc: e.target.value.replace(/\D/g, '') })}
+              onChange={e => setForm({ ...form, rntrc: e.target.value.replace(/\D/g, '').slice(0, 14) })}
               className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white font-mono focus:ring-2 focus:ring-brand-500"
             />
           </div>
@@ -348,6 +843,32 @@ export default function DadosEmpresaPage() {
             Endereço e Localização Fiscal do Emitente (Obrigatório para CT-e e MDF-e)
           </h3>
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <div>
+              <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1.5">
+                CEP *
+              </label>
+              <div className="flex gap-1.5">
+                <input
+                  type="text"
+                  required
+                  placeholder="79800-000"
+                  value={form.cep}
+                  onChange={e => setForm({ ...form, cep: e.target.value })}
+                  onBlur={e => handleBuscarCep(e.target.value)}
+                  className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white font-mono"
+                />
+                <button
+                  type="button"
+                  onClick={() => handleBuscarCep(form.cep)}
+                  disabled={buscandoCep}
+                  title="Preencher endereço e código IBGE pelo CEP"
+                  className="px-2.5 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300"
+                >
+                  {buscandoCep ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
+                </button>
+              </div>
+            </div>
+
             <div className="md:col-span-2">
               <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1.5">
                 Logradouro (Rua / Av.) *
@@ -387,20 +908,6 @@ export default function DadosEmpresaPage() {
                 value={form.bairro}
                 onChange={e => setForm({ ...form, bairro: e.target.value })}
                 className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white"
-              />
-            </div>
-
-            <div>
-              <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1.5">
-                CEP *
-              </label>
-              <input
-                type="text"
-                required
-                placeholder="79800-000"
-                value={form.cep}
-                onChange={e => setForm({ ...form, cep: e.target.value })}
-                className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white font-mono"
               />
             </div>
 
@@ -471,7 +978,20 @@ export default function DadosEmpresaPage() {
               />
             </div>
 
-            <div className="md:col-span-2">
+            <div>
+              <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1.5">
+                Inscrição Municipal (CT-e OS)
+              </label>
+              <input
+                type="text"
+                placeholder="Opcional"
+                value={form.inscricao_municipal}
+                onChange={e => setForm({ ...form, inscricao_municipal: e.target.value })}
+                className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white font-mono"
+              />
+            </div>
+
+            <div>
               <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1.5">
                 E-mail Fiscal (notificações XML/DACTE)
               </label>
@@ -571,14 +1091,14 @@ export default function DadosEmpresaPage() {
           </div>
         </div>
 
-        <div className="flex justify-end pt-4 border-t border-slate-100 dark:border-slate-700/60">
+        <div className="flex flex-wrap items-center justify-end gap-3 pt-4 border-t border-slate-100 dark:border-slate-700/60">
           <button
             type="submit"
             disabled={salvar.isPending}
             className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl text-sm font-semibold text-white bg-brand-600 hover:bg-brand-700 disabled:opacity-50 shadow-sm transition-all"
           >
-            <Save className="w-4 h-4" />
-            {salvar.isPending ? 'Salvando...' : 'Salvar Dados Fiscais e Tokens Focus NFe'}
+            {salvar.isPending ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+            {salvar.isPending ? 'Salvando...' : 'Salvar Dados Fiscais'}
           </button>
         </div>
       </form>
