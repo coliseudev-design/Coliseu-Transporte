@@ -705,13 +705,13 @@ export default function Usuarios() {
                   <div className="space-y-2">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
-                        <div className={`p-2 rounded-xl text-white font-bold text-xs uppercase ${isMaster ? 'bg-purple-600' : isComercial ? 'bg-blue-600' : 'bg-indigo-600'}`}>
+                        <div className={`p-2 rounded-xl text-white font-bold text-xs uppercase ${isMaster ? 'bg-cyan-600' : isComercial ? 'bg-blue-600' : 'bg-indigo-600'}`}>
                           <Shield size={16} />
                         </div>
                         <div>
                           <h3 className="font-extrabold text-text-primary text-base flex items-center gap-2">
                             {g.nome}
-                            {isMaster && <span className="text-[10px] bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full font-bold">Total / Mestre</span>}
+                            {isMaster && <span className="text-[10px] bg-cyan-100 text-cyan-700 px-2 py-0.5 rounded-full font-bold">Total / Mestre</span>}
                             {isComercial && <span className="text-[10px] bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full font-bold font-mono">Sem Financeiro</span>}
                           </h3>
                           <span className="text-xs text-text-secondary font-medium">

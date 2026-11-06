@@ -16,7 +16,7 @@ const C = {
   blue: '#3B82F6',
   slate: '#64748B',
   gray200: '#E2E8F0',
-  purple: '#8B5CF6'
+  cyan: '#0891B2'
 }
 
 export default function Estatisticas() {
@@ -397,7 +397,7 @@ export default function Estatisticas() {
               <div className="flex items-center justify-between border-b border-slate-100 pb-2">
                 <div>
                   <h3 className="text-xs font-black text-slate-800 uppercase tracking-wider flex items-center gap-1.5">
-                    <FileCode className="text-purple-600" size={16} /> Estatística de Softwares & Módulos
+                    <FileCode className="text-cyan-600" size={16} /> Estatística de Softwares & Módulos
                   </h3>
                   <p className="text-[10px] text-slate-500">Módulos contratados das views COLISEU_ESTATISTICAS</p>
                 </div>
@@ -405,7 +405,7 @@ export default function Estatisticas() {
                 {/* BOTÃO GRÁFICO / TABELA */}
                 <button
                   onClick={() => setViewModeSoftware(v => v === 'tabela' ? 'grafico' : 'tabela')}
-                  className="px-2.5 py-1 text-[11px] font-extrabold rounded-md bg-purple-50 text-purple-700 hover:bg-purple-100 border border-purple-200 transition-all flex items-center gap-1 cursor-pointer"
+                  className="px-2.5 py-1 text-[11px] font-extrabold rounded-md bg-cyan-50 text-cyan-700 hover:bg-cyan-100 border border-cyan-200 transition-all flex items-center gap-1 cursor-pointer"
                 >
                   {viewModeSoftware === 'tabela' ? (
                     <><BarChart2 size={13} /> Ver Gráfico</>
@@ -432,12 +432,12 @@ export default function Estatisticas() {
                         return (
                           <tr key={idx} className="hover:bg-slate-50/80 transition-colors">
                             <td className="p-2 font-extrabold text-slate-900 flex items-center gap-1.5">
-                              <CheckCircle2 size={13} className="text-purple-600 shrink-0" />
+                              <CheckCircle2 size={13} className="text-cyan-600 shrink-0" />
                               {s.nome}
                             </td>
                             <td className="p-2 text-right font-bold text-slate-800 font-mono">{s.qtd}</td>
-                            <td className="p-2 text-right font-black text-purple-700">{formatBRL(s.valor)}</td>
-                            <td className="p-2 text-right font-bold text-purple-600 bg-purple-50/30">{pctVal}%</td>
+                            <td className="p-2 text-right font-black text-cyan-700">{formatBRL(s.valor)}</td>
+                            <td className="p-2 text-right font-bold text-cyan-600 bg-cyan-50/30">{pctVal}%</td>
                           </tr>
                         )
                       })}
@@ -452,7 +452,7 @@ export default function Estatisticas() {
                       <XAxis type="number" tick={{ fontSize: 9, fill: C.slate }} axisLine={false} tickFormatter={v => formatBRLCompact(v)} />
                       <YAxis type="category" dataKey="nome" tick={{ fontSize: 8, fill: C.slate, fontWeight: 'bold' }} axisLine={false} width={135} />
                       <Tooltip formatter={(v: number) => formatBRL(v)} />
-                      <Bar dataKey="valor" name="Valor Estimado (R$)" fill={C.purple} radius={[0, 4, 4, 0]} maxBarSize={16} />
+                      <Bar dataKey="valor" name="Valor Estimado (R$)" fill={C.cyan} radius={[0, 4, 4, 0]} maxBarSize={16} />
                     </BarChart>
                   </ResponsiveContainer>
                 </div>

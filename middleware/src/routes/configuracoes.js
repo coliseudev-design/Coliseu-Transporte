@@ -5,6 +5,15 @@ const router = express.Router();
 const config = require('../config/env');
 const logger = require('../config/logger');
 const { resolvePublicImageUrl } = require('../utils/imageHandler');
+const { requireAdmin } = require('../middleware/auth');
+const {
+    decryptSecret,
+    maskSecret,
+    isMaskedValue,
+    resolveSecretForSave,
+    decryptIntegracoesRow,
+    maskIntegracoesRow
+} = require('../utils/cryptoVault');
 
 /**
  * @route GET /api/configuracoes/empresa
@@ -223,7 +232,7 @@ router.get('/integracoes', async (req, res, next) => {
         const realCode = filialRes.rows[0]?.depto_id || 1;
 
         if (rows.length === 0) {
-            // Insere dados iniciais
+            // Insere dados iniciais sem tokens sensíveis embutidos
             const insertRes = await db.query(
                 `INSERT INTO dash_integracoes_config (
                     tenant_id, clicksign_ambiente, salario_minimo_anterior, salario_minimo_atual,
@@ -231,7 +240,7 @@ router.get('/integracoes', async (req, res, next) => {
                     whatsapp_api_provider, empresa_codigo, empresa_nome, empresa_razao_social, empresa_cnpj, empresa_ie,
                     empresa_tipo, empresa_regiao, empresa_endereco, empresa_numero, empresa_bairro, empresa_cep, empresa_fone1, empresa_email, empresa_site
                  )
-                 VALUES ($1, 'Sandbox', 1412.00, 1502.00, 'https://coliseu.uazapi.com', '7bec3c90-89fe-466a-8a64-88d1d107a594', '5567984028572', true, 'uazapi', $2, $3, $3, $4, 'Isento', 'MULTI-EMPRESA', 'CAMPO GRANDE', 'AVENIDA EDUARDO ELIAS ZAHRAN', '807', 'JARDIM PAULISTA', '79004-000', '(67) 3042-3506', 'contato@coliseusistemas.com.br', 'www.coliseusistemas.com.br')
+                 VALUES ($1, 'Sandbox', 1412.00, 1502.00, 'https://coliseu.uazapi.com', '', '', false, 'uazapi', $2, $3, $3, $4, 'Isento', 'MULTI-EMPRESA', 'CAMPO GRANDE', 'AVENIDA EDUARDO ELIAS ZAHRAN', '807', 'JARDIM PAULISTA', '79004-000', '(67) 3042-3506', 'contato@coliseusistemas.com.br', 'www.coliseusistemas.com.br')
                  RETURNING *`,
                 [tenantId, realCode, realNome, realDoc]
             );
@@ -283,28 +292,30 @@ router.get('/integracoes', async (req, res, next) => {
             rows[0].focus_cep = rows[0].focus_cep || emit.cep || rows[0].empresa_cep || '';
         }
 
-        res.json({ data: rows[0] });
+        res.json({ data: maskIntegracoesRow(rows[0]) });
     } catch (err) {
         next(err);
     }
 });
 
 // POST /api/configuracoes/test-ai-connection
-router.post('/test-ai-connection', async (req, res, next) => {
+router.post('/test-ai-connection', requireAdmin, async (req, res, next) => {
     try {
         let { provider, ai_api_key } = req.body;
         const tenantId = req.tenant.id;
         
-        // Se a chave vier vazia ou mascarada, busca a chave correspondente no banco
-        if (!ai_api_key || ai_api_key.includes('...') || ai_api_key.includes('*')) {
+        // Se a chave vier vazia ou mascarada, busca e decifra a chave correspondente no banco
+        if (!ai_api_key || isMaskedValue(ai_api_key)) {
             const dbRes = await db.query('SELECT * FROM dash_integracoes_config WHERE tenant_id = $1 LIMIT 1', [tenantId]);
-            const config = dbRes.rows[0] || {};
+            const dbConf = decryptIntegracoesRow(dbRes.rows[0] || {});
             
-            if (provider === 'openai') ai_api_key = config.ai_openai_key || config.ai_api_key;
-            else if (provider === 'deepseek') ai_api_key = config.ai_deepseek_key || config.ai_api_key;
-            else if (provider === 'gemini') ai_api_key = config.ai_gemini_key;
-            else if (provider === 'manus') ai_api_key = config.ai_manus_key;
-            else ai_api_key = config.ai_api_key;
+            if (provider === 'openai') ai_api_key = dbConf.ai_openai_key || dbConf.ai_api_key;
+            else if (provider === 'deepseek') ai_api_key = dbConf.ai_deepseek_key || dbConf.ai_api_key;
+            else if (provider === 'gemini') ai_api_key = dbConf.ai_gemini_key;
+            else if (provider === 'manus') ai_api_key = dbConf.ai_manus_key;
+            else ai_api_key = dbConf.ai_api_key;
+        } else {
+            ai_api_key = decryptSecret(ai_api_key);
         }
 
         if (!ai_api_key) {
@@ -441,7 +452,8 @@ router.get('/ai-usage', async (req, res, next) => {
             [tenantId]
         ).catch(() => ({ rows: [] }));
 
-        const deepseekKey = confRows[0]?.ai_deepseek_key || confRows[0]?.ai_api_key || null;
+        const rawDeepseekKey = confRows[0]?.ai_deepseek_key || confRows[0]?.ai_api_key || null;
+        const deepseekKey = rawDeepseekKey ? decryptSecret(rawDeepseekKey) : null;
 
         const { rows: statsRows } = await db.query(
             `SELECT provider, COALESCE(SUM(cost), 0.000000) as spent
@@ -510,7 +522,7 @@ router.get('/ai-usage', async (req, res, next) => {
 });
 
 // POST /api/configuracoes/integracoes
-router.post('/integracoes', async (req, res, next) => {
+router.post('/integracoes', requireAdmin, async (req, res, next) => {
     const client = await db.pool.connect();
     try {
         // Garantir que todas as colunas mais recentes existam no banco antes de salvar
@@ -532,6 +544,9 @@ router.post('/integracoes', async (req, res, next) => {
             ADD COLUMN IF NOT EXISTS ai_prompt_cobranca TEXT,
             ADD COLUMN IF NOT EXISTS ai_prompt_contratos TEXT,
             ADD COLUMN IF NOT EXISTS ai_prompt_bi TEXT,
+            ADD COLUMN IF NOT EXISTS asaas_webhook_secret TEXT,
+            ADD COLUMN IF NOT EXISTS focus_webhook_secret TEXT,
+            ADD COLUMN IF NOT EXISTS whatsapp_meta_app_secret TEXT,
             ADD COLUMN IF NOT EXISTS focus_token_homologacao TEXT,
             ADD COLUMN IF NOT EXISTS focus_token_producao TEXT,
             ADD COLUMN IF NOT EXISTS focus_ambiente VARCHAR(20) DEFAULT 'homologacao',
@@ -555,14 +570,17 @@ router.post('/integracoes', async (req, res, next) => {
 
         await db.query(`
             ALTER TABLE dash_emitentes
-            ADD COLUMN IF NOT EXISTS focus_token_homologacao VARCHAR(255),
-            ADD COLUMN IF NOT EXISTS focus_token_producao VARCHAR(255),
+            ADD COLUMN IF NOT EXISTS focus_token_homologacao TEXT,
+            ADD COLUMN IF NOT EXISTS focus_token_producao TEXT,
             ADD COLUMN IF NOT EXISTS regime_tributario VARCHAR(2) DEFAULT '1',
             ADD COLUMN IF NOT EXISTS cfop_padrao_cte VARCHAR(8) DEFAULT '5353',
             ADD COLUMN IF NOT EXISTS natureza_padrao_cte VARCHAR(255) DEFAULT 'PRESTACAO DE SERVICO DE TRANSPORTE',
             ADD COLUMN IF NOT EXISTS aliquota_icms_padrao NUMERIC(7,4) DEFAULT 12.00,
             ADD COLUMN IF NOT EXISTS complemento VARCHAR(120),
             ADD COLUMN IF NOT EXISTS email VARCHAR(255);
+            ALTER TABLE dash_emitentes ALTER COLUMN focus_token TYPE TEXT;
+            ALTER TABLE dash_emitentes ALTER COLUMN focus_token_homologacao TYPE TEXT;
+            ALTER TABLE dash_emitentes ALTER COLUMN focus_token_producao TYPE TEXT;
         `).catch(() => {});
 
         await client.query('BEGIN');
@@ -715,25 +733,19 @@ router.post('/integracoes', async (req, res, next) => {
             ? rawRemetenteEmail 
             : (oldConf?.email_remetente || null);
 
-        const finalSmtpPass = (email_smtp_pass && !String(email_smtp_pass).includes('...') && !String(email_smtp_pass).includes('•') && !String(email_smtp_pass).includes('*'))
-            ? email_smtp_pass
-            : (oldConf?.email_smtp_pass || null);
-
-        const finalOpenaiKey = (ai_openai_key && !String(ai_openai_key).includes('...') && !String(ai_openai_key).includes('•') && !String(ai_openai_key).includes('*'))
-            ? ai_openai_key
-            : (oldConf?.ai_openai_key || null);
-
-        const finalDeepseekKey = (ai_deepseek_key && !String(ai_deepseek_key).includes('...') && !String(ai_deepseek_key).includes('•') && !String(ai_deepseek_key).includes('*'))
-            ? ai_deepseek_key
-            : (oldConf?.ai_deepseek_key || null);
-
-        const finalGeminiKey = (ai_gemini_key && !String(ai_gemini_key).includes('...') && !String(ai_gemini_key).includes('•') && !String(ai_gemini_key).includes('*'))
-            ? ai_gemini_key
-            : (oldConf?.ai_gemini_key || null);
-
-        const finalManusKey = (ai_manus_key && !String(ai_manus_key).includes('...') && !String(ai_manus_key).includes('•') && !String(ai_manus_key).includes('*'))
-            ? ai_manus_key
-            : (oldConf?.ai_manus_key || null);
+        const finalAiApiKey = resolveSecretForSave(ai_api_key, oldConf?.ai_api_key);
+        const finalWhatsappToken = resolveSecretForSave(whatsapp_token, oldConf?.whatsapp_token);
+        const finalWhatsappMetaToken = resolveSecretForSave(whatsapp_meta_token, oldConf?.whatsapp_meta_token);
+        const finalClicksignToken = resolveSecretForSave(clicksign_token, oldConf?.clicksign_token);
+        const finalAsaasToken = resolveSecretForSave(asaas_access_token, oldConf?.asaas_access_token);
+        const finalAsaasWebhookSecret = resolveSecretForSave(asaas_webhook_secret, oldConf?.asaas_webhook_secret);
+        const finalCoraPrivateKey = resolveSecretForSave(cora_private_key, oldConf?.cora_private_key);
+        const finalSmtpPass = resolveSecretForSave(email_smtp_pass, oldConf?.email_smtp_pass);
+        const finalBrevoApiKey = resolveSecretForSave(email_brevo_api_key, oldConf?.email_brevo_api_key);
+        const finalOpenaiKey = resolveSecretForSave(ai_openai_key, oldConf?.ai_openai_key);
+        const finalDeepseekKey = resolveSecretForSave(ai_deepseek_key, oldConf?.ai_deepseek_key);
+        const finalGeminiKey = resolveSecretForSave(ai_gemini_key, oldConf?.ai_gemini_key);
+        const finalManusKey = resolveSecretForSave(ai_manus_key, oldConf?.ai_manus_key);
 
         const finalOpenaiActive = ai_openai_active !== undefined ? (ai_openai_active === true || ai_openai_active === 'true') : (oldConf?.ai_openai_active || false);
         const finalDeepseekActive = ai_deepseek_active !== undefined ? (ai_deepseek_active === true || ai_deepseek_active === 'true') : (oldConf?.ai_deepseek_active || false);
@@ -921,11 +933,11 @@ router.post('/integracoes', async (req, res, next) => {
              RETURNING *`,
             [
                 tenantId,
-                ai_api_key,
+                finalAiApiKey,
                 ai_system_prompt,
                 whatsapp_instancia_id,
-                whatsapp_token,
-                clicksign_token,
+                finalWhatsappToken,
+                finalClicksignToken,
                 clicksign_ambiente || 'Sandbox',
                 newSalarioAnterior,
                 newSalarioAtual,
@@ -939,20 +951,20 @@ router.post('/integracoes', async (req, res, next) => {
                 whatsapp_api_provider || 'uazapi',
                 whatsapp_meta_business_id,
                 whatsapp_meta_phone_id,
-                whatsapp_meta_token,
+                finalWhatsappMetaToken,
                 whatsapp_meta_verify_token,
                 whatsapp_permitir_multiplos_envios_dia !== undefined ? (whatsapp_permitir_multiplos_envios_dia === true || whatsapp_permitir_multiplos_envios_dia === 'true') : false,
-                asaas_access_token,
+                finalAsaasToken,
                 asaas_ambiente || 'Sandbox',
-                asaas_webhook_secret,
+                finalAsaasWebhookSecret,
                 asaas_juros_padrao !== undefined ? parseFloat(asaas_juros_padrao) : 1.00,
                 asaas_multa_padrao !== undefined ? parseFloat(asaas_multa_padrao) : 2.00,
                 asaas_desconto_padrao !== undefined ? parseFloat(asaas_desconto_padrao) : 0.00,
                 // Banco Cora
                 cora_ativo !== undefined ? (cora_ativo === true || cora_ativo === 'true') : false,
                 cora_client_id || 'int-6niGnUQSRUDauHBRYg0xCP',
-                cora_cert_pem || null,
-                cora_private_key || null,
+                cora_cert_pem !== undefined ? (cora_cert_pem || null) : (oldConf?.cora_cert_pem || null),
+                finalCoraPrivateKey,
                 cora_juros_padrao !== undefined ? parseFloat(cora_juros_padrao) : 1.00,
                 cora_multa_padrao !== undefined ? parseFloat(cora_multa_padrao) : 2.00,
                 cora_desconto_padrao !== undefined ? parseFloat(cora_desconto_padrao) : 0.00,
@@ -966,7 +978,7 @@ router.post('/integracoes', async (req, res, next) => {
                 email_smtp_secure !== undefined ? (email_smtp_secure === true || email_smtp_secure === 'true') : false,
                 finalRemetenteNome,
                 finalRemetenteEmail,
-                email_brevo_api_key || null,
+                finalBrevoApiKey,
                 // Portador e Espécie Padrão
                 portador_padrao_id ? parseInt(portador_padrao_id) : null,
                 portador_padrao_nome || null,
@@ -1069,16 +1081,10 @@ router.post('/integracoes', async (req, res, next) => {
             focus_cep
         } = req.body;
 
-        const cleanToken = (val, fallback) => {
-            if (val === undefined) return fallback || null;
-            if (!val || String(val).includes('...') || String(val).includes('•') || String(val).includes('*')) {
-                return fallback || null;
-            }
-            return String(val).trim();
-        };
-
-        const finalTokenHomolog = cleanToken(focus_token_homologacao, oldConf?.focus_token_homologacao);
-        const finalTokenProd = cleanToken(focus_token_producao, oldConf?.focus_token_producao);
+        const finalTokenHomolog = resolveSecretForSave(focus_token_homologacao, oldConf?.focus_token_homologacao);
+        const finalTokenProd = resolveSecretForSave(focus_token_producao, oldConf?.focus_token_producao);
+        const finalFocusWebhookSecret = resolveSecretForSave(req.body.focus_webhook_secret, oldConf?.focus_webhook_secret);
+        const finalMetaAppSecret = resolveSecretForSave(req.body.whatsapp_meta_app_secret, oldConf?.whatsapp_meta_app_secret);
         const finalFocusAmbiente = (focus_ambiente || oldConf?.focus_ambiente || 'homologacao').toLowerCase() === 'producao'
             ? 'producao'
             : 'homologacao';
@@ -1103,8 +1109,10 @@ router.post('/integracoes', async (req, res, next) => {
                  focus_numero = $16,
                  focus_complemento = $17,
                  focus_bairro = $18,
-                 focus_cep = $19
-             WHERE tenant_id = $20
+                 focus_cep = $19,
+                 focus_webhook_secret = $20,
+                 whatsapp_meta_app_secret = $21
+             WHERE tenant_id = $22
              RETURNING *`,
             [
                 finalTokenHomolog,
@@ -1126,6 +1134,8 @@ router.post('/integracoes', async (req, res, next) => {
                 focus_complemento !== undefined ? focus_complemento : (oldConf?.focus_complemento || empresa_complemento || null),
                 focus_bairro !== undefined ? focus_bairro : (oldConf?.focus_bairro || empresa_bairro || null),
                 focus_cep !== undefined ? String(focus_cep).replace(/\D/g, '') : (oldConf?.focus_cep || String(empresa_cep || '').replace(/\D/g, '') || null),
+                finalFocusWebhookSecret,
+                finalMetaAppSecret,
                 tenantId
             ]
         );
@@ -1253,7 +1263,7 @@ router.post('/integracoes', async (req, res, next) => {
         await client.query('COMMIT');
         res.json({
             success: true,
-            data: updatedConf,
+            data: maskIntegracoesRow(updatedConf),
             recalculation: {
                 applied: recalculouContratos,
                 installmentsCount: contratosContados,
@@ -1272,7 +1282,7 @@ router.post('/integracoes', async (req, res, next) => {
 });
 
 // DELETE /api/configuracoes/reset-automacoes
-router.delete('/reset-automacoes', async (req, res, next) => {
+router.delete('/reset-automacoes', requireAdmin, async (req, res, next) => {
     try {
         const tenantId = req.tenant.id;
         
@@ -1315,6 +1325,15 @@ async function initCedentesTable() {
     `).catch(() => {});
 }
 
+function maskCedenteRow(row) {
+    if (!row || typeof row !== 'object') return row;
+    return {
+        ...row,
+        api_token: maskSecret(row.api_token),
+        client_secret: maskSecret(row.client_secret)
+    };
+}
+
 // GET /api/configuracoes/cedentes
 router.get('/cedentes', async (req, res, next) => {
     try {
@@ -1329,12 +1348,13 @@ router.get('/cedentes', async (req, res, next) => {
         // Se não houver nenhum cadastrado, cria uma entrada padrão com Asaas
         if (rows.length === 0) {
             const configRes = await db.query(
-                `SELECT asaas_api_token, asaas_ambiente, asaas_juros_padrao, asaas_multa_padrao, asaas_desconto_padrao 
+                `SELECT asaas_access_token, asaas_ambiente, asaas_juros_padrao, asaas_multa_padrao, asaas_desconto_padrao 
                  FROM dash_integracoes_config WHERE tenant_id = $1 LIMIT 1`,
                 [tenantId]
             ).catch(() => ({ rows: [] }));
 
             const cfg = configRes.rows[0] || {};
+            const encryptedToken = resolveSecretForSave(null, cfg.asaas_access_token) || '';
 
             const inserted = await db.query(
                 `INSERT INTO dash_cedentes_bancarios 
@@ -1344,7 +1364,7 @@ router.get('/cedentes', async (req, res, next) => {
                 [
                     tenantId,
                     cfg.asaas_ambiente || 'Produção',
-                    cfg.asaas_api_token || '',
+                    encryptedToken,
                     cfg.asaas_juros_padrao || 1.0,
                     cfg.asaas_multa_padrao || 2.0,
                     cfg.asaas_desconto_padrao || 0.0
@@ -1385,14 +1405,14 @@ router.get('/cedentes', async (req, res, next) => {
             }
         }
 
-        res.json({ data: rows });
+        res.json({ data: rows.map(maskCedenteRow) });
     } catch (err) {
         next(err);
     }
 });
 
 // POST /api/configuracoes/cedentes
-router.post('/cedentes', async (req, res, next) => {
+router.post('/cedentes', requireAdmin, async (req, res, next) => {
     try {
         const tenantId = req.tenant.id;
         await initCedentesTable();
@@ -1410,6 +1430,9 @@ router.post('/cedentes', async (req, res, next) => {
             await db.query(`UPDATE dash_cedentes_bancarios SET is_default = false WHERE tenant_id = $1`, [tenantId]);
         }
 
+        const encryptedToken = resolveSecretForSave(api_token, null) || '';
+        const encryptedSecret = resolveSecretForSave(client_secret, null) || '';
+
         const { rows } = await db.query(
             `INSERT INTO dash_cedentes_bancarios 
              (tenant_id, nome, provedor_banco, ambiente, api_token, client_id, client_secret, convenio, agencia, conta, portador_nome_erp, juros_am, multa_pct, desconto_pct, ativo, is_default)
@@ -1420,9 +1443,9 @@ router.post('/cedentes', async (req, res, next) => {
                 nome,
                 provedor_banco || 'asaas',
                 ambiente || 'Produção',
-                api_token || '',
+                encryptedToken,
                 client_id || '',
-                client_secret || '',
+                encryptedSecret,
                 convenio || '',
                 agencia || '',
                 conta || '',
@@ -1435,17 +1458,26 @@ router.post('/cedentes', async (req, res, next) => {
             ]
         );
 
-        res.json({ success: true, data: rows[0] });
+        res.json({ success: true, data: maskCedenteRow(rows[0]) });
     } catch (err) {
         next(err);
     }
 });
 
 // PUT /api/configuracoes/cedentes/:id
-router.put('/cedentes/:id', async (req, res, next) => {
+router.put('/cedentes/:id', requireAdmin, async (req, res, next) => {
     try {
         const tenantId = req.tenant.id;
         const cedenteId = req.params.id;
+
+        const existingRes = await db.query(
+            `SELECT api_token, client_secret FROM dash_cedentes_bancarios WHERE tenant_id = $1 AND id = $2 LIMIT 1`,
+            [tenantId, cedenteId]
+        );
+        if (existingRes.rowCount === 0) {
+            return res.status(404).json({ error: 'Cedente não encontrado.' });
+        }
+        const existingRow = existingRes.rows[0];
 
         const {
             nome, provedor_banco, ambiente, api_token, client_id, client_secret,
@@ -1455,6 +1487,9 @@ router.put('/cedentes/:id', async (req, res, next) => {
         if (is_default) {
             await db.query(`UPDATE dash_cedentes_bancarios SET is_default = false WHERE tenant_id = $1`, [tenantId]);
         }
+
+        const resolvedApiToken = resolveSecretForSave(api_token, existingRow.api_token);
+        const resolvedClientSecret = resolveSecretForSave(client_secret, existingRow.client_secret);
 
         const { rows } = await db.query(
             `UPDATE dash_cedentes_bancarios
@@ -1477,7 +1512,7 @@ router.put('/cedentes/:id', async (req, res, next) => {
              WHERE tenant_id = $16 AND id = $17
              RETURNING *`,
             [
-                nome, provedor_banco, ambiente, api_token, client_id, client_secret,
+                nome, provedor_banco, ambiente, resolvedApiToken, client_id, resolvedClientSecret,
                 convenio, agencia, conta, portador_nome_erp,
                 juros_am !== undefined ? parseFloat(juros_am) : null,
                 multa_pct !== undefined ? parseFloat(multa_pct) : null,
@@ -1486,14 +1521,14 @@ router.put('/cedentes/:id', async (req, res, next) => {
             ]
         );
 
-        res.json({ success: true, data: rows[0] });
+        res.json({ success: true, data: maskCedenteRow(rows[0]) });
     } catch (err) {
         next(err);
     }
 });
 
 // DELETE /api/configuracoes/cedentes/:id
-router.delete('/cedentes/:id', async (req, res, next) => {
+router.delete('/cedentes/:id', requireAdmin, async (req, res, next) => {
     try {
         const tenantId = req.tenant.id;
         const cedenteId = req.params.id;

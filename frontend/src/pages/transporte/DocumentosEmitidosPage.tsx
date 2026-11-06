@@ -72,7 +72,7 @@ export default function DocumentosEmitidosPage() {
       PROCESSANDO: 'bg-sky-100 dark:bg-sky-950/60 text-sky-700 dark:text-sky-300',
       REJEITADO: 'bg-red-100 dark:bg-red-950/60 text-red-700 dark:text-red-300',
       CANCELADO: 'bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300',
-      ENCERRADO: 'bg-violet-100 dark:bg-violet-950/60 text-violet-700 dark:text-violet-300',
+      ENCERRADO: 'bg-teal-100 dark:bg-teal-950/60 text-teal-700 dark:text-teal-300',
       RASCUNHO: 'bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300'
     };
     return cores[s] || 'bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300';

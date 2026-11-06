@@ -37,7 +37,7 @@ export default function PeriodFilter({ excludePeriods = [] }: Props) {
         className="grid grid-cols-3 sm:flex items-center gap-1.5 sm:gap-2 sm:overflow-visible sm:flex-wrap pb-2 sm:pb-0 w-full" 
         style={{ scrollbarWidth: 'none', msOverflowStyle: 'none', WebkitOverflowScrolling: 'touch' }}
       >
-        <style dangerouslySetInnerHTML={{__html: `::-webkit-scrollbar { display: none; }`}} />
+        <style>{`::-webkit-scrollbar { display: none; }`}</style>
         <Calendar size={16} className="text-text-secondary ml-1 hidden sm:block flex-shrink-0" />
         {PERIOD_OPTIONS.filter(opt => !excludePeriods.includes(opt.key)).map((opt) => (
           <button

@@ -6,15 +6,6 @@ const db = require('../db/postgres');
 const logger = require('../config/logger');
 const { getPeriodRange } = require('../utils/period');
 
-// Fallback do Tenant Master para Pet Club (Kleber) para fins de teste no painel financeiro
-router.use((req, res, next) => {
-    if (req.tenant && req.tenant.id === '00000000-0000-0000-0000-000000000000') {
-        req.tenant.id = 'ed1d3a98-4c4d-48db-99c0-8751926eb8e5'; // Pet Club (Kleber) tenant
-        req.tenant.name = 'Pet Club (Demo Fallback)';
-    }
-    next();
-});
-
 /**
  * Usa MAX(data_emissao) do financeiro como âncora para filtros de período.
  * Garante que dados antigos do Firebird sempre apareçam.

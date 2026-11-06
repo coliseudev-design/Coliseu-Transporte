@@ -72,7 +72,7 @@ const getStageSideColor = (s: string) => {
   switch (s) {
     case 'Novos Leads': return 'border-l-blue-500';
     case 'Contato Inicial': return 'border-l-cyan-500';
-    case 'Proposta Enviada': return 'border-l-purple-500';
+    case 'Proposta Enviada': return 'border-l-cyan-500';
     case 'Em Negociação': return 'border-l-warning';
     case 'Ganho': return 'border-l-success';
     case 'Perdidos/Frios': return 'border-l-danger';

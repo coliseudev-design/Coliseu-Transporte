@@ -117,7 +117,7 @@ export default function RelatoriosPage() {
                   { label: 'CT-e Emitidos', value: r.total_ctes, sub: `${r.ctes_autorizados} autorizados`, cor: 'text-sky-600' },
                   { label: 'CT-e Rejeitados', value: r.ctes_rejeitados, sub: 'pela SEFAZ', cor: 'text-red-500' },
                   { label: 'MDF-e', value: r.total_mdfes, sub: `${r.mdfes_encerrados} encerrados`, cor: 'text-emerald-600' },
-                  { label: 'Receita de Frete', value: `R$ ${Number(r.valor_frete_total || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`, sub: `${Number(r.peso_total_kg || 0).toLocaleString('pt-BR')} kg`, cor: 'text-violet-600' }
+                  { label: 'Receita de Frete', value: `R$ ${Number(r.valor_frete_total || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`, sub: `${Number(r.peso_total_kg || 0).toLocaleString('pt-BR')} kg`, cor: 'text-teal-600' }
                 ].map(k => (
                   <div key={k.label} className="bg-white dark:bg-slate-800 p-5 rounded-2xl border border-slate-200/80 dark:border-slate-700/80 shadow-sm">
                     <p className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">{k.label}</p>

@@ -176,11 +176,12 @@ router.post('/:id/clicksign', async (req, res, next) => {
         const con = conRes.rows[0];
 
         // 1. Get Integration Token
+        const { decryptIntegracoesRow } = require('../utils/cryptoVault');
         const { rows: configRows } = await db.query(
             'SELECT clicksign_token, clicksign_ambiente FROM dash_integracoes_config WHERE tenant_id = $1',
             [tenantId]
         );
-        const configs = configRows[0] || {};
+        const configs = decryptIntegracoesRow(configRows[0] || {});
 
         let envelopeId = `mock-envelope-${Math.random().toString(36).substring(2, 15)}`;
         let clicksignUrl = `https://sandbox.clicksign.com/envelopes/${envelopeId}`;

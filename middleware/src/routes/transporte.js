@@ -6,6 +6,12 @@ const db = require('../db/postgres');
 const logger = require('../config/logger');
 const TransporteService = require('../services/transporteService');
 const veiculoService = require('../services/veiculoService');
+const {
+    decryptSecret,
+    maskSecret,
+    encryptBuffer,
+    resolveSecretForSave
+} = require('../utils/cryptoVault');
 
 let _transporteColsReady = false;
 async function ensureTransporteColumns() {
@@ -13,14 +19,19 @@ async function ensureTransporteColumns() {
     try {
         await db.query(`
             ALTER TABLE dash_emitentes
-              ADD COLUMN IF NOT EXISTS focus_token_homologacao VARCHAR(255),
-              ADD COLUMN IF NOT EXISTS focus_token_producao VARCHAR(255),
+              ADD COLUMN IF NOT EXISTS focus_token_homologacao TEXT,
+              ADD COLUMN IF NOT EXISTS focus_token_producao TEXT,
               ADD COLUMN IF NOT EXISTS regime_tributario VARCHAR(2) DEFAULT '1',
               ADD COLUMN IF NOT EXISTS cfop_padrao_cte VARCHAR(8) DEFAULT '5353',
               ADD COLUMN IF NOT EXISTS natureza_padrao_cte VARCHAR(255) DEFAULT 'PRESTACAO DE SERVICO DE TRANSPORTE',
               ADD COLUMN IF NOT EXISTS aliquota_icms_padrao NUMERIC(7,4) DEFAULT 12.00,
               ADD COLUMN IF NOT EXISTS complemento VARCHAR(120),
               ADD COLUMN IF NOT EXISTS email VARCHAR(255);
+
+            ALTER TABLE dash_emitentes ALTER COLUMN focus_token TYPE TEXT;
+            ALTER TABLE dash_emitentes ALTER COLUMN focus_token_homologacao TYPE TEXT;
+            ALTER TABLE dash_emitentes ALTER COLUMN focus_token_producao TYPE TEXT;
+            ALTER TABLE dash_certificados ALTER COLUMN senha TYPE TEXT;
 
             ALTER TABLE dash_ctes
               ADD COLUMN IF NOT EXISTS cfop VARCHAR(8) DEFAULT '5353',
@@ -1316,23 +1327,26 @@ router.get('/emitentes', async (req, res) => {
         }
 
         const enriched = rows.map((r) => {
-            const tokHomolog =
+            const rawTokHomolog =
                 r.focus_token_homologacao ||
                 cfg.focus_token_homologacao ||
                 (r.focus_ambiente !== 'producao' ? r.focus_token : '') ||
                 '';
-            const tokProd =
+            const rawTokProd =
                 r.focus_token_producao ||
                 cfg.focus_token_producao ||
                 (r.focus_ambiente === 'producao' ? r.focus_token : '') ||
                 '';
+            const plainHomolog = decryptSecret(rawTokHomolog);
+            const plainProd = decryptSecret(rawTokProd);
             return {
                 ...r,
                 focus_ambiente: r.focus_ambiente || cfg.focus_ambiente || 'homologacao',
-                focus_token_homologacao: tokHomolog,
-                focus_token_producao: tokProd,
-                tem_token_homologacao: Boolean(tokHomolog),
-                tem_token_producao: Boolean(tokProd),
+                focus_token: maskSecret(r.focus_token),
+                focus_token_homologacao: maskSecret(rawTokHomolog),
+                focus_token_producao: maskSecret(rawTokProd),
+                tem_token_homologacao: Boolean(plainHomolog && String(plainHomolog).trim()),
+                tem_token_producao: Boolean(plainProd && String(plainProd).trim()),
                 regime_tributario: r.regime_tributario || cfg.focus_regime_tributario || '1',
                 serie_cte: r.serie_cte || cfg.focus_serie_cte || '1',
                 serie_mdfe: r.serie_mdfe || cfg.focus_serie_mdfe || '1',
@@ -1471,24 +1485,31 @@ router.post('/emitentes', async (req, res) => {
             ? 'producao'
             : 'homologacao';
 
-        const tokHomolog =
+        const existingRes = await db.query(
+            `SELECT focus_token, focus_token_homologacao, focus_token_producao
+             FROM dash_emitentes
+             WHERE tenant_id = $1 AND cnpj = $2
+             LIMIT 1`,
+            [tenantId, cleanCnpj]
+        );
+        const existingEmit = existingRes.rows[0] || {};
+
+        const incomingHomolog =
             b.focus_token_homologacao !== undefined
-                ? String(b.focus_token_homologacao || '').trim()
-                : ambiente === 'homologacao' && b.focus_token
-                ? String(b.focus_token).trim()
-                : null;
+                ? b.focus_token_homologacao
+                : (ambiente === 'homologacao' ? b.focus_token : undefined);
 
-        const tokProd =
+        const incomingProd =
             b.focus_token_producao !== undefined
-                ? String(b.focus_token_producao || '').trim()
-                : ambiente === 'producao' && b.focus_token
-                ? String(b.focus_token).trim()
-                : null;
+                ? b.focus_token_producao
+                : (ambiente === 'producao' ? b.focus_token : undefined);
 
+        const tokHomolog = resolveSecretForSave(incomingHomolog, existingEmit.focus_token_homologacao);
+        const tokProd = resolveSecretForSave(incomingProd, existingEmit.focus_token_producao);
         const tokAtivo =
-            b.focus_token ||
+            resolveSecretForSave(b.focus_token, null) ||
             (ambiente === 'producao' ? tokProd : tokHomolog) ||
-            null;
+            resolveSecretForSave(null, existingEmit.focus_token);
 
         const { rows } = await db.query(
             `INSERT INTO dash_emitentes (
@@ -1613,7 +1634,14 @@ router.post('/emitentes', async (req, res) => {
             ]
         ).catch(() => {});
 
-        return res.json({ success: true, data: saved });
+        const maskedSaved = {
+            ...saved,
+            focus_token: maskSecret(saved.focus_token),
+            focus_token_homologacao: maskSecret(saved.focus_token_homologacao),
+            focus_token_producao: maskSecret(saved.focus_token_producao),
+        };
+
+        return res.json({ success: true, data: maskedSaved });
     } catch (err) {
         return res.status(500).json({ error: err.message });
     }
@@ -2513,7 +2541,25 @@ router.post('/certificados', async (req, res) => {
     }
 
     try {
-        const pfxBuffer = arquivo_base64 ? Buffer.from(arquivo_base64, 'base64') : Buffer.alloc(0);
+        const emitCheck = await db.query(
+            `SELECT id FROM dash_emitentes WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
+            [emitente_id, tenantId]
+        );
+        if (emitCheck.rowCount === 0) {
+            return res.status(404).json({ error: 'Emitente não encontrado para esta empresa.' });
+        }
+
+        const existingCertRes = await db.query(
+            `SELECT senha FROM dash_certificados WHERE tenant_id = $1 AND emitente_id = $2 LIMIT 1`,
+            [tenantId, emitente_id]
+        );
+        const encryptedSenha = resolveSecretForSave(senha, existingCertRes.rows[0]?.senha);
+        if (!encryptedSenha) {
+            return res.status(400).json({ error: 'Senha do certificado inválida.' });
+        }
+
+        const rawPfxBuffer = arquivo_base64 ? Buffer.from(arquivo_base64, 'base64') : Buffer.alloc(0);
+        const encryptedPfx = rawPfxBuffer.length > 0 ? encryptBuffer(rawPfxBuffer) : rawPfxBuffer;
         const dataVenc = valido_ate ? new Date(valido_ate) : new Date(Date.now() + 365 * 24 * 3600 * 1000);
         const diffDias = Math.ceil((dataVenc.getTime() - Date.now()) / (1000 * 3600 * 24));
 
@@ -2531,7 +2577,7 @@ router.post('/certificados', async (req, res) => {
                 status = 'ATIVO',
                 updated_at = NOW()
              RETURNING id, emitente_id, nome_arquivo, valido_ate, dias_para_vencer, status`,
-            [tenantId, emitente_id, nome_arquivo, pfxBuffer, senha, dataVenc, diffDias]
+            [tenantId, emitente_id, nome_arquivo, encryptedPfx, encryptedSenha, dataVenc, diffDias]
         );
 
         return res.status(201).json({ success: true, data: rows[0] });

@@ -262,12 +262,13 @@ router.post('/gerar-ia', async (req, res, next) => {
             rodapeUrlConfig = confRows[0]?.email_marketing_rodape_url || null;
         }
 
+        const { decryptIntegracoesRow } = require('../utils/cryptoVault');
         const { rows: configRows } = await db.query(
             `SELECT * FROM dash_integracoes_config WHERE tenant_id = $1 LIMIT 1`,
             [tenantId]
         ).catch(() => ({ rows: [] }));
 
-        const configs = configRows[0] || {};
+        const configs = decryptIntegracoesRow(configRows[0] || {});
 
         let activeKey = null;
         let activeProvider = null;

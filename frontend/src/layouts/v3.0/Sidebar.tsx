@@ -57,7 +57,7 @@ const GRUPOS: MenuGroup[] = [
     id: 'ciot',
     label: 'CIOT',
     icon: BadgeCheck,
-    cor: '#7C3AED',
+    cor: '#0891B2',
     items: [
       { to: '/transporte/ciot', label: 'Consultar e Gerenciar CIOT', icon: BadgeCheck, palavras: ['ciot', 'contrato', 'antt', 'piso'] }
     ]

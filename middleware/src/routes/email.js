@@ -107,12 +107,16 @@ router.post('/enviar-lote-marketing', async (req, res) => {
 // ──────────────────────────────────────────────────────────────────────────────
 router.get('/config', async (req, res) => {
   try {
+    const { maskSecret } = require('../utils/cryptoVault');
     const tenantId = req.tenant.id;
     const { rows } = await db.query(
       'SELECT email_provedor, email_smtp_host, email_smtp_port, email_smtp_user, email_smtp_secure, email_remetente_nome, email_remetente, email_brevo_api_key FROM dash_integracoes_config WHERE tenant_id = $1',
       [tenantId]
     );
-    res.json({ data: rows[0] || {} });
+    const data = rows[0]
+      ? { ...rows[0], email_brevo_api_key: maskSecret(rows[0].email_brevo_api_key) }
+      : {};
+    res.json({ data });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

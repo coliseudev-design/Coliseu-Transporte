@@ -2,6 +2,7 @@
 
 const logger = require('../config/logger');
 const db = require('../db/postgres');
+const { decryptSecret } = require('./cryptoVault');
 
 let delayPool = [];
 
@@ -384,10 +385,11 @@ async function sendWhatsAppMessage(configs, phone, message, imageUrl = null) {
 
     const provider = configs.whatsapp_api_provider || 'uazapi';
 
+    const uazapiToken = decryptSecret(configs.whatsapp_token || '');
     if (provider === 'meta') {
         return sendWhatsAppMetaTemplateAuto(configs, cleanPhone, message, imageUrl);
     } else {
-        if (!configs.whatsapp_server_url || !configs.whatsapp_token) {
+        if (!configs.whatsapp_server_url || !uazapiToken) {
             logger.warn('[📲 WHATSAPP] Uazapi server URL or Token not configured. Message discarded.');
             return { success: false, error: 'Server URL or Token not configured' };
         }
@@ -419,7 +421,7 @@ async function sendWhatsAppMessage(configs, phone, message, imageUrl = null) {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'token': configs.whatsapp_token
+                    'token': uazapiToken
                 },
                 body: JSON.stringify(payload)
             }, 10000);
@@ -480,7 +482,7 @@ async function sendWhatsAppTemplateMessage(configs, phone, templateName, languag
     }
 
     const phoneId = configs.whatsapp_meta_phone_id;
-    const metaToken = configs.whatsapp_meta_token;
+    const metaToken = decryptSecret(configs.whatsapp_meta_token || '');
 
     if (!phoneId || !metaToken) {
         logger.warn('[📲 WHATSAPP] Meta Phone Number ID or Access Token not configured. Template message discarded.');

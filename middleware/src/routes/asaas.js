@@ -10,37 +10,32 @@ const router = express.Router();
 const AsaasService = require('../services/asaasService');
 const db = require('../db/postgres');
 const logger = require('../config/logger');
+const { isMaskedValue, decryptSecret } = require('../utils/cryptoVault');
 
 /**
  * POST /api/asaas/test-connection
  * Testa a chave de API do Asaas.
  */
-router.post('/test-connection', async (req, res, next) => {
+router.post('/test-connection', async (req, res) => {
   try {
     const tenantId = req.tenant ? req.tenant.id : null;
-    let { token, ambiente } = req.body;
+    let { token, ambiente } = req.body || {};
 
-    // Se o token for nulo, vazio ou o placeholder com '...', busca o token real salvo no banco
-    if (!token || typeof token !== 'string' || token.trim() === '' || token.includes('...')) {
+    // Se o token vier vazio ou mascarado (******** / ...), busca e decifra o token salvo deste tenant
+    if (!token || typeof token !== 'string' || token.trim() === '' || isMaskedValue(token)) {
       const config = await AsaasService.getConfig(tenantId).catch(() => null);
       if (config && config.token) {
         token = config.token;
         ambiente = ambiente || config.ambiente;
+      } else {
+        token = '';
       }
-    }
-
-    if (!token || typeof token !== 'string' || token.trim() === '' || token.includes('...')) {
-      const globalConfig = await db.query(
-        "SELECT asaas_access_token, asaas_ambiente FROM dash_integracoes_config WHERE asaas_access_token IS NOT NULL AND asaas_access_token != '' LIMIT 1"
-      );
-      if (globalConfig.rows.length > 0) {
-        token = globalConfig.rows[0].asaas_access_token;
-        ambiente = ambiente || globalConfig.rows[0].asaas_ambiente;
-      }
+    } else {
+      token = decryptSecret(token.trim());
     }
 
     if (!token) {
-      return res.status(400).json({ error: 'Token de acesso do Asaas não informado.' });
+      return res.status(400).json({ error: 'Token de acesso do Asaas não informado para esta empresa.' });
     }
 
     const data = await AsaasService.testConnection(token, ambiente || 'Produção');
@@ -221,9 +216,9 @@ router.post('/emitir-boleto', async (req, res, next) => {
  * GET /api/asaas/bank-slip/:paymentId
  * Retorna a URL do PDF do boleto no Banco Asaas ou redireciona diretamente.
  */
-router.get('/bank-slip/:paymentId', async (req, res) => {
+const handleBankSlipGet = async (req, res) => {
   try {
-    const tenantId = req.tenant ? req.tenant.id : null;
+    let tenantId = req.tenant ? req.tenant.id : null;
     const { paymentId } = req.params;
 
     if (!paymentId) {
@@ -232,8 +227,8 @@ router.get('/bank-slip/:paymentId', async (req, res) => {
 
     let bankSlipUrl = null;
 
-    // 1. Tenta buscar no banco local se já temos o link salvo (inclusive de outros bancos integrados como Cora)
     if (tenantId) {
+      // Acesso autenticado: permite busca por ID interno/Firebird estritamente no tenant autenticado
       const { rows } = await db.query(
         `SELECT bank_slip_url, pdf_url, asaas_bank_slip_url, portador_nome 
          FROM dash_financeiro 
@@ -246,7 +241,7 @@ router.get('/bank-slip/:paymentId', async (req, res) => {
         bankSlipUrl = rows[0].bank_slip_url || rows[0].pdf_url || rows[0].asaas_bank_slip_url;
         if (!bankSlipUrl && String(rows[0].portador_nome || '').toUpperCase() === 'CORA') {
           try {
-            const CoraService = require('../services/coraService');
+            const CoraService = require('../services/CoraService');
             const coraInvoice = await CoraService.consultarBoleto(tenantId, paymentId);
             const bs = coraInvoice?.payment_options?.bank_slip || coraInvoice?.payment_details?.bank_slip;
             bankSlipUrl = bs?.url || bs?.pdf_url || coraInvoice?.pdf_url || null;
@@ -261,12 +256,26 @@ router.get('/bank-slip/:paymentId', async (req, res) => {
           }
         }
       }
+    } else {
+      // Acesso público (link de cobrança): aceita apenas token não enumerável (asaas_payment_id)
+      const { rows } = await db.query(
+        `SELECT tenant_id, bank_slip_url, pdf_url, asaas_bank_slip_url, portador_nome
+         FROM dash_financeiro
+         WHERE asaas_payment_id = $1
+         LIMIT 1`,
+        [paymentId]
+      );
+      if (rows.length === 0) {
+        return res.status(404).json({ error: 'Cobrança não localizada.' });
+      }
+      tenantId = rows[0].tenant_id;
+      bankSlipUrl = rows[0].bank_slip_url || rows[0].pdf_url || rows[0].asaas_bank_slip_url;
     }
 
     // 2. Se for ID com prefixo 'inv_' (Cora) e ainda não tem URL, tenta consultar direto no Cora
     if (!bankSlipUrl && String(paymentId).startsWith('inv_') && tenantId) {
       try {
-        const CoraService = require('../services/coraService');
+        const CoraService = require('../services/CoraService');
         const coraInvoice = await CoraService.consultarBoleto(tenantId, paymentId);
         const bs = coraInvoice?.payment_options?.bank_slip || coraInvoice?.payment_details?.bank_slip;
         bankSlipUrl = bs?.url || bs?.pdf_url || coraInvoice?.pdf_url || null;
@@ -275,10 +284,10 @@ router.get('/bank-slip/:paymentId', async (req, res) => {
       }
     }
 
-    // 3. Se não estiver no banco local e não for Cora, busca no Asaas
-    if (!bankSlipUrl) {
+    // 3. Se não estiver no banco local e não for Cora, busca no Asaas usando o tenant validado
+    if (!bankSlipUrl && tenantId) {
       const config = await AsaasService.getConfig(tenantId);
-      const response = await fetch(`${config.baseUrl}/payments/${paymentId}`, {
+      const response = await fetch(`${config.baseUrl}/payments/${encodeURIComponent(paymentId)}`, {
         method: 'GET',
         headers: AsaasService.getHeaders(config.token)
       });
@@ -290,7 +299,7 @@ router.get('/bank-slip/:paymentId', async (req, res) => {
       const paymentData = await response.json();
       bankSlipUrl = paymentData.bankSlipUrl || paymentData.invoiceUrl;
 
-      if (bankSlipUrl && tenantId) {
+      if (bankSlipUrl) {
         await db.query(
           `UPDATE dash_financeiro SET asaas_bank_slip_url = $1, bank_slip_url = $1, pdf_url = $1 WHERE LOWER(tenant_id::text) = LOWER($2::text) AND asaas_payment_id = $3`,
           [bankSlipUrl, tenantId, paymentId]
@@ -300,6 +309,17 @@ router.get('/bank-slip/:paymentId', async (req, res) => {
 
     if (!bankSlipUrl) {
       return res.status(404).json({ error: 'Link do boleto não disponível para esta cobrança.' });
+    }
+
+    // Valida esquema http/https antes de redirecionar
+    let parsedSlip;
+    try {
+      parsedSlip = new URL(bankSlipUrl);
+    } catch (_) {
+      parsedSlip = null;
+    }
+    if (parsedSlip && !['http:', 'https:'].includes(parsedSlip.protocol)) {
+      return res.status(400).json({ error: 'URL do boleto inválida.' });
     }
 
     // Redireciona se for chamado diretamente pelo navegador ou se ?redirect=true
@@ -312,7 +332,9 @@ router.get('/bank-slip/:paymentId', async (req, res) => {
     logger.error('[Asaas] Erro ao buscar link do boleto', { error: err.message });
     res.status(400).json({ error: err.message });
   }
-});
+};
+
+router.get('/bank-slip/:paymentId', handleBankSlipGet);
 
 /**
  * GET /api/asaas/saldo
@@ -1046,8 +1068,11 @@ router.post('/sincronizar-pagamentos', async (req, res) => {
  */
 const handleAsaasWebhookHttp = async (req, res) => {
   try {
-    logger.info('[AsaasWebhook] Webhook HTTP recebido do Asaas', { body: req.body });
-    const result = await AsaasService.handleWebhook(req.body);
+    logger.info('[AsaasWebhook] Webhook HTTP recebido do Asaas', { event: req.body?.event, paymentId: req.body?.payment?.id });
+    const result = await AsaasService.handleWebhook(req.body, req.headers);
+    if (result?.unauthorized) {
+      return res.status(401).json({ error: 'Token de webhook inválido.' });
+    }
     res.json(result);
   } catch (err) {
     logger.error('[AsaasWebhook] Erro no processamento do webhook', { error: err.message });
@@ -1057,5 +1082,8 @@ const handleAsaasWebhookHttp = async (req, res) => {
 
 router.post('/', handleAsaasWebhookHttp);
 router.post('/webhook', handleAsaasWebhookHttp);
+
+router.handleAsaasWebhookHttp = handleAsaasWebhookHttp;
+router.handleBankSlipGet = handleBankSlipGet;
 
 module.exports = router;

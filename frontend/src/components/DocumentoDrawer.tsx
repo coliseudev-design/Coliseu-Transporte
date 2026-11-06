@@ -296,11 +296,11 @@ export default function DocumentoDrawer({ tipo, documentoId, onClose, onVerRotei
                       </div>
 
                       {doc.ciot_codigo && (
-                        <div className="flex items-center gap-2 p-3 rounded-xl bg-violet-50 dark:bg-violet-950/40 border border-violet-200 dark:border-violet-800/50">
-                          <ShieldCheck className="w-4 h-4 text-violet-600 shrink-0" />
+                        <div className="flex items-center gap-2 p-3 rounded-xl bg-teal-50 dark:bg-teal-950/40 border border-teal-200 dark:border-teal-800/50">
+                          <ShieldCheck className="w-4 h-4 text-teal-600 shrink-0" />
                           <div>
-                            <p className="text-[10px] font-semibold text-violet-700 dark:text-violet-300 uppercase tracking-wider">CIOT vinculado</p>
-                            <p className="text-xs font-mono text-violet-900 dark:text-violet-200">{doc.ciot_codigo}</p>
+                            <p className="text-[10px] font-semibold text-teal-700 dark:text-teal-300 uppercase tracking-wider">CIOT vinculado</p>
+                            <p className="text-xs font-mono text-teal-900 dark:text-teal-200">{doc.ciot_codigo}</p>
                           </div>
                         </div>
                       )}
@@ -539,7 +539,7 @@ export default function DocumentoDrawer({ tipo, documentoId, onClose, onVerRotei
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[60] flex items-center justify-center p-4">
           <div className="bg-white dark:bg-slate-800 w-full max-w-md rounded-2xl p-6 shadow-xl border border-slate-200 dark:border-slate-700">
             <h3 className="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
-              <FilePen className="w-5 h-5 text-violet-500" />
+              <FilePen className="w-5 h-5 text-teal-500" />
               Carta de Correção Eletrônica
             </h3>
             <textarea
@@ -559,7 +559,7 @@ export default function DocumentoDrawer({ tipo, documentoId, onClose, onVerRotei
                     'Carta de Correção registrada!'
                 )}
                 disabled={enviando || corrigenda.trim().length < 15}
-                className="px-5 py-2 rounded-xl text-xs font-semibold text-white bg-violet-600 hover:bg-violet-700 disabled:opacity-50"
+                className="px-5 py-2 rounded-xl text-xs font-semibold text-white bg-teal-600 hover:bg-teal-700 disabled:opacity-50"
               >
                 {enviando ? 'Enviando...' : 'Emitir CC-e'}
               </button>

@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef } from 'react'
 import { useApiQuery } from '../hooks/useApi'
 import api from '../services/api'
+import SafeHtml from '../components/SafeHtml'
+import { setSafeElementHtml } from '../utils/sanitizeHtml'
 import {
   FileText, Plus, Trash2, Edit2, Play, Check, X, Search, Filter, HelpCircle,
   Eye, FileSpreadsheet, Send, Copy, AlertCircle, Info, Download,
@@ -68,7 +70,10 @@ export default function Acervos() {
       setIsEditingActive(true)
       setTimeout(() => {
         if (fullscreenVisualRef.current) {
-          fullscreenVisualRef.current.innerHTML = formContent || '<div style="padding: 30px; text-align: center; color: #94a3b8;"><p style="font-size: 16px; font-weight: 700;">Template Vazio.</p><p style="font-size: 13px;">Digite as instruções à esquerda e clique em ✨ Gerar Modelo com IA!</p></div>'
+          setSafeElementHtml(
+            fullscreenVisualRef.current,
+            formContent || '<div style="padding: 30px; text-align: center; color: #94a3b8;"><p style="font-size: 16px; font-weight: 700;">Template Vazio.</p><p style="font-size: 13px;">Digite as instruções à esquerda e clique em ✨ Gerar Modelo com IA!</p></div>'
+          )
         }
       }, 50)
     }
@@ -79,10 +84,10 @@ export default function Acervos() {
     if (formContent !== lastFormContentRef.current) {
       lastFormContentRef.current = formContent || ''
       if (visualEditorRef.current && document.activeElement !== visualEditorRef.current) {
-        visualEditorRef.current.innerHTML = formContent || ''
+        setSafeElementHtml(visualEditorRef.current, formContent || '')
       }
       if (fullscreenVisualRef.current && document.activeElement !== fullscreenVisualRef.current) {
-        fullscreenVisualRef.current.innerHTML = formContent || ''
+        setSafeElementHtml(fullscreenVisualRef.current, formContent || '')
       }
     }
   }, [formContent, editorTab, fullscreenTab])
@@ -397,8 +402,8 @@ export default function Acervos() {
       }
 
       lastFormContentRef.current = updated;
-      if (visualEditorRef.current) visualEditorRef.current.innerHTML = updated;
-      if (fullscreenVisualRef.current) fullscreenVisualRef.current.innerHTML = updated;
+      setSafeElementHtml(visualEditorRef.current, updated);
+      setSafeElementHtml(fullscreenVisualRef.current, updated);
       setPreviewHtml(updated);
       return updated;
     });
@@ -455,12 +460,8 @@ export default function Acervos() {
     setImportedHtmlCode(cleanHtml);
     lastFormContentRef.current = cleanHtml;
 
-    if (visualEditorRef.current) {
-      visualEditorRef.current.innerHTML = cleanHtml;
-    }
-    if (fullscreenVisualRef.current) {
-      fullscreenVisualRef.current.innerHTML = cleanHtml;
-    }
+    setSafeElementHtml(visualEditorRef.current, cleanHtml);
+    setSafeElementHtml(fullscreenVisualRef.current, cleanHtml);
 
     // Tenta extrair título automático caso nome esteja em branco
     if (!formName.trim()) {
@@ -1054,7 +1055,7 @@ export default function Acervos() {
                       onClick={() => setCreationMode('ai')}
                       className={`flex-1 py-1.5 px-3 text-xs font-bold rounded flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
                         creationMode === 'ai'
-                          ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white shadow-xs'
+                          ? 'bg-gradient-to-r from-sky-600 to-teal-600 text-white shadow-xs'
                           : 'text-text-secondary hover:text-text-primary hover:bg-bg-tertiary'
                       }`}
                     >
@@ -1088,19 +1089,19 @@ export default function Acervos() {
                     type="file"
                     ref={fileInputRef}
                     onChange={handleFileChange}
-                    accept="image/png,image/jpeg,image/svg+xml,image/webp,image/gif"
+                    accept="image/png,image/jpeg,image/webp,image/gif"
                     className="hidden"
                   />
 
                   {creationMode === 'ai' ? (
                     /* MODO 1: Gerador de Template com IA / Prompt */
-                    <div className="p-3.5 bg-gradient-to-r from-indigo-50/95 via-purple-50/95 to-blue-50/95 dark:from-indigo-950/50 dark:via-purple-950/50 dark:to-blue-950/50 border border-indigo-200 dark:border-indigo-800/60 rounded-md space-y-2.5 shadow-sm animate-in fade-in duration-200">
+                    <div className="p-3.5 bg-gradient-to-r from-sky-50/95 via-cyan-50/95 to-teal-50/95 dark:from-sky-950/50 dark:via-cyan-950/50 dark:to-teal-950/50 border border-sky-200 dark:border-sky-800/60 rounded-md space-y-2.5 shadow-sm animate-in fade-in duration-200">
                       <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-1.5 text-indigo-700 dark:text-indigo-300 font-extrabold text-[11px] uppercase tracking-wider">
-                          <Sparkles size={15} className="text-indigo-500 animate-pulse" />
+                        <div className="flex items-center gap-1.5 text-sky-700 dark:text-sky-300 font-extrabold text-[11px] uppercase tracking-wider">
+                          <Sparkles size={15} className="text-sky-500 animate-pulse" />
                           Criar Modelo com IA (Prompt & Anexo)
                         </div>
-                        <span className="text-[8.5px] bg-indigo-100 dark:bg-indigo-900/60 text-indigo-700 dark:text-indigo-300 px-2 py-0.5 rounded-full font-bold">
+                        <span className="text-[8.5px] bg-sky-100 dark:bg-sky-900/60 text-sky-700 dark:text-sky-300 px-2 py-0.5 rounded-full font-bold">
                           Inteligência Coliseu Transporte
                         </span>
                       </div>
@@ -1110,7 +1111,7 @@ export default function Acervos() {
                       </p>
 
                       <textarea
-                        className="input w-full p-2.5 text-xs font-sans border-indigo-200 dark:border-indigo-800 focus:border-indigo-500 bg-bg-primary text-text-primary rounded-sm leading-relaxed min-h-[95px] resize-y"
+                        className="input w-full p-2.5 text-xs font-sans border-sky-200 dark:border-sky-800 focus:border-sky-500 bg-bg-primary text-text-primary rounded-sm leading-relaxed min-h-[95px] resize-y"
                         rows={4}
                         placeholder="Ex: Crie uma página web (comunicado oficial) para a empresa Coliseu Sistemas sobre a Reforma Tributária com tabela de alíquotas CBS/IBS 1%, caixas de aviso em verde e amarelo e botões de contato..."
                         value={aiPrompt}
@@ -1122,7 +1123,7 @@ export default function Acervos() {
                           <button
                             type="button"
                             onClick={() => fileInputRef.current?.click()}
-                            className="btn-secondary !py-1.5 px-3 text-[11px] font-semibold flex items-center gap-1.5 border-indigo-300 dark:border-indigo-700 text-indigo-700 dark:text-indigo-300 bg-white/80 dark:bg-slate-900/80 hover:bg-white rounded-sm cursor-pointer shadow-2xs"
+                            className="btn-secondary !py-1.5 px-3 text-[11px] font-semibold flex items-center gap-1.5 border-sky-300 dark:border-sky-700 text-sky-700 dark:text-sky-300 bg-white/80 dark:bg-slate-900/80 hover:bg-white rounded-sm cursor-pointer shadow-2xs"
                           >
                             <Paperclip size={13} />
                             {formImageUrl ? 'Alterar Logo/Foto Anexada' : '📷 Anexar Logo / Foto para a IA'}
@@ -1133,12 +1134,12 @@ export default function Acervos() {
                             </span>
                           )}
 
-                          <label className="flex items-center gap-1.5 text-xs text-indigo-900 dark:text-indigo-200 font-bold cursor-pointer select-none bg-indigo-50/80 dark:bg-indigo-950/40 px-2.5 py-1 rounded border border-indigo-200/80 hover:bg-indigo-100/80 transition-all">
+                          <label className="flex items-center gap-1.5 text-xs text-sky-900 dark:text-sky-200 font-bold cursor-pointer select-none bg-sky-50/80 dark:bg-sky-950/40 px-2.5 py-1 rounded border border-sky-200/80 hover:bg-sky-100/80 transition-all">
                             <input
                               type="checkbox"
                               checked={useDefaultLayout}
                               onChange={(e) => setUseDefaultLayout(e.target.checked)}
-                              className="rounded border-indigo-300 text-indigo-600 focus:ring-indigo-500 h-3.5 w-3.5 cursor-pointer"
+                              className="rounded border-sky-300 text-sky-600 focus:ring-sky-500 h-3.5 w-3.5 cursor-pointer"
                             />
                             🖼️ Usar Layout Padrão (Artes de Topo e Rodapé)
                           </label>
@@ -1148,7 +1149,7 @@ export default function Acervos() {
                           type="button"
                           onClick={handleGenerateAITemplate}
                           disabled={isGeneratingAI}
-                          className="btn-primary !py-1.5 px-4 text-xs flex items-center gap-1.5 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white font-extrabold rounded-sm shadow-sm disabled:opacity-50 cursor-pointer"
+                          className="btn-primary !py-1.5 px-4 text-xs flex items-center gap-1.5 bg-gradient-to-r from-sky-600 to-teal-600 hover:from-sky-700 hover:to-teal-700 text-white font-extrabold rounded-sm shadow-sm disabled:opacity-50 cursor-pointer"
                         >
                           {isGeneratingAI ? (
                             <>
@@ -1195,10 +1196,10 @@ export default function Acervos() {
                         <button
                           type="button"
                           onClick={() => fileInputRef.current?.click()}
-                          className="btn-secondary !py-1.5 px-3 text-[11px] font-bold flex items-center gap-1.5 border-indigo-300 dark:border-indigo-700 text-indigo-700 dark:text-indigo-300 bg-white/90 dark:bg-slate-900/90 hover:bg-white rounded-sm cursor-pointer shadow-2xs"
+                          className="btn-secondary !py-1.5 px-3 text-[11px] font-bold flex items-center gap-1.5 border-sky-300 dark:border-sky-700 text-sky-700 dark:text-sky-300 bg-white/90 dark:bg-slate-900/90 hover:bg-white rounded-sm cursor-pointer shadow-2xs"
                           title="Anexar ou alterar a logo/imagem do cabeçalho do template"
                         >
-                          <Paperclip size={13} className="text-indigo-600" />
+                          <Paperclip size={13} className="text-sky-600" />
                           {formImageUrl ? '📷 Alterar Logo Anexada' : '📷 Anexar Logo Personalizada'}
                         </button>
 
@@ -1287,7 +1288,7 @@ export default function Acervos() {
                   <button
                     type="button"
                     onClick={() => setIsFullscreenPreviewOpen(true)}
-                    className="px-3.5 py-1.5 text-xs text-white bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 rounded-md flex items-center gap-1.5 font-extrabold shadow-md cursor-pointer animate-pulse transition-all"
+                    className="px-3.5 py-1.5 text-xs text-white bg-gradient-to-r from-sky-600 to-teal-600 hover:from-sky-700 hover:to-teal-700 rounded-md flex items-center gap-1.5 font-extrabold shadow-md cursor-pointer animate-pulse transition-all"
                     title="Abrir Editor Visual em Tela Cheia"
                   >
                     <Maximize2 size={14} />
@@ -1318,7 +1319,7 @@ export default function Acervos() {
                         <div className="flex-1 p-3 bg-[#efeae2] dark:bg-[#0b141a] overflow-y-auto space-y-2 flex flex-col justify-end">
                           <div className="bg-white dark:bg-[#005c4b] text-slate-900 dark:text-slate-100 p-2.5 rounded-lg rounded-tl-none text-xs shadow-xs border border-slate-200 dark:border-none leading-relaxed max-w-[90%] font-sans whitespace-pre-wrap">
                             {formContent ? (
-                              <div dangerouslySetInnerHTML={{ __html: compileTemplateText(formContent, 'markdown') }} />
+                              <SafeHtml html={compileTemplateText(formContent, 'markdown')} />
                             ) : (
                               <span className="text-slate-400 italic">Digite o conteúdo da mensagem...</span>
                             )}
@@ -1346,11 +1347,11 @@ export default function Acervos() {
                       onClick={() => setIsFullscreenPreviewOpen(true)}
                       className="flex-1 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-md p-5 overflow-y-auto shadow-inner text-slate-900 dark:text-slate-100 font-sans leading-relaxed cursor-pointer hover:border-brand-500 transition-all group relative"
                     >
-                      <div className="absolute top-2 right-2 bg-indigo-600 text-white text-[9px] font-extrabold px-2 py-0.5 rounded shadow group-hover:scale-105 transition-all">
+                      <div className="absolute top-2 right-2 bg-teal-600 text-white text-[9px] font-extrabold px-2 py-0.5 rounded shadow group-hover:scale-105 transition-all">
                         ⛶ Clique para Editar em Tela Cheia
                       </div>
                       {formContent ? (
-                        <div dangerouslySetInnerHTML={{ __html: formContent }} />
+                        <SafeHtml html={formContent} />
                       ) : (
                         <div className="h-full flex flex-col justify-center items-center gap-2 text-slate-400 py-10">
                           <FileText size={32} className="opacity-40" />
@@ -1405,11 +1406,9 @@ export default function Acervos() {
                             )}
 
                             {/* Message text formatted */}
-                            <div
+                            <SafeHtml
                               className="break-words font-sans whitespace-pre-wrap text-[11px]"
-                              dangerouslySetInnerHTML={{
-                                __html: compileTemplateText(formContent || 'Digite no editor ao lado para visualizar a mensagem no simulador do WhatsApp...', 'whatsapp')
-                              }}
+                              html={compileTemplateText(formContent || 'Digite no editor ao lado para visualizar a mensagem no simulador do WhatsApp...', 'whatsapp')}
                             />
 
                             {/* Bubble footer with time and double check */}
@@ -1460,11 +1459,9 @@ export default function Acervos() {
                       
                       {/* Email Body */}
                       <div className="flex-1 p-4 overflow-y-auto bg-bg-primary text-text-primary leading-relaxed select-text min-h-0">
-                        <div 
+                        <SafeHtml
                           className="font-sans text-[11px]"
-                          dangerouslySetInnerHTML={{ 
-                            __html: compileTemplateText(formContent || 'Digite o corpo do e-mail ao lado...', 'markdown') 
-                          }} 
+                          html={compileTemplateText(formContent || 'Digite o corpo do e-mail ao lado...', 'markdown')}
                         />
                       </div>
                     </div>
@@ -1487,11 +1484,9 @@ export default function Acervos() {
                             CONTRATO DE PRESTAÇÃO DE SERVIÇOS
                           </h2>
                           
-                          <div 
+                          <SafeHtml
                             className="space-y-3 text-justify leading-relaxed whitespace-pre-wrap"
-                            dangerouslySetInnerHTML={{ 
-                              __html: compileTemplateText(formContent || 'Digite as cláusulas do contrato ao lado...', 'markdown') 
-                            }} 
+                            html={compileTemplateText(formContent || 'Digite as cláusulas do contrato ao lado...', 'markdown')}
                           />
                           
                           {/* Signatures block */}
@@ -1546,11 +1541,9 @@ export default function Acervos() {
                           
                           {/* Content wrapper */}
                           <div className="bg-white dark:bg-slate-800 p-4 rounded border border-divider shadow-sm text-text-primary">
-                            <div 
+                            <SafeHtml
                               className="space-y-3 leading-relaxed text-[11px]"
-                              dangerouslySetInnerHTML={{ 
-                                __html: compileTemplateText(formContent || 'Digite os detalhes da proposta comercial...', 'markdown') 
-                              }} 
+                              html={compileTemplateText(formContent || 'Digite os detalhes da proposta comercial...', 'markdown')}
                             />
                             
                             {/* Call to action & price */}
@@ -1593,7 +1586,7 @@ export default function Acervos() {
 
                     <div className="flex-1 bg-bg-primary border border-divider rounded-sm p-4 overflow-y-auto max-h-[300px] text-xs">
                       {previewHtml ? (
-                        <div className="whitespace-pre-wrap leading-relaxed text-text-primary" dangerouslySetInnerHTML={{ __html: previewHtml }} />
+                        <SafeHtml className="whitespace-pre-wrap leading-relaxed text-text-primary" html={previewHtml} />
                       ) : (
                         <div className="h-full flex flex-col justify-center items-center gap-2 text-text-muted">
                           <FileText size={28} className="opacity-45" />
@@ -1949,11 +1942,9 @@ export default function Acervos() {
                 </div>
                 <div className="w-1/2 flex flex-col bg-white rounded-xl border border-slate-800 p-4 overflow-y-auto">
                   <span className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">Pré-Visualização em Tempo Real</span>
-                  <div
+                  <SafeHtml
                     className="w-full"
-                    dangerouslySetInnerHTML={{
-                      __html: compileTemplateText(formContent || '<p>Preencha o conteúdo do template...</p>', 'markdown')
-                    }}
+                    html={compileTemplateText(formContent || '<p>Preencha o conteúdo do template...</p>', 'markdown')}
                   />
                 </div>
               </div>

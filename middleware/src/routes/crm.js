@@ -5,13 +5,15 @@ const router = express.Router();
 const db = require('../db/postgres');
 const logger = require('../config/logger');
 const { logAIUsage } = require('../utils/ai_helper');
+const { decryptIntegracoesRow } = require('../utils/cryptoVault');
+
 // Helper to get integration config
 async function getConfigs(tenantId) {
     const { rows } = await db.query(
         'SELECT * FROM dash_integracoes_config WHERE tenant_id = $1',
         [tenantId]
     );
-    return rows[0] || {};
+    return decryptIntegracoesRow(rows[0] || {});
 }
 
 // Helper to log interaction

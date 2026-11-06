@@ -15,6 +15,19 @@ const defaultLimit = rateLimit({
     }
 });
 
+const authLimit = rateLimit({
+    windowMs: config.security.authRateLimitWindowMs || 15 * 60 * 1000,
+    max: config.security.authRateLimitMax || 20,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: 'Muitas tentativas de autenticação. Aguarde alguns minutos e tente novamente.', code: 'AUTH_RATE_LIMITED' },
+    keyGenerator: (req) => {
+        const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+        return `${req.ip}:${email}`;
+    }
+});
+
 module.exports = {
-    defaultLimit
+    defaultLimit,
+    authLimit
 };

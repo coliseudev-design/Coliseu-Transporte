@@ -108,7 +108,7 @@ export const BoletosFooterStats = memo(function BoletosFooterStats({
         <span className="px-2.5 py-1 bg-emerald-100 dark:bg-emerald-950/80 border border-emerald-300 dark:border-emerald-700 rounded-lg text-emerald-800 dark:text-emerald-200" title="Pix recebidos direto na conta por chave (sem boleto)">
           📲 Pix Direto: <strong>{totalPixDireto}</strong>
         </span>
-        <span className="px-2.5 py-1 bg-purple-100 dark:bg-purple-950/80 border border-purple-300 dark:border-purple-700 rounded-lg text-purple-900 dark:text-purple-200" title="Boletos emitidos (Nosso Nº) pagos via Pix pelo cliente">
+        <span className="px-2.5 py-1 bg-cyan-100 dark:bg-cyan-950/80 border border-cyan-300 dark:border-cyan-700 rounded-lg text-cyan-900 dark:text-cyan-200" title="Boletos emitidos (Nosso Nº) pagos via Pix pelo cliente">
           ⚡ Boletos (Pix): <strong>{totalBoletoPix}</strong>
         </span>
         <span className="px-2.5 py-1 bg-indigo-50 dark:bg-indigo-950/80 border border-indigo-300 dark:border-indigo-800 rounded-lg text-indigo-800 dark:text-indigo-200">

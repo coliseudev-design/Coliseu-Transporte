@@ -290,42 +290,11 @@ CREATE TABLE IF NOT EXISTS dash_usuarios (
 -- Garantir que colunas novas existam caso a tabela já estivesse lá
 ALTER TABLE dash_usuarios ADD COLUMN IF NOT EXISTS senha_hash VARCHAR(255);
 ALTER TABLE dash_usuarios ADD COLUMN IF NOT EXISTS layout_version VARCHAR(10) DEFAULT 'v1.0';
--- Colocar uma hash genérica pra quem não tinha senha (evitar nulo caso houvesse dados)
 UPDATE dash_usuarios SET senha_hash = '' WHERE senha_hash IS NULL;
 
--- Seed: Criar conta mestre default
-INSERT INTO dash_usuarios (tenant_id, email, nome, role, ativo, senha_hash)
-VALUES (
-    '00000000-0000-0000-0000-000000000000', 
-    'admin@coliseutransporte.com.br', 
-    'Super Admin', 
-    'admin', 
-    true, 
-    -- bcrypt hash de AdminNexus2026! 
-    '$2b$10$WyhOyq71XTg7APhFkX8TXOR1dXWmPi6WWs4nbeAJk2AMGTCd24.za'
-) ON CONFLICT (tenant_id, email) DO NOTHING;
-
--- Seed: Criar conta para o Tenant do teste (senha: AdminNexus2026!)
-INSERT INTO dash_usuarios (tenant_id, email, nome, role, ativo, senha_hash)
-VALUES (
-    'ed1d3a98-4c4d-48db-99c0-8751926eb8e5', 
-    'cliente@teste.com.br', 
-    'Empresa Cliente', 
-    'admin', 
-    true, 
-    '$2b$10$WyhOyq71XTg7APhFkX8TXOR1dXWmPi6WWs4nbeAJk2AMGTCd24.za'
-) ON CONFLICT (tenant_id, email) DO UPDATE SET
-    nome = EXCLUDED.nome,
-    role = EXCLUDED.role,
-    ativo = EXCLUDED.ativo,
-    senha_hash = EXCLUDED.senha_hash;
-
--- Correção crítica: garante tenant correto para o usuário de teste
--- (pode ter sido inserido com tenant_id '00000000...' em versões antigas)
-UPDATE dash_usuarios 
-SET tenant_id = 'ed1d3a98-4c4d-48db-99c0-8751926eb8e5'
-WHERE email = 'cliente@teste.com.br' 
-  AND tenant_id != 'ed1d3a98-4c4d-48db-99c0-8751926eb8e5';
+-- Nota de segurança: Seeds com senhas estáticas e resets automáticos (ON CONFLICT DO UPDATE)
+-- foram removidos para impedir backdoors e sobrescrita de credenciais em produção.
+-- Utilize INITIAL_ADMIN_EMAIL e INITIAL_ADMIN_PASSWORD no .env caso precise inicializar o primeiro admin.
 
 CREATE TABLE IF NOT EXISTS dash_auditoria (
     id SERIAL PRIMARY KEY,

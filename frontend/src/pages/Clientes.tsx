@@ -365,30 +365,44 @@ export default function Clientes() {
       }
 
       if (anexo.arquivo_data.startsWith('data:')) {
-        const win = window.open()
+        const isSafeDataUri = /^data:(application\/pdf|image\/(png|jpeg|jpg|webp|gif));base64,/i.test(anexo.arquivo_data)
+        if (!isSafeDataUri) {
+          const link = document.createElement('a')
+          link.href = anexo.arquivo_data
+          link.download = anexo.nome_arquivo || 'contrato.bin'
+          link.click()
+          return
+        }
+
+        const win = window.open('', '_blank', 'noopener')
         if (win) {
+          const doc = win.document
+          doc.title = anexo.titulo || 'Contrato Anexo'
+          doc.body.replaceChildren()
+
           if (anexo.tipo_arquivo?.includes('pdf')) {
-            win.document.write(`
-              <html>
-                <head><title>${anexo.titulo || 'Contrato Anexo'}</title></head>
-                <body style="margin:0;height:100vh;background:#1e293b;">
-                  <iframe src="${anexo.arquivo_data}" frameborder="0" style="border:none; width:100%; height:100%;"></iframe>
-                </body>
-              </html>
-            `)
+            doc.body.style.cssText = 'margin:0;height:100vh;background:#1e293b;'
+            const iframe = doc.createElement('iframe')
+            iframe.src = anexo.arquivo_data
+            iframe.style.cssText = 'border:none;width:100%;height:100%;'
+            doc.body.appendChild(iframe)
           } else {
-            win.document.write(`
-              <html>
-                <head><title>${anexo.titulo || 'Contrato Anexo'}</title></head>
-                <body style="margin:20px; font-family:sans-serif; text-align:center; background:#f8fafc;">
-                  <h2>${anexo.titulo}</h2>
-                  <img src="${anexo.arquivo_data}" style="max-width:100%; border-radius:8px; box-shadow:0 4px 12px rgba(0,0,0,0.15);" />
-                  <div style="margin-top:20px;">
-                    <a href="${anexo.arquivo_data}" download="${anexo.nome_arquivo}" style="padding:10px 20px; background:#4f46e5; color:white; text-decoration:none; border-radius:6px; font-weight:bold;">Baixar Arquivo</a>
-                  </div>
-                </body>
-              </html>
-            `)
+            doc.body.style.cssText = 'margin:20px;font-family:sans-serif;text-align:center;background:#f8fafc;'
+            const heading = doc.createElement('h2')
+            heading.textContent = anexo.titulo || 'Contrato Anexo'
+            const img = doc.createElement('img')
+            img.src = anexo.arquivo_data
+            img.alt = anexo.titulo || 'Contrato Anexo'
+            img.style.cssText = 'max-width:100%;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,0.15);'
+            const actions = doc.createElement('div')
+            actions.style.marginTop = '20px'
+            const downloadLink = doc.createElement('a')
+            downloadLink.href = anexo.arquivo_data
+            downloadLink.download = anexo.nome_arquivo || 'anexo'
+            downloadLink.textContent = 'Baixar Arquivo'
+            downloadLink.style.cssText = 'padding:10px 20px;background:#0284c7;color:white;text-decoration:none;border-radius:6px;font-weight:bold;'
+            actions.appendChild(downloadLink)
+            doc.body.append(heading, img, actions)
           }
         } else {
           const link = document.createElement('a')
@@ -396,8 +410,8 @@ export default function Clientes() {
           link.download = anexo.nome_arquivo || 'contrato.pdf'
           link.click()
         }
-      } else {
-        window.open(anexo.arquivo_data, '_blank')
+      } else if (/^https?:\/\//i.test(anexo.arquivo_data)) {
+        window.open(anexo.arquivo_data, '_blank', 'noopener,noreferrer')
       }
     } catch (err: any) {
       alert(err.response?.data?.error || 'Erro ao carregar anexo do contrato.')
@@ -1291,7 +1305,7 @@ export default function Clientes() {
               {[
                 { id: 'titulos', label: 'Títulos e Faturas', icon: DollarSign, color: 'text-emerald-600 dark:text-emerald-400' },
                 { id: 'pedidos', label: 'Pedidos / Propostas & Contratos', icon: ClipboardList, color: 'text-blue-600 dark:text-blue-400' },
-                { id: 'produtos', label: 'Produtos & Serviços', icon: BookOpen, color: 'text-purple-600 dark:text-purple-400' },
+                { id: 'produtos', label: 'Produtos & Serviços', icon: BookOpen, color: 'text-cyan-600 dark:text-cyan-400' },
                 { id: 'modulos', label: 'Módulos & Software', icon: Cpu, color: 'text-amber-600 dark:text-amber-400' },
                 { id: 'relacionamento', label: 'Relacionamento & Atendimentos', icon: Headphones, color: 'text-indigo-600 dark:text-indigo-400' },
               ].map(tab => {
@@ -1471,7 +1485,7 @@ export default function Clientes() {
                                     (item.portador || item.portador_nome || '').toLowerCase().includes('cora')
                                       ? "bg-pink-50 text-pink-700 border-pink-200 dark:bg-pink-950 dark:text-pink-300"
                                       : (item.portador || item.portador_nome || '').toLowerCase().includes('asaas')
-                                      ? "bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-950 dark:text-purple-300"
+                                      ? "bg-cyan-50 text-cyan-700 border-cyan-200 dark:bg-cyan-950 dark:text-cyan-300"
                                       : (item.portador || item.portador_nome || '').toLowerCase().includes('banco')
                                       ? "bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950 dark:text-blue-300"
                                       : "bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950 dark:text-emerald-300"
@@ -1607,7 +1621,7 @@ export default function Clientes() {
                             <button
                               onClick={handleEmitirBoletoLote}
                               disabled={issuingBoleto}
-                              className="bg-purple-600 hover:bg-purple-700 text-white text-[11px] font-extrabold px-2.5 py-1 rounded-lg flex items-center gap-1 shadow-2xs shrink-0 cursor-pointer"
+                              className="bg-cyan-600 hover:bg-cyan-700 text-white text-[11px] font-extrabold px-2.5 py-1 rounded-lg flex items-center gap-1 shadow-2xs shrink-0 cursor-pointer"
                             >
                               <Printer size={13} /> {issuingBoleto ? '...' : 'Boleto'}
                             </button>
@@ -2428,7 +2442,7 @@ export default function Clientes() {
                             isSelected 
                               ? 'bg-indigo-600 text-white dark:bg-indigo-700 font-black border-l-4 border-l-amber-400 shadow-md ring-1 ring-indigo-500'
                               : isFornecedor
-                              ? 'hover:bg-purple-50/70 dark:hover:bg-purple-950/30 bg-white dark:bg-slate-900'
+                              ? 'hover:bg-cyan-50/70 dark:hover:bg-cyan-950/30 bg-white dark:bg-slate-900'
                               : 'hover:bg-indigo-50/50 dark:hover:bg-slate-800/60 bg-white dark:bg-slate-900'
                           )}
                         >
@@ -2447,7 +2461,7 @@ export default function Clientes() {
                           <td className="px-2.5 py-1 font-mono font-extrabold text-[11px] border-r border-slate-200 dark:border-slate-800 whitespace-nowrap">
                             <span className={clsx(
                               'px-1.5 py-0.5 rounded text-[10.5px]',
-                              isFornecedor ? 'text-purple-700 bg-purple-50 dark:bg-purple-950/60' : 'text-indigo-600 bg-indigo-50 dark:bg-indigo-950/60'
+                              isFornecedor ? 'text-cyan-700 bg-cyan-50 dark:bg-cyan-950/60' : 'text-indigo-600 bg-indigo-50 dark:bg-indigo-950/60'
                             )}>
                               #{r.id_firebird || r.id}
                             </span>
@@ -2458,7 +2472,7 @@ export default function Clientes() {
                             <div className="flex items-center gap-1.5">
                               <div className={clsx(
                                 'w-5 h-5 rounded flex items-center justify-center shrink-0 text-[10px]',
-                                isFornecedor ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/60' : 'bg-slate-100 text-slate-600 dark:bg-slate-800'
+                                isFornecedor ? 'bg-cyan-100 text-cyan-700 dark:bg-cyan-900/60' : 'bg-slate-100 text-slate-600 dark:bg-slate-800'
                               )}>
                                 {isFornecedor ? <Truck size={12} /> : <Building size={12} />}
                               </div>
@@ -2483,7 +2497,7 @@ export default function Clientes() {
                             <span className={clsx(
                               'text-[10px] font-extrabold px-1.5 py-0.5 rounded border uppercase',
                               isFornecedor
-                                ? 'bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-950/40'
+                                ? 'bg-cyan-50 text-cyan-700 border-cyan-200 dark:bg-cyan-950/40'
                                 : 'bg-slate-100 text-slate-700 border-slate-200 dark:bg-slate-800 dark:text-slate-300'
                             )}>
                               {classeText}
@@ -2658,7 +2672,7 @@ export default function Clientes() {
                 <span>Clientes: <strong>{formatNum(k?.total_clientes)}</strong></span>
               </div>
 
-              <div className="px-3 py-1.5 bg-purple-500/10 border border-purple-500/20 text-purple-600 rounded-xl font-extrabold flex items-center gap-1.5 shadow-2xs">
+              <div className="px-3 py-1.5 bg-cyan-500/10 border border-cyan-500/20 text-cyan-600 rounded-xl font-extrabold flex items-center gap-1.5 shadow-2xs">
                 <Truck size={13} />
                 <span>Fornecedores: <strong>{formatNum(k?.total_fornecedores)}</strong></span>
               </div>
@@ -2728,7 +2742,7 @@ export default function Clientes() {
               
               <div className="flex-1 overflow-y-auto pr-1 space-y-3.5 py-1">
                 {/* UNICO BLOCO CNPJ / CONSULTA AUTOMÁTICA DA RECEITA */}
-                <div className="p-3 bg-gradient-to-r from-indigo-50/80 via-white to-purple-50/50 dark:from-indigo-950/40 dark:via-slate-900 dark:to-purple-950/30 border border-indigo-200 dark:border-indigo-800 rounded-2xl flex flex-col sm:flex-row items-center gap-3 shadow-2xs">
+                <div className="p-3 bg-gradient-to-r from-indigo-50/80 via-white to-cyan-50/50 dark:from-indigo-950/40 dark:via-slate-900 dark:to-cyan-950/30 border border-indigo-200 dark:border-indigo-800 rounded-2xl flex flex-col sm:flex-row items-center gap-3 shadow-2xs">
                   <div className="flex-1 w-full space-y-1">
                     <label className="text-[10.5px] font-black text-indigo-950 dark:text-indigo-200 uppercase tracking-wider flex items-center gap-1.5">
                       <FileText size={14} className="text-indigo-600 dark:text-indigo-400" />

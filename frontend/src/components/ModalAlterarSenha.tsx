@@ -38,6 +38,11 @@ export default function ModalAlterarSenha({
     const cleanNova = novaSenha.trim()
     const cleanConfirmar = confirmarSenha.trim()
 
+    if (!isForced && !senhaAtual.trim()) {
+      setError('Por favor, informe sua senha atual.')
+      return
+    }
+
     if (!cleanNova) {
       setError('Por favor, informe a nova senha.')
       return
@@ -92,9 +97,9 @@ export default function ModalAlterarSenha({
       <div className="bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl w-full max-w-md overflow-hidden text-slate-100 animate-scale-up">
         
         {/* CABEÇALHO */}
-        <div className="px-6 py-4 border-b border-slate-800 bg-gradient-to-r from-indigo-950 via-slate-900 to-slate-900 flex items-center justify-between">
+        <div className="px-6 py-4 border-b border-slate-800 bg-gradient-to-r from-teal-950 via-slate-900 to-slate-900 flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <div className="p-2 bg-indigo-500/20 text-indigo-400 rounded-xl">
+            <div className="p-2 bg-teal-500/20 text-teal-400 rounded-xl">
               <Key size={20} />
             </div>
             <div>
@@ -150,19 +155,22 @@ export default function ModalAlterarSenha({
           {/* CAMPO SENHA ATUAL (Apenas se não for forçado) */}
           {!isForced && (
             <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-1">
-                Senha Atual (opcional)
+              <label htmlFor="modal-senha-atual" className="block text-xs font-semibold text-slate-300 mb-1">
+                Senha Atual <span className="text-rose-400">*</span>
               </label>
               <div className="relative">
                 <input
+                  id="modal-senha-atual"
                   type={showSenhaAtual ? 'text' : 'password'}
                   value={senhaAtual}
                   onChange={(e) => setSenhaAtual(e.target.value)}
                   placeholder="Digite sua senha atual"
-                  className="w-full px-3.5 py-2.5 pr-10 bg-slate-800/80 border border-slate-700 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 transition-colors"
+                  required
+                  className="w-full px-3.5 py-2.5 pr-10 bg-slate-800/80 border border-slate-700 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-teal-500 transition-colors"
                 />
                 <button
                   type="button"
+                  aria-label="Mostrar ou ocultar senha atual"
                   onClick={() => setShowSenhaAtual(!showSenhaAtual)}
                   className="absolute right-3 top-2.5 text-slate-400 hover:text-slate-200"
                 >
@@ -174,21 +182,23 @@ export default function ModalAlterarSenha({
 
           {/* CAMPO NOVA SENHA */}
           <div>
-            <label className="block text-xs font-semibold text-slate-300 mb-1">
+            <label htmlFor="modal-nova-senha" className="block text-xs font-semibold text-slate-300 mb-1">
               Nova Senha <span className="text-rose-400">*</span>
             </label>
             <div className="relative">
               <input
+                id="modal-nova-senha"
                 type={showNovaSenha ? 'text' : 'password'}
                 value={novaSenha}
                 onChange={(e) => setNovaSenha(e.target.value)}
                 placeholder="Digite a nova senha (não use 123456)"
                 required
                 minLength={6}
-                className="w-full px-3.5 py-2.5 pr-10 bg-slate-800/80 border border-slate-700 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 transition-colors"
+                className="w-full px-3.5 py-2.5 pr-10 bg-slate-800/80 border border-slate-700 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-teal-500 transition-colors"
               />
               <button
                 type="button"
+                aria-label="Mostrar ou ocultar nova senha"
                 onClick={() => setShowNovaSenha(!showNovaSenha)}
                 className="absolute right-3 top-2.5 text-slate-400 hover:text-slate-200"
               >
@@ -202,20 +212,22 @@ export default function ModalAlterarSenha({
 
           {/* CAMPO CONFIRMAR NOVA SENHA */}
           <div>
-            <label className="block text-xs font-semibold text-slate-300 mb-1">
+            <label htmlFor="modal-confirmar-senha" className="block text-xs font-semibold text-slate-300 mb-1">
               Confirmar Nova Senha <span className="text-rose-400">*</span>
             </label>
             <div className="relative">
               <input
+                id="modal-confirmar-senha"
                 type={showConfirmarSenha ? 'text' : 'password'}
                 value={confirmarSenha}
                 onChange={(e) => setConfirmarSenha(e.target.value)}
                 placeholder="Repita a nova senha"
                 required
-                className="w-full px-3.5 py-2.5 pr-10 bg-slate-800/80 border border-slate-700 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 transition-colors"
+                className="w-full px-3.5 py-2.5 pr-10 bg-slate-800/80 border border-slate-700 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-teal-500 transition-colors"
               />
               <button
                 type="button"
+                aria-label="Mostrar ou ocultar confirmação de senha"
                 onClick={() => setShowConfirmarSenha(!showConfirmarSenha)}
                 className="absolute right-3 top-2.5 text-slate-400 hover:text-slate-200"
               >
@@ -240,7 +252,7 @@ export default function ModalAlterarSenha({
             <button
               type="submit"
               disabled={loading || Boolean(success)}
-              className="w-full py-2.5 px-4 bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-500 hover:to-blue-500 text-white rounded-xl text-xs font-bold transition-all shadow-md flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+              className="w-full py-2.5 px-4 bg-gradient-to-r from-teal-600 to-cyan-600 hover:from-teal-500 hover:to-cyan-500 text-white rounded-xl text-xs font-bold transition-all shadow-md flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
             >
               {loading ? (
                 <>

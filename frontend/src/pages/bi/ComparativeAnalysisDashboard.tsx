@@ -179,9 +179,9 @@ export default function ProfitabilityDashboard() {
         </div>
 
         {/* Margem */}
-        <div className="bg-bg-primary border border-border shadow-card rounded-xl p-5 flex flex-col justify-between hover:border-purple-500/50 transition-colors">
+        <div className="bg-bg-primary border border-border shadow-card rounded-xl p-5 flex flex-col justify-between hover:border-cyan-500/50 transition-colors">
           <div className="flex items-center gap-2 text-[10px] font-bold text-text-muted uppercase tracking-wider mb-3">
-            <div className="p-1.5 bg-purple-500/10 rounded-lg"><Percent size={14} className="text-purple-500" /></div> MARGEM DE LUCRO (%)
+            <div className="p-1.5 bg-cyan-500/10 rounded-lg"><Percent size={14} className="text-cyan-500" /></div> MARGEM DE LUCRO (%)
           </div>
           <div className="text-3xl font-extrabold text-text-primary mb-1">{overview.margem_pct.toFixed(1)}%</div>
           <div className="text-[10px] text-text-muted">Eficiência operacional</div>
@@ -299,7 +299,7 @@ export default function ProfitabilityDashboard() {
                 <Tooltip content={<CustomTooltip />} cursor={{ fill: 'var(--color-bg-tertiary)', opacity: 0.4 }} />
                 <Bar dataKey="lucro" fill="#06B6D4" radius={[0, 4, 4, 0]} maxBarSize={14}>
                   {grupoData.map((entry, index) => (
-                     <Cell key={`cell-${index}`} fill={index < 3 ? '#0EA5E9' : index < 7 ? '#8B5CF6' : '#F59E0B'} />
+                     <Cell key={`cell-${index}`} fill={index < 3 ? '#0EA5E9' : index < 7 ? '#0891B2' : '#F59E0B'} />
                   ))}
                 </Bar>
               </BarChart>

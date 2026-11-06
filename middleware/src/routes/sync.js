@@ -4,8 +4,34 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db/postgres');
 const logger = require('../config/logger');
-const { requireWebJwt, requireInternalAuth } = require('../middleware/auth');
+const { requireInternalAuth, requireAdmin, isValidUuid } = require('../middleware/auth');
 const { invalidateTenant } = require('../config/cache');
+
+const MASTER_TENANT_ID = '00000000-0000-0000-0000-000000000000';
+
+function resolveAuthenticatedTenant(req) {
+    const authTenantId = req.tenant?.id;
+    if (!authTenantId || !isValidUuid(authTenantId)) return null;
+
+    const isMasterUser =
+        authTenantId === MASTER_TENANT_ID &&
+        String(req.user?.role || '').toLowerCase() === 'master';
+
+    // Permite que super-admin Master filtre por um tenant específico via query/header se válido
+    if (isMasterUser) {
+        const requested = req.query?.tenant_id || req.headers['x-tenant-id'];
+        if (requested && isValidUuid(String(requested).trim()) && String(requested).trim() !== MASTER_TENANT_ID) {
+            return { tenantId: String(requested).trim(), allowAllTenants: false, isMasterUser: true };
+        }
+        return { tenantId: MASTER_TENANT_ID, allowAllTenants: true, isMasterUser: true };
+    }
+
+    if (authTenantId === MASTER_TENANT_ID) {
+        return null;
+    }
+
+    return { tenantId: authTenantId, allowAllTenants: false, isMasterUser: false };
+}
 
 const TABELAS_MAP = {
     'dash_clientes': [
@@ -64,8 +90,8 @@ router.post('/start', async (req, res) => {
  * Recebe batimento cardíaco do Worker .NET e registra em dash_sync_metadata.
  */
 router.post('/heartbeat', async (req, res) => {
-    const tenantId = req.tenant?.id || req.headers['x-tenant-id'];
-    if (!tenantId) return res.status(200).json({ ok: true });
+    const scope = resolveAuthenticatedTenant(req);
+    if (!scope || scope.allowAllTenants) return res.status(200).json({ ok: true });
     try {
         await db.query(`
             INSERT INTO dash_sync_metadata (tenant_id, tabela, ultima_sincronizacao, registros_sincronizados, status, erro_mensagem)
@@ -74,7 +100,7 @@ router.post('/heartbeat', async (req, res) => {
                 ultima_sincronizacao = NOW(),
                 status = 'OK',
                 erro_mensagem = NULL
-        `, [tenantId]);
+        `, [scope.tenantId]);
     } catch (_) { /* ignore if metadata table missing */ }
     return res.status(200).json({ ok: true, timestamp: new Date().toISOString() });
 });
@@ -85,16 +111,20 @@ router.post('/heartbeat', async (req, res) => {
  */
 router.get('/status', async (req, res) => {
     try {
-        const tenantId = req.tenant?.id || req.headers['x-tenant-id'] || '6ab9b8b2-09b1-4698-aead-bea948a42036';
+        const scope = resolveAuthenticatedTenant(req);
+        if (!scope) {
+            return res.status(401).json({ error: 'Tenant não autenticado.' });
+        }
+        const { tenantId, allowAllTenants } = scope;
 
         const [rClientes, rProdutos, rCargas, rVendas, rVendasItens, rFinanceiro, rMeta] = await Promise.all([
-            db.query(`SELECT COUNT(*)::int AS total, MAX(sincronizado_em) AS max_date FROM dash_clientes WHERE ($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text))`, [String(tenantId)]).catch(() => ({ rows: [{ total: 0 }] })),
-            db.query(`SELECT COUNT(*)::int AS total, MAX(sincronizado_em) AS max_date FROM dash_produtos WHERE ($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text))`, [String(tenantId)]).catch(() => ({ rows: [{ total: 0 }] })),
-            db.query(`SELECT COUNT(*)::int AS total, MAX(sincronizado_em) AS max_date FROM dash_cargas WHERE ($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text))`, [String(tenantId)]).catch(() => ({ rows: [{ total: 0 }] })),
-            db.query(`SELECT COUNT(*)::int AS total, MAX(sincronizado_em) AS max_date FROM dash_vendas WHERE ($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text))`, [String(tenantId)]).catch(() => ({ rows: [{ total: 0 }] })),
-            db.query(`SELECT COUNT(*)::int AS total, MAX(sincronizado_em) AS max_date FROM dash_vendas_itens WHERE ($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text))`, [String(tenantId)]).catch(() => ({ rows: [{ total: 0 }] })),
-            db.query(`SELECT COUNT(*)::int AS total, MAX(sincronizado_em) AS max_date FROM dash_financeiro WHERE ($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text))`, [String(tenantId)]).catch(() => ({ rows: [{ total: 0 }] })),
-            db.query(`SELECT tabela, ultima_sincronizacao AS ultima, status, registros_sincronizados AS registros FROM dash_sync_metadata WHERE ($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text))`, [String(tenantId)]).catch(() => ({ rows: [] }))
+            db.query(`SELECT COUNT(*)::int AS total, MAX(sincronizado_em) AS max_date FROM dash_clientes WHERE ($2::boolean = true OR LOWER(tenant_id::text) = LOWER($1::text))`, [String(tenantId), allowAllTenants]).catch(() => ({ rows: [{ total: 0 }] })),
+            db.query(`SELECT COUNT(*)::int AS total, MAX(sincronizado_em) AS max_date FROM dash_produtos WHERE ($2::boolean = true OR LOWER(tenant_id::text) = LOWER($1::text))`, [String(tenantId), allowAllTenants]).catch(() => ({ rows: [{ total: 0 }] })),
+            db.query(`SELECT COUNT(*)::int AS total, MAX(sincronizado_em) AS max_date FROM dash_cargas WHERE ($2::boolean = true OR LOWER(tenant_id::text) = LOWER($1::text))`, [String(tenantId), allowAllTenants]).catch(() => ({ rows: [{ total: 0 }] })),
+            db.query(`SELECT COUNT(*)::int AS total, MAX(sincronizado_em) AS max_date FROM dash_vendas WHERE ($2::boolean = true OR LOWER(tenant_id::text) = LOWER($1::text))`, [String(tenantId), allowAllTenants]).catch(() => ({ rows: [{ total: 0 }] })),
+            db.query(`SELECT COUNT(*)::int AS total, MAX(sincronizado_em) AS max_date FROM dash_vendas_itens WHERE ($2::boolean = true OR LOWER(tenant_id::text) = LOWER($1::text))`, [String(tenantId), allowAllTenants]).catch(() => ({ rows: [{ total: 0 }] })),
+            db.query(`SELECT COUNT(*)::int AS total, MAX(sincronizado_em) AS max_date FROM dash_financeiro WHERE ($2::boolean = true OR LOWER(tenant_id::text) = LOWER($1::text))`, [String(tenantId), allowAllTenants]).catch(() => ({ rows: [{ total: 0 }] })),
+            db.query(`SELECT tabela, ultima_sincronizacao AS ultima, status, registros_sincronizados AS registros FROM dash_sync_metadata WHERE ($2::boolean = true OR LOWER(tenant_id::text) = LOWER($1::text))`, [String(tenantId), allowAllTenants]).catch(() => ({ rows: [] }))
         ]);
 
         const metaByTable = {};
@@ -198,8 +228,8 @@ router.get('/pending-inactivations', async (req, res) => {
         if (rows.length > 0) {
             const ids = rows.map(r => r.id);
             await db.query(
-                `UPDATE pending_inactivations SET status = 'PROCESSANDO' WHERE id = ANY($1)`,
-                [ids]
+                `UPDATE pending_inactivations SET status = 'PROCESSANDO' WHERE id = ANY($1) AND tenant_id = $2`,
+                [ids, tenantId]
             );
         }
 
@@ -244,12 +274,16 @@ router.post('/confirm-inactivation', async (req, res) => {
  * Retorna pagamentos quitados no Asaas/Nexus pendentes para o Worker sincronizar no ERP Coliseu (Firebird).
  */
 router.get('/pending-payments', async (req, res) => {
-    const tenantId = req.tenant?.id || req.headers['x-tenant-id'] || '6ab9b8b2-09b1-4698-aead-bea948a42036';
+    const scope = resolveAuthenticatedTenant(req);
+    if (!scope || scope.allowAllTenants) {
+        return res.status(400).json({ error: 'Tenant específico obrigatório para consumir fila de pagamentos.' });
+    }
+    const { tenantId } = scope;
     try {
         const { rows } = await db.query(`
             SELECT id, titulo_id, id_firebird, nosso_numero, numero_documento, valor_pago, data_pagamento, forma_pagamento, tentativas, criado_em
             FROM pending_payments
-            WHERE (LOWER(tenant_id::text) = LOWER($1::text) OR $1 = '00000000-0000-0000-0000-000000000000')
+            WHERE LOWER(tenant_id::text) = LOWER($1::text)
               AND (status IN ('PENDENTE', 'ERRO') OR (status = 'PROCESSANDO' AND (processado_em IS NULL OR processado_em < NOW() - INTERVAL '1 minute')))
               AND tentativas < 25
             ORDER BY 
@@ -262,8 +296,8 @@ router.get('/pending-payments', async (req, res) => {
         if (rows.length > 0) {
             const ids = rows.map(r => r.id);
             await db.query(
-                `UPDATE pending_payments SET status = 'PROCESSANDO', processado_em = NOW() WHERE id = ANY($1)`,
-                [ids]
+                `UPDATE pending_payments SET status = 'PROCESSANDO', processado_em = NOW() WHERE id = ANY($1) AND LOWER(tenant_id::text) = LOWER($2::text)`,
+                [ids, String(tenantId)]
             );
         }
 
@@ -303,21 +337,24 @@ router.get('/pending-payments', async (req, res) => {
  * Body: { id: number, success: boolean, error?: string }
  */
 router.post('/confirm-payment', async (req, res) => {
-    const tenantId = req.tenant?.id || req.headers['x-tenant-id'];
+    const scope = resolveAuthenticatedTenant(req);
     const { id, success, error } = req.body || {};
 
+    if (!scope || scope.allowAllTenants) {
+        return res.status(400).json({ error: 'Tenant específico obrigatório.' });
+    }
     if (!id) return res.status(400).json({ error: 'id é obrigatório.' });
 
     try {
         if (success) {
             await db.query(
-                `UPDATE pending_payments SET status = 'CONCLUIDO', processado_em = NOW() WHERE id = $1`,
-                [id]
+                `UPDATE pending_payments SET status = 'CONCLUIDO', processado_em = NOW() WHERE id = $1 AND LOWER(tenant_id::text) = LOWER($2::text)`,
+                [parseInt(id, 10), String(scope.tenantId)]
             );
         } else {
             await db.query(
-                `UPDATE pending_payments SET status = 'ERRO', tentativas = tentativas + 1, erro_mensagem = $1 WHERE id = $2`,
-                [error || 'Erro desconhecido', id]
+                `UPDATE pending_payments SET status = 'ERRO', tentativas = tentativas + 1, erro_mensagem = $1 WHERE id = $2 AND LOWER(tenant_id::text) = LOWER($3::text)`,
+                [error || 'Erro desconhecido', parseInt(id, 10), String(scope.tenantId)]
             );
         }
         return res.json({ success: true });
@@ -331,29 +368,38 @@ router.post('/confirm-payment', async (req, res) => {
  * Reenfileira todas as quitações de títulos vinculados para o Worker do ERP Coliseu (Firebird).
  */
 router.post('/resync-quitacoes', async (req, res) => {
-    const tenantId = req.tenant?.id || req.headers['x-tenant-id'] || '6ab9b8b2-09b1-4698-aead-bea948a42036';
-    const { hoje, all, id_firebird, nosso_numero, reset_errors } = req.body || {};
+    const scope = resolveAuthenticatedTenant(req);
+    if (!scope || scope.allowAllTenants) {
+        return res.status(400).json({ error: 'Selecione uma empresa válida para reenfileirar quitações.' });
+    }
+    const { tenantId } = scope;
+    const { hoje, id_firebird, nosso_numero, reset_errors } = req.body || {};
     try {
         if (reset_errors) {
             await db.query(`
                 UPDATE pending_payments 
                 SET status = 'PENDENTE', tentativas = 0, processado_em = NULL, erro_mensagem = NULL
-                WHERE (LOWER(tenant_id::text) = LOWER($1::text) OR $1 = '00000000-0000-0000-0000-000000000000')
+                WHERE LOWER(tenant_id::text) = LOWER($1::text)
                   AND status IN ('ERRO', 'PROCESSANDO')
             `, [String(tenantId)]);
         }
 
+        const params = [String(tenantId)];
         let filterExtra = '';
-        if (id_firebird) {
-            filterExtra += ` AND f.id_firebird = ${parseInt(id_firebird, 10)}`;
+        if (id_firebird !== undefined && id_firebird !== null && id_firebird !== '') {
+            const parsedFb = parseInt(id_firebird, 10);
+            if (!isNaN(parsedFb)) {
+                params.push(parsedFb);
+                filterExtra += ` AND f.id_firebird = $${params.length}`;
+            }
         }
-        if (nosso_numero) {
-            filterExtra += ` AND f.nosso_numero = '${String(nosso_numero).trim()}'`;
+        if (nosso_numero !== undefined && nosso_numero !== null && String(nosso_numero).trim() !== '') {
+            params.push(String(nosso_numero).trim());
+            filterExtra += ` AND f.nosso_numero = $${params.length}`;
         }
         if (hoje) {
             filterExtra += ` AND (
                 DATE(f.data_pagamento) = CURRENT_DATE 
-                OR DATE(f.data_pagamento) = '2026-09-01'
                 OR DATE(f.data_vinculo) = CURRENT_DATE
                 OR DATE(f.updated_at) = CURRENT_DATE
                 OR f.data_pagamento >= CURRENT_DATE - INTERVAL '1 day'
@@ -375,7 +421,7 @@ router.post('/resync-quitacoes', async (req, res) => {
                 0 AS tentativas,
                 NOW() AS criado_em
             FROM dash_financeiro f
-            WHERE (LOWER(f.tenant_id::text) = LOWER($1::text) OR $1 = '00000000-0000-0000-0000-000000000000')
+            WHERE LOWER(f.tenant_id::text) = LOWER($1::text)
               AND (
                 UPPER(COALESCE(f.status_pagamento, '')) IN ('PAGO', 'QUITADO', 'RECEBIDO', 'RECEIVED', 'CONFIRMED', 'RECEIVED_IN_CASH', 'BAIXADO', 'LIQUIDADO')
                 OR (f.valor_pago IS NOT NULL AND f.valor_pago >= f.valor AND f.valor > 0)
@@ -394,7 +440,7 @@ router.post('/resync-quitacoes', async (req, res) => {
                 processado_em = NULL,
                 erro_mensagem = NULL
             RETURNING id, titulo_id, id_firebird, nosso_numero, valor_pago, status;
-        `, [String(tenantId)]);
+        `, params);
 
         logger.info('[Sync] Quitações reenfileiradas com sucesso', { tenantId, count: queryResult.rows.length });
         return res.json({ success: true, count: queryResult.rows.length, rows: queryResult.rows });
@@ -409,7 +455,11 @@ router.post('/resync-quitacoes', async (req, res) => {
  * Retorna todos os títulos quitados no período com data_pagamento e valor_pago para o ERP Coliseu.
  */
 router.get('/quitacoes', async (req, res) => {
-    const tenantId = req.tenant?.id || req.headers['x-tenant-id'] || '6ab9b8b2-09b1-4698-aead-bea948a42036';
+    const scope = resolveAuthenticatedTenant(req);
+    if (!scope || scope.allowAllTenants) {
+        return res.status(400).json({ error: 'Tenant específico obrigatório.' });
+    }
+    const { tenantId } = scope;
     const startDate = req.query.startDate || req.query.start_date || '';
     const endDate = req.query.endDate || req.query.end_date || '';
 
@@ -417,7 +467,7 @@ router.get('/quitacoes', async (req, res) => {
         let sql = `
             SELECT id, id_firebird, nosso_numero, numero_documento, valor, valor_pago, data_pagamento, status_pagamento, cliente_id_firebird
             FROM dash_financeiro
-            WHERE (LOWER(tenant_id::text) = LOWER($1::text) OR $1 = '00000000-0000-0000-0000-000000000000')
+            WHERE LOWER(tenant_id::text) = LOWER($1::text)
               AND status_pagamento = 'PAGO'
               AND id_firebird IS NOT NULL
         `;
@@ -448,12 +498,16 @@ router.get('/quitacoes', async (req, res) => {
  * para o Worker sincronizar no ERP Coliseu (Firebird).
  */
 router.get('/pending-operations', async (req, res) => {
-    const tenantId = req.tenant?.id || req.headers['x-tenant-id'] || '6ab9b8b2-09b1-4698-aead-bea948a42036';
+    const scope = resolveAuthenticatedTenant(req);
+    if (!scope || scope.allowAllTenants) {
+        return res.status(400).json({ error: 'Tenant específico obrigatório.' });
+    }
+    const { tenantId } = scope;
     try {
         const { rows } = await db.query(`
             SELECT id, tabela, operacao, payload, status, created_at
             FROM dash_sync_metadata
-            WHERE (LOWER(tenant_id::text) = LOWER($1::text) OR $1 = '00000000-0000-0000-0000-000000000000')
+            WHERE LOWER(tenant_id::text) = LOWER($1::text)
               AND status = 'PENDENTE'
               AND tabela IN ('LANCTO_FINANCEIRO', 'ALTERACAO_TITULO', 'CLIENTES')
             ORDER BY created_at ASC
@@ -473,7 +527,11 @@ router.get('/pending-operations', async (req, res) => {
  * Body: { id: number, id_firebird?: number, success: boolean, error?: string }
  */
 router.post('/confirm-operation', async (req, res) => {
-    const tenantId = req.tenant?.id || req.headers['x-tenant-id'];
+    const scope = resolveAuthenticatedTenant(req);
+    if (!scope || scope.allowAllTenants) {
+        return res.status(400).json({ error: 'Tenant específico obrigatório.' });
+    }
+    const { tenantId } = scope;
     const id = req.body?.id || req.body?.sync_id || req.body?.id_operacao;
     const id_firebird = req.body?.id_firebird || req.body?.idFirebird || req.body?.codigo_firebird;
     const success = req.body?.success === true || String(req.body?.status || '').toUpperCase() === 'PROCESSADO' || String(req.body?.status || '').toUpperCase() === 'OK';
@@ -483,13 +541,14 @@ router.post('/confirm-operation', async (req, res) => {
 
     try {
         if (success) {
-            // Atualiza status do metadata para CONCLUIDO
             const metaRes = await db.query(
-                `UPDATE dash_sync_metadata SET status = 'CONCLUIDO', erro_mensagem = NULL WHERE id = $1 RETURNING tabela, payload`,
-                [id]
+                `UPDATE dash_sync_metadata
+                 SET status = 'CONCLUIDO', erro_mensagem = NULL
+                 WHERE id = $1 AND LOWER(tenant_id::text) = LOWER($2::text)
+                 RETURNING tabela, payload`,
+                [parseInt(id, 10), String(tenantId)]
             );
 
-            // Atualiza id_firebird correspondente no Nexus (clientes ou financeiro)
             if (id_firebird && metaRes.rows.length > 0) {
                 const tabela = String(metaRes.rows[0].tabela || '').toUpperCase();
                 const payload = metaRes.rows[0].payload || {};
@@ -498,28 +557,26 @@ router.post('/confirm-operation', async (req, res) => {
 
                 if (nexusId && !isNaN(fbIdInt)) {
                     if (tabela === 'CLIENTES' || tabela === 'DASH_CLIENTES') {
-                        // Previne erro de chave única removendo eventuais registros duplicados órfãos criados antes da vinculação
                         await db.query(
-                            `DELETE FROM dash_clientes WHERE id_firebird = $1 AND id != $2 AND ($3::text IS NULL OR LOWER(tenant_id::text) = LOWER($3::text))`,
-                            [fbIdInt, parseInt(nexusId, 10), tenantId ? String(tenantId) : null]
+                            `DELETE FROM dash_clientes WHERE id_firebird = $1 AND id != $2 AND LOWER(tenant_id::text) = LOWER($3::text)`,
+                            [fbIdInt, parseInt(nexusId, 10), String(tenantId)]
                         ).catch(() => {});
 
                         await db.query(
-                            `UPDATE dash_clientes SET id_firebird = $1 WHERE id = $2`,
-                            [fbIdInt, parseInt(nexusId, 10)]
+                            `UPDATE dash_clientes SET id_firebird = $1 WHERE id = $2 AND LOWER(tenant_id::text) = LOWER($3::text)`,
+                            [fbIdInt, parseInt(nexusId, 10), String(tenantId)]
                         ).catch((err) => {
                             logger.warn(`[Sync] Falha ao atualizar id_firebird em dash_clientes:`, err.message);
                         });
                     } else if (tabela === 'LANCTO_FINANCEIRO' || tabela === 'ALTERACAO_TITULO' || tabela === 'DASH_FINANCEIRO') {
-                        // Previne erro de chave única removendo eventuais registros duplicados órfãos criados antes da vinculação
                         await db.query(
-                            `DELETE FROM dash_financeiro WHERE id_firebird = $1 AND id != $2 AND ($3::text IS NULL OR LOWER(tenant_id::text) = LOWER($3::text))`,
-                            [fbIdInt, parseInt(nexusId, 10), tenantId ? String(tenantId) : null]
+                            `DELETE FROM dash_financeiro WHERE id_firebird = $1 AND id != $2 AND LOWER(tenant_id::text) = LOWER($3::text)`,
+                            [fbIdInt, parseInt(nexusId, 10), String(tenantId)]
                         ).catch(() => {});
 
                         await db.query(
-                            `UPDATE dash_financeiro SET id_firebird = $1 WHERE id = $2`,
-                            [fbIdInt, parseInt(nexusId, 10)]
+                            `UPDATE dash_financeiro SET id_firebird = $1 WHERE id = $2 AND LOWER(tenant_id::text) = LOWER($3::text)`,
+                            [fbIdInt, parseInt(nexusId, 10), String(tenantId)]
                         ).catch((err) => {
                             logger.warn(`[Sync] Falha ao atualizar id_firebird em dash_financeiro:`, err.message);
                         });
@@ -528,8 +585,8 @@ router.post('/confirm-operation', async (req, res) => {
             }
         } else {
             await db.query(
-                `UPDATE dash_sync_metadata SET status = 'ERRO', erro_mensagem = $1 WHERE id = $2`,
-                [error || 'Erro ao aplicar no ERP', id]
+                `UPDATE dash_sync_metadata SET status = 'ERRO', erro_mensagem = $1 WHERE id = $2 AND LOWER(tenant_id::text) = LOWER($3::text)`,
+                [error || 'Erro ao aplicar no ERP', parseInt(id, 10), String(tenantId)]
             );
         }
         return res.json({ success: true });
@@ -544,13 +601,17 @@ router.post('/confirm-operation', async (req, res) => {
  * para o Worker atualizar no ERP Coliseu (Firebird).
  */
 router.get('/boletos-emitidos', async (req, res) => {
-    const tenantId = req.tenant?.id || req.headers['x-tenant-id'] || '6ab9b8b2-09b1-4698-aead-bea948a42036';
+    const scope = resolveAuthenticatedTenant(req);
+    if (!scope || scope.allowAllTenants) {
+        return res.status(400).json({ error: 'Tenant específico obrigatório.' });
+    }
+    const { tenantId } = scope;
     try {
         const { rows } = await db.query(`
             SELECT id, id_firebird, nosso_numero, numero_documento, valor, data_vencimento, 
                    asaas_payment_id, asaas_bank_slip_url, asaas_linha_digitavel, asaas_bar_code, status_pagamento
             FROM dash_financeiro
-            WHERE (LOWER(tenant_id::text) = LOWER($1::text) OR $1 = '00000000-0000-0000-0000-000000000000')
+            WHERE LOWER(tenant_id::text) = LOWER($1::text)
               AND nosso_numero IS NOT NULL
               AND TRIM(nosso_numero) != ''
               AND nosso_numero != '—'
@@ -571,13 +632,17 @@ router.get('/boletos-emitidos', async (req, res) => {
  * para o Worker cadastrar no ERP Coliseu (Firebird).
  */
 router.get('/titulos-nexus', async (req, res) => {
-    const tenantId = req.tenant?.id || req.headers['x-tenant-id'] || '6ab9b8b2-09b1-4698-aead-bea948a42036';
+    const scope = resolveAuthenticatedTenant(req);
+    if (!scope || scope.allowAllTenants) {
+        return res.status(400).json({ error: 'Tenant específico obrigatório.' });
+    }
+    const { tenantId } = scope;
     try {
         const { rows } = await db.query(`
             SELECT f.id AS id_nexus, f.tipo, f.descricao, f.valor, f.data_emissao, f.data_vencimento,
                    f.cliente_id_firebird, f.cliente_nome, f.cliente_documento, f.nosso_numero, f.numero_documento, f.status_pagamento
             FROM dash_financeiro f
-            WHERE (LOWER(f.tenant_id::text) = LOWER($1::text) OR $1 = '00000000-0000-0000-0000-000000000000')
+            WHERE LOWER(f.tenant_id::text) = LOWER($1::text)
               AND (f.id_firebird IS NULL OR f.id_firebird <= 1)
             ORDER BY f.id ASC
             LIMIT 100
@@ -596,7 +661,11 @@ router.get('/titulos-nexus', async (req, res) => {
  * Body: { id_nexus: number, id_firebird: number }
  */
 router.post('/confirm-titulo-link', async (req, res) => {
-    const tenantId = req.tenant?.id || req.headers['x-tenant-id'];
+    const scope = resolveAuthenticatedTenant(req);
+    if (!scope || scope.allowAllTenants) {
+        return res.status(400).json({ error: 'Tenant específico obrigatório.' });
+    }
+    const { tenantId } = scope;
     const { id_nexus, id_firebird } = req.body || {};
 
     if (!id_nexus || !id_firebird) {
@@ -607,8 +676,8 @@ router.post('/confirm-titulo-link', async (req, res) => {
         await db.query(
             `UPDATE dash_financeiro 
              SET id_firebird = $1 
-             WHERE id = $2 AND ($3::text IS NULL OR LOWER(tenant_id::text) = LOWER($3::text))`,
-            [id_firebird, id_nexus, tenantId || null]
+             WHERE id = $2 AND LOWER(tenant_id::text) = LOWER($3::text)`,
+            [parseInt(id_firebird, 10), parseInt(id_nexus, 10), String(tenantId)]
         );
         return res.json({ success: true, message: `Título Nexus #${id_nexus} vinculado ao Firebird #${id_firebird}` });
     } catch (err) {
@@ -622,7 +691,11 @@ router.post('/confirm-titulo-link', async (req, res) => {
  * Dispara sincronização de boletos quitados no Banco Cora para a fila pending_payments.
  */
 router.get('/sync-cora', async (req, res) => {
-    const tenantId = req.query.tenant_id || req.tenant?.id || req.headers['x-tenant-id'] || '6ab9b8b2-09b1-4698-aead-bea948a42036';
+    const scope = resolveAuthenticatedTenant(req);
+    if (!scope || scope.allowAllTenants) {
+        return res.status(400).json({ error: 'Tenant específico obrigatório.' });
+    }
+    const { tenantId } = scope;
     try {
         const CoraService = require('../services/CoraService');
         const result = await CoraService.sincronizarFaturasCora(tenantId);
@@ -634,19 +707,47 @@ router.get('/sync-cora', async (req, res) => {
 
 /**
  * GET /api/sync/pending-payment-check
- * Consulta o status de quitações na fila pending_payments.
+ * Consulta o status de quitações na fila pending_payments (parametrizado e isolado por tenant).
  */
 router.get('/pending-payment-check', async (req, res) => {
+    const scope = resolveAuthenticatedTenant(req);
+    if (!scope) {
+        return res.status(401).json({ error: 'Tenant não autenticado.' });
+    }
     const { id_firebird, nosso_numero, id, status, limit, hoje } = req.query;
     try {
-        let cond = '1=1';
-        if (id_firebird) cond += ` AND p.id_firebird = ${parseInt(id_firebird, 10)}`;
-        if (nosso_numero) cond += ` AND p.nosso_numero = '${String(nosso_numero).trim()}'`;
-        if (id) cond += ` AND p.id = ${parseInt(id, 10)}`;
-        if (status) cond += ` AND p.status = '${String(status).trim().toUpperCase()}'`;
-        if (hoje) cond += ` AND (DATE(p.processado_em) = CURRENT_DATE OR DATE(p.data_pagamento) = CURRENT_DATE OR p.processado_em >= NOW() - INTERVAL '24 hours')`;
-        
-        const lim = parseInt(limit, 10) || 100;
+        const params = [String(scope.tenantId), scope.allowAllTenants];
+        let cond = `($2::boolean = true OR LOWER(p.tenant_id::text) = LOWER($1::text))`;
+
+        if (id_firebird !== undefined && id_firebird !== '') {
+            const parsed = parseInt(id_firebird, 10);
+            if (!isNaN(parsed)) {
+                params.push(parsed);
+                cond += ` AND p.id_firebird = $${params.length}`;
+            }
+        }
+        if (nosso_numero !== undefined && String(nosso_numero).trim() !== '') {
+            params.push(String(nosso_numero).trim());
+            cond += ` AND p.nosso_numero = $${params.length}`;
+        }
+        if (id !== undefined && id !== '') {
+            const parsedId = parseInt(id, 10);
+            if (!isNaN(parsedId)) {
+                params.push(parsedId);
+                cond += ` AND p.id = $${params.length}`;
+            }
+        }
+        if (status !== undefined && String(status).trim() !== '') {
+            params.push(String(status).trim().toUpperCase());
+            cond += ` AND p.status = $${params.length}`;
+        }
+        if (hoje) {
+            cond += ` AND (DATE(p.processado_em) = CURRENT_DATE OR DATE(p.data_pagamento) = CURRENT_DATE OR p.processado_em >= NOW() - INTERVAL '24 hours')`;
+        }
+
+        const lim = Math.min(Math.max(parseInt(limit, 10) || 100, 1), 500);
+        params.push(lim);
+
         const { rows } = await db.query(`
             SELECT 
                 p.id, 
@@ -663,11 +764,11 @@ router.get('/pending-payment-check', async (req, res) => {
                 f.descricao,
                 f.tipo
             FROM pending_payments p
-            LEFT JOIN dash_financeiro f ON f.id = p.titulo_id
+            LEFT JOIN dash_financeiro f ON f.id = p.titulo_id AND f.tenant_id = p.tenant_id
             WHERE ${cond} 
             ORDER BY p.processado_em DESC NULLS LAST, p.id DESC 
-            LIMIT ${lim}
-        `);
+            LIMIT $${params.length}
+        `, params);
         return res.json({ count: rows.length, rows });
     } catch (e) {
         return res.status(500).json({ error: e.message });
@@ -676,97 +777,77 @@ router.get('/pending-payment-check', async (req, res) => {
 
 /**
  * GET /api/sync/financeiro-check
- * Diagnóstico de títulos no dash_financeiro.
+ * Diagnóstico de títulos no dash_financeiro (parametrizado e isolado por tenant).
  */
-router.get('/financeiro-check', async (req, res) => {
+router.get('/financeiro-check', requireAdmin, async (req, res) => {
+    const scope = resolveAuthenticatedTenant(req);
+    if (!scope) {
+        return res.status(401).json({ error: 'Tenant não autenticado.' });
+    }
     const { id_firebird, cliente_id, cliente_id_firebird, search, limit } = req.query;
     try {
-        let cond = '1=1';
-        if (id_firebird) cond += ` AND f.id_firebird = ${parseInt(id_firebird, 10)}`;
-        if (cliente_id) cond += ` AND f.cliente_id = ${parseInt(cliente_id, 10)}`;
-        if (cliente_id_firebird) cond += ` AND (f.cliente_id_firebird = ${parseInt(cliente_id_firebird, 10)} OR f.fornecedor_id_firebird = ${parseInt(cliente_id_firebird, 10)})`;
-        if (search) cond += ` AND (f.cliente_nome ILIKE '%${search}%' OR f.descricao ILIKE '%${search}%')`;
-        const lim = parseInt(limit, 10) || 20;
+        const params = [String(scope.tenantId), scope.allowAllTenants];
+        let cond = `($2::boolean = true OR LOWER(f.tenant_id::text) = LOWER($1::text))`;
+
+        if (id_firebird !== undefined && id_firebird !== '') {
+            const parsed = parseInt(id_firebird, 10);
+            if (!isNaN(parsed)) {
+                params.push(parsed);
+                cond += ` AND f.id_firebird = $${params.length}`;
+            }
+        }
+        if (cliente_id !== undefined && cliente_id !== '') {
+            const parsed = parseInt(cliente_id, 10);
+            if (!isNaN(parsed)) {
+                params.push(parsed);
+                cond += ` AND f.cliente_id = $${params.length}`;
+            }
+        }
+        if (cliente_id_firebird !== undefined && cliente_id_firebird !== '') {
+            const parsed = parseInt(cliente_id_firebird, 10);
+            if (!isNaN(parsed)) {
+                params.push(parsed);
+                cond += ` AND (f.cliente_id_firebird = $${params.length} OR f.fornecedor_id_firebird = $${params.length})`;
+            }
+        }
+        if (search !== undefined && String(search).trim() !== '') {
+            params.push(`%${String(search).trim()}%`);
+            cond += ` AND (f.cliente_nome ILIKE $${params.length} OR f.descricao ILIKE $${params.length})`;
+        }
+
+        const lim = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 200);
+        params.push(lim);
+
         const { rows } = await db.query(`
             SELECT f.id, f.id_firebird, f.cliente_id, f.cliente_id_firebird, f.fornecedor_id_firebird, f.cliente_nome, f.descricao, f.valor, f.valor_pago, f.status_pagamento, f.data_vencimento, f.data_emissao,
                    c.id AS dash_cliente_id, c.id_firebird AS dash_cliente_id_firebird, c.nome AS dash_cliente_nome
             FROM dash_financeiro f
-            LEFT JOIN dash_clientes c ON c.id = f.cliente_id
+            LEFT JOIN dash_clientes c ON c.id = f.cliente_id AND c.tenant_id = f.tenant_id
             WHERE ${cond}
             ORDER BY f.id DESC
-            LIMIT ${lim}
-        `);
-        let testListaError = null;
-        let testKpisError = null;
-        let sampleRows = [];
-        try {
-            const isFornecCond = `(
-                c.tipo_cliente ILIKE '%FORNECEDOR%' 
-                OR c.classificacao ILIKE '%FORNECEDOR%'
-                OR c.classe ILIKE '%FORNECEDOR%'
-                OR c.nome ILIKE 'BANCO %'
-                OR c.nome ILIKE '%BRADESCO%'
-                OR c.nome ILIKE '%BANCO DO BRASIL%'
-                OR c.nome ILIKE '%SANTANDER%'
-                OR c.nome ILIKE '%BANCO ITAU%'
-                OR c.nome ILIKE '%BANCO GM%'
-                OR c.nome ILIKE '%BANCO SAFRA%'
-                OR c.nome ILIKE '%CAIXA ECONOMICA%'
-                OR c.nome ILIKE '%CLARO %'
-                OR c.nome ILIKE 'CLARO %'
-                OR c.nome ILIKE '%ENERGISA%'
-                OR c.nome ILIKE '%ENERSUL%'
-                OR c.nome ILIKE '%SANESUL%'
-                OR c.nome ILIKE '%TELEFONICA%'
-                OR c.nome ILIKE '%ACERTO DOS SOCIOS%'
-                OR c.nome ILIKE '%COLISEU CHAVE EMERGENCIAL%'
-                OR COALESCE(c.razao_social, '') ILIKE 'BANCO %'
-                OR COALESCE(c.razao_social, '') ILIKE '%BRADESCO%'
-                OR COALESCE(c.razao_social, '') ILIKE '%BANCO DO BRASIL%'
-                OR COALESCE(c.razao_social, '') ILIKE '%SANTANDER%'
-                OR COALESCE(c.razao_social, '') ILIKE '%BANCO ITAU%'
-                OR COALESCE(c.razao_social, '') ILIKE '%BANCO GM%'
-                OR COALESCE(c.razao_social, '') ILIKE '%CLARO %'
-                OR COALESCE(c.razao_social, '') ILIKE '%ENERGISA%'
-                OR COALESCE(c.razao_social, '') ILIKE '%SANESUL%'
-                OR COALESCE(c.razao_social, '') ILIKE '%TELEFONICA%'
-                OR COALESCE(c.razao_social, '') ILIKE '%ACERTO DOS SOCIOS%'
-                OR COALESCE(c.razao_social, '') ILIKE '%COLISEU CHAVE EMERGENCIAL%'
-            )`;
-            const testQ = await db.query(`
-                SELECT c.id, c.nome, c.documento
-                FROM dash_clientes c
-                WHERE c.ativo = true AND NOT ${isFornecCond}
-                LIMIT 5
-            `);
-            sampleRows = testQ.rows;
-        } catch (e1) {
-            testListaError = e1.message;
-        }
+            LIMIT $${params.length}
+        `, params);
 
-        return res.json({ count: rows.length, testListaError, testKpisError, sampleRows });
+        return res.json({ count: rows.length, rows });
     } catch (e) {
         return res.status(500).json({ error: e.message });
     }
 });
 
-
-router.get('/clientes-diag', async (req, res) => {
-    const tenantId = req.query.tenant_id;
-    if (!tenantId) {
-        const ts = await db.query('SELECT DISTINCT tenant_id, COUNT(*) as total FROM dash_clientes WHERE ativo=true GROUP BY tenant_id ORDER BY total DESC LIMIT 10').catch((e) => ({ rows: [{ error: e.message }] }));
-        return res.json({ message: 'Passe ?tenant_id=UUID', tenants: ts.rows });
+router.get('/clientes-diag', requireAdmin, async (req, res) => {
+    const scope = resolveAuthenticatedTenant(req);
+    if (!scope || scope.allowAllTenants) {
+        return res.status(400).json({ error: 'Informe um tenant válido autenticado.' });
     }
+    const tenantId = scope.tenantId;
     const fornecCond = "(c.tipo_cliente ILIKE '%FORNECEDOR%' OR c.classificacao ILIKE '%FORNECEDOR%' OR c.classe ILIKE '%FORNECEDOR%' OR c.nome ILIKE 'BANCO %' OR c.nome ILIKE '%BRADESCO%' OR c.nome ILIKE '%SANTANDER%' OR c.nome ILIKE '%ENERGISA%' OR c.nome ILIKE '%SANESUL%')";
     const base = 'LOWER(c.tenant_id::text) = LOWER($1::text) AND c.ativo = true';
-    const [all, cli, forn, sc, sf] = await Promise.all([
-        db.query('SELECT COUNT(*) as t FROM dash_clientes c WHERE ' + base, [tenantId]).catch((e) => ({ rows: [{ t: 'ERR:' + e.message }] })),
-        db.query('SELECT COUNT(*) as t FROM dash_clientes c WHERE ' + base + ' AND NOT ' + fornecCond, [tenantId]).catch((e) => ({ rows: [{ t: 'ERR:' + e.message }] })),
-        db.query('SELECT COUNT(*) as t FROM dash_clientes c WHERE ' + base + ' AND ' + fornecCond, [tenantId]).catch((e) => ({ rows: [{ t: 'ERR:' + e.message }] })),
-        db.query('SELECT c.id, c.nome, c.tipo_cliente, c.classificacao FROM dash_clientes c WHERE ' + base + ' AND NOT ' + fornecCond + ' LIMIT 5', [tenantId]).catch((e) => ({ rows: [{ error: e.message }] })),
-        db.query('SELECT c.id, c.nome, c.tipo_cliente, c.classificacao FROM dash_clientes c WHERE ' + base + ' AND ' + fornecCond + ' LIMIT 5', [tenantId]).catch((e) => ({ rows: [{ error: e.message }] })),
+    const [all, cli, forn] = await Promise.all([
+        db.query('SELECT COUNT(*)::int as t FROM dash_clientes c WHERE ' + base, [tenantId]).catch((e) => ({ rows: [{ t: 'ERR:' + e.message }] })),
+        db.query('SELECT COUNT(*)::int as t FROM dash_clientes c WHERE ' + base + ' AND NOT ' + fornecCond, [tenantId]).catch((e) => ({ rows: [{ t: 'ERR:' + e.message }] })),
+        db.query('SELECT COUNT(*)::int as t FROM dash_clientes c WHERE ' + base + ' AND ' + fornecCond, [tenantId]).catch((e) => ({ rows: [{ t: 'ERR:' + e.message }] })),
     ]);
-    return res.json({ tenant_id: tenantId, total_all: all.rows[0]?.t, total_clientes: cli.rows[0]?.t, total_fornecedores: forn.rows[0]?.t, sample_clientes: sc.rows, sample_fornecedores: sf.rows });
+    return res.json({ tenant_id: tenantId, total_all: all.rows[0]?.t, total_clientes: cli.rows[0]?.t, total_fornecedores: forn.rows[0]?.t });
 });
 
 /**
@@ -1089,7 +1170,7 @@ router.post('/:tabela', async (req, res) => {
                                     SELECT id FROM dash_financeiro 
                                     WHERE tenant_id = $1 
                                       AND id_firebird IS NULL 
-                                      AND (cliente_id_firebird = $2 OR cliente_id IN (SELECT id FROM dash_clientes WHERE id_firebird = $2))
+                                      AND (cliente_id_firebird = $2 OR cliente_id IN (SELECT id FROM dash_clientes WHERE tenant_id = $1 AND id_firebird = $2))
                                       AND ABS(valor - $3) < 0.01 
                                       AND data_vencimento = $4
                                     ORDER BY id DESC LIMIT 1

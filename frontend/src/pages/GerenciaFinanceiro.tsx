@@ -22,7 +22,7 @@ const C = {
   amber:    '#F59E0B',
   blue:     '#3B82F6',
   sky:      '#0EA5E9',
-  purple:   '#8B5CF6',
+  cyan: '#0891B2',
   slate:    '#64748B',
   slateDark:'#1E293B',
   gray100:  '#F1F5F9',

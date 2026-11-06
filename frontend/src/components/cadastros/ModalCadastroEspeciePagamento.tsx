@@ -148,7 +148,7 @@ export default function ModalCadastroEspeciePagamento({ isOpen, onClose, onSwitc
         {/* TITULO DA JANELA ESTILO ERP COLISEU */}
         <div className="bg-slate-900 text-white px-4 py-2.5 flex items-center justify-between border-b border-slate-800">
           <div className="flex items-center gap-2">
-            <CreditCard size={16} className="text-purple-400" />
+            <CreditCard size={16} className="text-cyan-400" />
             <div>
               <h3 className="text-xs font-black uppercase tracking-tight font-heading leading-tight">
                 Cadastro de Espécies de Pagamento
@@ -180,7 +180,7 @@ export default function ModalCadastroEspeciePagamento({ isOpen, onClose, onSwitc
 
           <button
             type="button"
-            className="px-3 py-1 bg-white dark:bg-slate-900 text-purple-600 dark:text-purple-400 text-xs font-black rounded-t-md border-t-2 border-purple-600 shadow-2xs cursor-pointer"
+            className="px-3 py-1 bg-white dark:bg-slate-900 text-cyan-600 dark:text-cyan-400 text-xs font-black rounded-t-md border-t-2 border-cyan-600 shadow-2xs cursor-pointer"
           >
             💳 Cadastro Espécie
           </button>
@@ -222,8 +222,8 @@ export default function ModalCadastroEspeciePagamento({ isOpen, onClose, onSwitc
                         key={item.id}
                         onClick={() => { selectRecord(item); setIsConsulting(false); }}
                         className={clsx(
-                          "hover:bg-purple-50 dark:hover:bg-purple-950/40 cursor-pointer transition-colors",
-                          selectedId === item.id && "bg-purple-100/70 dark:bg-purple-900/50 font-bold"
+                          "hover:bg-cyan-50 dark:hover:bg-cyan-950/40 cursor-pointer transition-colors",
+                          selectedId === item.id && "bg-cyan-100/70 dark:bg-cyan-900/50 font-bold"
                         )}
                       >
                         <td className="p-2 font-mono">{item.codigo}</td>
@@ -314,7 +314,7 @@ export default function ModalCadastroEspeciePagamento({ isOpen, onClose, onSwitc
                     type="checkbox"
                     checked={!!form.permite_acesso_app}
                     onChange={(e) => setForm({ ...form, permite_acesso_app: e.target.checked })}
-                    className="rounded-md border-slate-300 text-purple-600 focus:ring-purple-500 w-4 h-4 cursor-pointer"
+                    className="rounded-md border-slate-300 text-cyan-600 focus:ring-cyan-500 w-4 h-4 cursor-pointer"
                   />
                   <span className="text-xs font-bold text-slate-700 dark:text-slate-200">
                     Permite Acesso pelo App
@@ -326,7 +326,7 @@ export default function ModalCadastroEspeciePagamento({ isOpen, onClose, onSwitc
                     type="checkbox"
                     checked={!!form.disponivel_negociacao}
                     onChange={(e) => setForm({ ...form, disponivel_negociacao: e.target.checked })}
-                    className="rounded-md border-slate-300 text-purple-600 focus:ring-purple-500 w-4 h-4 cursor-pointer"
+                    className="rounded-md border-slate-300 text-cyan-600 focus:ring-cyan-500 w-4 h-4 cursor-pointer"
                   />
                   <span className="text-xs font-bold text-slate-700 dark:text-slate-200">
                     Disponível para Negociação
@@ -338,7 +338,7 @@ export default function ModalCadastroEspeciePagamento({ isOpen, onClose, onSwitc
                     type="checkbox"
                     checked={!!form.permite_credito_negociacao}
                     onChange={(e) => setForm({ ...form, permite_credito_negociacao: e.target.checked })}
-                    className="rounded-md border-slate-300 text-purple-600 focus:ring-purple-500 w-4 h-4 cursor-pointer"
+                    className="rounded-md border-slate-300 text-cyan-600 focus:ring-cyan-500 w-4 h-4 cursor-pointer"
                   />
                   <span className="text-xs font-bold text-slate-700 dark:text-slate-200">
                     Permite Crédito na Negociação
@@ -350,7 +350,7 @@ export default function ModalCadastroEspeciePagamento({ isOpen, onClose, onSwitc
                     type="checkbox"
                     checked={!!form.incluir_comissao_aberto}
                     onChange={(e) => setForm({ ...form, incluir_comissao_aberto: e.target.checked })}
-                    className="rounded-md border-slate-300 text-purple-600 focus:ring-purple-500 w-4 h-4 cursor-pointer"
+                    className="rounded-md border-slate-300 text-cyan-600 focus:ring-cyan-500 w-4 h-4 cursor-pointer"
                   />
                   <span className="text-xs font-bold text-slate-700 dark:text-slate-200">
                     Incluir na Comissão em Aberto
@@ -362,7 +362,7 @@ export default function ModalCadastroEspeciePagamento({ isOpen, onClose, onSwitc
                     type="checkbox"
                     checked={!!form.pix_online}
                     onChange={(e) => setForm({ ...form, pix_online: e.target.checked })}
-                    className="rounded-md border-slate-300 text-purple-600 focus:ring-purple-500 w-4 h-4 cursor-pointer"
+                    className="rounded-md border-slate-300 text-cyan-600 focus:ring-cyan-500 w-4 h-4 cursor-pointer"
                   />
                   <span className="text-xs font-bold text-slate-700 dark:text-slate-200">
                     PIX Online

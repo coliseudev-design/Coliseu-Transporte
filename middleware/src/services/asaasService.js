@@ -7,6 +7,8 @@
 
 const db = require('../db/postgres');
 const logger = require('../config/logger');
+const { safeCompare } = require('../middleware/auth');
+const { decryptSecret } = require('../utils/cryptoVault');
 
 class AsaasService {
   /**
@@ -18,32 +20,33 @@ class AsaasService {
   }
 
   /**
-   * Recupera a configuração do Asaas para o tenant no banco PostgreSQL.
+   * Recupera a configuração do Asaas estritamente para o tenant informado no banco PostgreSQL.
    */
   static async getConfig(tenantId) {
-    let { rows } = await db.query(
+    if (!tenantId || String(tenantId) === '00000000-0000-0000-0000-000000000000') {
+      throw new Error('Selecione uma empresa válida para utilizar a integração Asaas.');
+    }
+
+    const { rows } = await db.query(
       `SELECT * FROM dash_integracoes_config 
-       WHERE ($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text)) 
+       WHERE LOWER(tenant_id::text) = LOWER($1::text)
          AND asaas_access_token IS NOT NULL 
          AND TRIM(asaas_access_token) != ''
        LIMIT 1`,
       [String(tenantId)]
     );
 
-    if (rows.length === 0) {
-      const fallback = await db.query(
-        "SELECT * FROM dash_integracoes_config WHERE asaas_access_token IS NOT NULL AND asaas_access_token != '' LIMIT 1"
-      );
-      rows = fallback.rows;
-    }
+    const rawToken = rows[0]?.asaas_access_token || '';
+    const decryptedToken = decryptSecret(rawToken);
 
-    if (rows.length === 0 || !rows[0].asaas_access_token) {
-      throw new Error('Configuração do Banco Asaas não encontrada ou token de acesso (access_token) não informado.');
+    if (rows.length === 0 || !decryptedToken) {
+      throw new Error('Configuração do Banco Asaas não encontrada ou token de acesso (access_token) não informado para esta empresa.');
     }
 
     const conf = rows[0];
     return {
-      token: conf.asaas_access_token,
+      token: decryptedToken,
+      webhookSecret: decryptSecret(conf.asaas_webhook_secret || ''),
       ambiente: conf.asaas_ambiente || 'Produção',
       baseUrl: this.getBaseUrl(conf.asaas_ambiente || 'Produção'),
       jurosPadrao: parseFloat(conf.asaas_juros_padrao || 1),
@@ -377,20 +380,20 @@ class AsaasService {
   }
 
   /**
-   * 2D. Processamento de Notificações Webhook recebidas do Asaas
+   * 2D. Processamento de Notificações Webhook recebidas do Asaas,
+   * com validação de asaas-access-token ou confirmação ativa na API V3 do Asaas.
    */
-  static async handleWebhook(payload) {
-    const { event, payment } = payload;
+  static async handleWebhook(payload, headers = {}) {
+    const { event, payment } = payload || {};
 
-    if (!event || !payment) {
+    if (!event || !payment || !payment.id) {
       logger.warn('[AsaasWebhook] Evento ou objeto de pagamento ausente no payload.');
       return { success: false, message: 'Payload inválido' };
     }
 
-    const paymentId = payment.id;
-    const customerId = payment.customer;
-    const value = payment.value;
-    const paymentDate = payment.paymentDate || payment.confirmedDate || new Date().toISOString();
+    const paymentId = String(payment.id).trim();
+    let value = payment.value;
+    let paymentDate = payment.paymentDate || payment.confirmedDate || new Date().toISOString();
 
     logger.info('[AsaasWebhook] Evento de webhook recebido', { event, paymentId, value });
 
@@ -399,8 +402,10 @@ class AsaasService {
     switch (event) {
       case 'PAYMENT_CONFIRMED':
       case 'PAYMENT_RECEIVED':
-      case 'PAYMENT_RECEIVED_IN_CASH_UNDONE':
         newStatus = 'PAGO';
+        break;
+      case 'PAYMENT_RECEIVED_IN_CASH_UNDONE':
+        newStatus = 'ESTORNADO_ABERTO';
         break;
       case 'PAYMENT_OVERDUE':
         newStatus = 'ABERTO';
@@ -415,17 +420,97 @@ class AsaasService {
         return { success: true, event, processed: false };
     }
 
+    // Localiza estritamente pelo asaas_payment_id (evita colisão de id_firebird/nosso_numero entre tenants)
+    const lookupRes = await db.query(
+      `SELECT id, tenant_id, id_firebird, nosso_numero, numero_documento
+       FROM dash_financeiro
+       WHERE asaas_payment_id = $1
+       LIMIT 1`,
+      [paymentId]
+    );
+
+    if (lookupRes.rowCount === 0) {
+      logger.warn('[AsaasWebhook] Cobrança não localizada em dash_financeiro pelo asaas_payment_id', { paymentId });
+      return { success: true, event, processed: false, reason: 'not_found' };
+    }
+
+    const matchedTitle = lookupRes.rows[0];
+    const tenantConfig = await this.getConfig(matchedTitle.tenant_id).catch(() => null);
+    if (!tenantConfig) {
+      logger.warn('[AsaasWebhook] Configuração Asaas ausente para o tenant do título; ignorando webhook', {
+        tenantId: matchedTitle.tenant_id,
+        paymentId
+      });
+      return { success: false, message: 'Configuração Asaas ausente para o tenant' };
+    }
+
+    const expectedSecret = tenantConfig.webhookSecret || process.env.ASAAS_WEBHOOK_SECRET || '';
+    const incomingHeaderToken = String(headers['asaas-access-token'] || '').trim();
+
+    if (expectedSecret) {
+      if (!safeCompare(incomingHeaderToken, expectedSecret)) {
+        logger.warn('[AsaasWebhook] Token de webhook Asaas inválido bloqueado', {
+          tenantId: matchedTitle.tenant_id,
+          paymentId
+        });
+        return { success: false, unauthorized: true, message: 'Token de webhook inválido' };
+      }
+    } else {
+      // Sem segredo de webhook configurado: valida status diretamente na API V3 do Asaas
+      const verifyRes = await fetch(`${tenantConfig.baseUrl}/payments/${encodeURIComponent(paymentId)}`, {
+        method: 'GET',
+        headers: this.getHeaders(tenantConfig.token)
+      });
+      if (!verifyRes.ok) {
+        logger.warn('[AsaasWebhook] Falha ao confirmar cobrança na API Asaas; webhook descartado', {
+          paymentId,
+          status: verifyRes.status
+        });
+        return { success: false, unverified: true, message: 'Não foi possível verificar cobrança na origem' };
+      }
+      const livePayment = await verifyRes.json();
+      const liveStatus = String(livePayment.status || '').toUpperCase();
+
+      if (newStatus === 'PAGO' && !['RECEIVED', 'CONFIRMED', 'RECEIVED_IN_CASH'].includes(liveStatus)) {
+        logger.warn('[AsaasWebhook] Divergência de status na verificação Asaas (esperado PAGO)', {
+          paymentId,
+          liveStatus
+        });
+        return { success: false, unverified: true, message: 'Status divergente na API Asaas' };
+      }
+      if (newStatus === 'ESTORNADO_ABERTO' && ['RECEIVED', 'CONFIRMED', 'RECEIVED_IN_CASH'].includes(liveStatus)) {
+        return { success: false, unverified: true, message: 'Cobrança ainda consta quitada na API Asaas' };
+      }
+      if (livePayment.value !== undefined) value = livePayment.value;
+      if (livePayment.paymentDate || livePayment.confirmedDate) {
+        paymentDate = livePayment.paymentDate || livePayment.confirmedDate;
+      }
+    }
+
+    await db.query(`
+        CREATE TABLE IF NOT EXISTS dash_financeiro_logs (
+            id SERIAL PRIMARY KEY,
+            tenant_id UUID NOT NULL,
+            titulo_id INT NOT NULL,
+            tipo_evento VARCHAR(50) NOT NULL,
+            data_evento TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            usuario VARCHAR(100) DEFAULT 'Sistema',
+            nosso_numero VARCHAR(100),
+            numero_documento VARCHAR(100),
+            descricao TEXT,
+            detalhes JSONB
+        );
+    `).catch(() => {});
+
     if (newStatus === 'PAGO') {
       const updateRes = await db.query(
         `UPDATE dash_financeiro 
          SET status_pagamento = 'PAGO', 
              data_pagamento = COALESCE($1, NOW()), 
              valor_pago = $2 
-         WHERE asaas_payment_id = $3 
-            OR (nosso_numero IS NOT NULL AND nosso_numero = $4)
-            OR (id_firebird IS NOT NULL AND CAST(id_firebird AS TEXT) = $5)
+         WHERE id = $3 AND tenant_id = $4
          RETURNING id, tenant_id, id_firebird, nosso_numero, numero_documento`,
-        [paymentDate || new Date().toISOString().split('T')[0], value, paymentId, payment.nossoNumero || '', String(payment.externalReference || '')]
+        [paymentDate || new Date().toISOString().split('T')[0], value, matchedTitle.id, matchedTitle.tenant_id]
       );
 
       if (updateRes.rowCount > 0) {
@@ -457,25 +542,28 @@ class AsaasService {
           `, [title.tenant_id, title.id, title.id_firebird || null, title.nosso_numero || payment.nossoNumero || null, title.numero_documento || null, value, paymentDate || new Date().toISOString()]).catch(err => logger.error('[AsaasWebhook] Erro ao enfileirar em pending_payments:', err.message));
         }
 
-        await db.query(`
-            CREATE TABLE IF NOT EXISTS dash_financeiro_logs (
-                id SERIAL PRIMARY KEY,
-                tenant_id UUID NOT NULL,
-                titulo_id INT NOT NULL,
-                tipo_evento VARCHAR(50) NOT NULL,
-                data_evento TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                usuario VARCHAR(100) DEFAULT 'Sistema',
-                nosso_numero VARCHAR(100),
-                numero_documento VARCHAR(100),
-                descricao TEXT,
-                detalhes JSONB
-            );
-        `).catch(() => {});
-
         await db.query(
           `INSERT INTO dash_financeiro_logs (tenant_id, titulo_id, tipo_evento, usuario, nosso_numero, descricao)
            VALUES ($1, $2, 'QUITACAO', 'Webhook Asaas', $3, $4)`,
           [title.tenant_id, title.id, payment.nossoNumero || null, `Quitação confirmada via Webhook Asaas (${event}). Valor: R$ ${value}`]
+        ).catch(() => {});
+      }
+    } else if (newStatus === 'ESTORNADO_ABERTO') {
+      const updateRes = await db.query(
+        `UPDATE dash_financeiro
+         SET status_pagamento = 'ABERTO',
+             data_pagamento = NULL,
+             valor_pago = 0
+         WHERE id = $1 AND tenant_id = $2
+         RETURNING id, tenant_id`,
+        [matchedTitle.id, matchedTitle.tenant_id]
+      );
+
+      if (updateRes.rowCount > 0) {
+        await db.query(
+          `INSERT INTO dash_financeiro_logs (tenant_id, titulo_id, tipo_evento, usuario, nosso_numero, descricao)
+           VALUES ($1, $2, 'ESTORNO', 'Webhook Asaas', $3, $4)`,
+          [matchedTitle.tenant_id, matchedTitle.id, payment.nossoNumero || null, `Recebimento em dinheiro desfeito via Webhook Asaas (${event}); título retornado para ABERTO.`]
         ).catch(() => {});
       }
     } else if (newStatus === 'CANCELADO') {
@@ -483,28 +571,13 @@ class AsaasService {
         `UPDATE dash_financeiro 
          SET status_pagamento = 'CANCELADO',
              data_cancelamento = NOW()
-         WHERE asaas_payment_id = $1
+         WHERE id = $1 AND tenant_id = $2
          RETURNING id, tenant_id`,
-        [paymentId]
+        [matchedTitle.id, matchedTitle.tenant_id]
       );
 
       if (updateRes.rowCount > 0) {
         const title = updateRes.rows[0];
-        await db.query(`
-            CREATE TABLE IF NOT EXISTS dash_financeiro_logs (
-                id SERIAL PRIMARY KEY,
-                tenant_id INT NOT NULL,
-                titulo_id INT NOT NULL,
-                tipo_evento VARCHAR(50) NOT NULL,
-                data_evento TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                usuario VARCHAR(100) DEFAULT 'Sistema',
-                nosso_numero VARCHAR(100),
-                numero_documento VARCHAR(100),
-                descricao TEXT,
-                detalhes JSONB
-            );
-        `).catch(() => {});
-
         await db.query(
           `INSERT INTO dash_financeiro_logs (tenant_id, titulo_id, tipo_evento, usuario, nosso_numero, descricao)
            VALUES ($1, $2, 'CANCELAMENTO', 'Webhook Asaas', $3, $4)`,

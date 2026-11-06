@@ -6,6 +6,10 @@ const bcrypt = require('bcryptjs');
 const db = require('../db/postgres');
 const config = require('../config/env');
 const logger = require('../config/logger');
+const { requireAdmin, invalidateUserAuthCache, isValidUuid } = require('../middleware/auth');
+
+// Todas as rotas de gestão de usuários exigem perfil Administrador
+router.use(requireAdmin);
 
 /**
  * GET /api/usuarios
@@ -52,8 +56,14 @@ router.post('/', async (req, res) => {
             return res.status(400).json({ error: 'Nome, email, senha e CompanyKey são obrigatórios' });
         }
 
+        if (!isValidUuid(companyKey)) {
+            return res.status(400).json({ error: 'CompanyKey inválida (deve ser um UUID válido).' });
+        }
+
         const normalizedEmail = String(email).trim().toLowerCase();
-        const isSuperAdminEmail = normalizedEmail.endsWith('@silenus.com.br') || normalizedEmail.endsWith('@coliseusistemas.com.br');
+        const isSuperAdminEmail = req.tenant.id === '00000000-0000-0000-0000-000000000000' && (
+            normalizedEmail.endsWith('@silenus.com.br') || normalizedEmail.endsWith('@coliseusistemas.com.br')
+        );
 
         // Segurança: Se não for master, só pode criar usuário para a própria empresa
         if (req.tenant.id !== '00000000-0000-0000-0000-000000000000' && companyKey !== req.tenant.id) {
@@ -160,7 +170,7 @@ router.put('/:id/status', async (req, res) => {
         }
 
         // Não deixa a pessoa se desativar sozinha (segurança)
-        if (targetId === req.user.sub && !ativo) {
+        if (String(targetId) === String(req.user.id) && !ativo) {
             return res.status(400).json({ error: 'Você não pode inativar seu próprio usuário.' });
         }
 
@@ -180,6 +190,7 @@ router.put('/:id/status', async (req, res) => {
             return res.status(404).json({ error: 'Usuário não encontrado ou você não tem permissão para editá-lo.' });
         }
 
+        invalidateUserAuthCache(targetId);
         logger.info('[Usuarios] Status alterado', { targetId, ativo, by: req.user.email });
 
         res.json({ message: 'Status atualizado com sucesso', user: result.rows[0] });
@@ -336,6 +347,7 @@ router.put('/:id/grupo', async (req, res) => {
             return res.status(404).json({ error: 'Usuário não encontrado ou sem permissão.' });
         }
 
+        invalidateUserAuthCache(targetId);
         logger.info('[Usuarios] Grupo de acesso alterado', { targetId, grupoIdNum, by: req.user.email });
         res.json({ message: 'Grupo de acesso do usuário atualizado com sucesso', user: result.rows[0] });
     } catch (err) {

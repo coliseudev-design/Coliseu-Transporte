@@ -67,7 +67,7 @@ const STATUS_ENTREGA: Record<string, { label: string; cor: string }> = {
   PENDENTE: { label: 'Pendente', cor: 'bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300' },
   ENTREGUE: { label: 'Entregue', cor: 'bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300' },
   RECUSADO: { label: 'Recusado', cor: 'bg-red-100 dark:bg-red-950/60 text-red-700 dark:text-red-300' },
-  REENTREGA: { label: 'Reentrega', cor: 'bg-violet-100 dark:bg-violet-950/60 text-violet-700 dark:text-violet-300' }
+  REENTREGA: { label: 'Reentrega', cor: 'bg-teal-100 dark:bg-teal-950/60 text-teal-700 dark:text-teal-300' }
 };
 
 export default function RoteiroEntregaPage() {
@@ -314,7 +314,7 @@ export default function RoteiroEntregaPage() {
                 {[
                   { label: 'Paradas', value: pontos.length, icon: MapPin, cor: 'text-sky-600' },
                   { label: 'Entregues', value: entregasConcluidas, icon: CheckCircle2, cor: 'text-emerald-600' },
-                  { label: 'Distância', value: `${Number(roteiro?.distancia_total_km || 0).toLocaleString('pt-BR')} km`, icon: Navigation, cor: 'text-violet-600' },
+                  { label: 'Distância', value: `${Number(roteiro?.distancia_total_km || 0).toLocaleString('pt-BR')} km`, icon: Navigation, cor: 'text-teal-600' },
                   { label: 'Tempo est.', value: `${Math.floor(Number(roteiro?.tempo_estimado_minutos || 0) / 60)}h ${Number(roteiro?.tempo_estimado_minutos || 0) % 60}min`, icon: Clock, cor: 'text-amber-600' }
                 ].map(k => {
                   const Icon = k.icon;

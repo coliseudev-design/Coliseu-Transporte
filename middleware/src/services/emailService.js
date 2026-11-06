@@ -14,6 +14,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { getCobrancaAlertaBuffer } = require('../assets/emailAssets');
+const { decryptSecret } = require('../utils/cryptoVault');
 
 // Carregar Nodemailer de forma lazy para não quebrar se não instalado
 let nodemailer = null;
@@ -26,22 +27,19 @@ class EmailService {
   // ──────────────────────────────────────────────────────────────────────────
 
   /**
-   * Busca a config de e-mail do tenant no banco de dados.
+   * Busca a config de e-mail estritamente do tenant no banco de dados (sem fallback cross-tenant).
    */
   static async getConfig(tenantId) {
-    let { rows } = await db.query(
-      `SELECT * FROM dash_integracoes_config 
-       WHERE ($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text)) 
-         AND (email_smtp_host IS NOT NULL OR email_provedor IS NOT NULL)
-       LIMIT 1`,
-      [String(tenantId || '')]
-    );
-
-    if (rows.length === 0) {
-      const fallback = await db.query(
-        "SELECT * FROM dash_integracoes_config WHERE (email_smtp_host IS NOT NULL AND email_smtp_host != '') OR (email_smtp_user IS NOT NULL AND email_smtp_user != '') LIMIT 1"
+    let rows = [];
+    if (tenantId && String(tenantId) !== '00000000-0000-0000-0000-000000000000') {
+      const res = await db.query(
+        `SELECT * FROM dash_integracoes_config 
+         WHERE LOWER(tenant_id::text) = LOWER($1::text) 
+           AND (email_smtp_host IS NOT NULL OR email_provedor IS NOT NULL)
+         LIMIT 1`,
+        [String(tenantId)]
       );
-      rows = fallback.rows;
+      rows = res.rows;
     }
 
     if (rows.length === 0) {
@@ -57,7 +55,7 @@ class EmailService {
           remetenteEmail: process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER || 'contato@coliseusistemas.com.br'
         };
       }
-      throw new Error('Configuração de e-mail (SMTP) não encontrada. Por favor, configure o servidor de e-mail na aba Configurações > Integrações.');
+      throw new Error('Configuração de e-mail (SMTP) não encontrada para esta empresa. Configure na aba Configurações > Integrações.');
     }
 
     const c = rows[0];
@@ -66,12 +64,12 @@ class EmailService {
       smtpHost: c.email_smtp_host || 'smtp.gmail.com',
       smtpPort: parseInt(c.email_smtp_port || 465),
       smtpUser: c.email_smtp_user || '',
-      smtpPass: c.email_smtp_pass || '',
+      smtpPass: decryptSecret(c.email_smtp_pass || ''),
       smtpSecure: c.email_smtp_secure === true || c.email_smtp_port === 465,
       remetenteNome: c.email_remetente_nome || 'Coliseu Transporte',
       remetenteEmail: c.email_remetente || c.empresa_email || '',
-      brevoApiKey: c.email_brevo_api_key || '',
-      sendgridApiKey: c.email_sendgrid_api_key || ''
+      brevoApiKey: decryptSecret(c.email_brevo_api_key || ''),
+      sendgridApiKey: decryptSecret(c.email_sendgrid_api_key || '')
     };
   }
 

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useNavigate, Navigate, Link } from 'react-router-dom'
 import { useAuthStore } from '../store/authStore'
 import { LogIn, TrendingUp, BarChart3, FileText, Truck, ShieldCheck, Eye, EyeOff } from 'lucide-react'
@@ -11,9 +11,15 @@ export default function Login() {
   const error = useAuthStore((s) => s.error)
 
   const [email, setEmail] = useState(() => localStorage.getItem('coliseu_remember_email') || localStorage.getItem('nexus_remember_email') || '')
-  const [password, setPassword] = useState(() => localStorage.getItem('coliseu_remember_password') || localStorage.getItem('nexus_remember_password') || '')
+  const [password, setPassword] = useState('')
   const [rememberMe, setRememberMe] = useState(() => (localStorage.getItem('coliseu_remember_me') || localStorage.getItem('nexus_remember_me')) !== 'false')
   const [showPassword, setShowPassword] = useState(false)
+
+  useEffect(() => {
+    // Remove eventuais senhas legadas armazenadas em texto puro no navegador
+    localStorage.removeItem('coliseu_remember_password')
+    localStorage.removeItem('nexus_remember_password')
+  }, [])
 
   if (user) return <Navigate to="/" replace />
 
@@ -23,16 +29,15 @@ export default function Login() {
     const cleanPass = password.trim()
     const ok = await login(cleanEmail, cleanPass)
     if (ok) {
+      localStorage.removeItem('coliseu_remember_password')
+      localStorage.removeItem('nexus_remember_password')
       if (rememberMe) {
         localStorage.setItem('coliseu_remember_email', cleanEmail)
-        localStorage.setItem('coliseu_remember_password', cleanPass)
         localStorage.setItem('coliseu_remember_me', 'true')
       } else {
         localStorage.removeItem('coliseu_remember_email')
-        localStorage.removeItem('coliseu_remember_password')
         localStorage.setItem('coliseu_remember_me', 'false')
         localStorage.removeItem('nexus_remember_email')
-        localStorage.removeItem('nexus_remember_password')
         localStorage.removeItem('nexus_remember_me')
       }
       navigate('/', { replace: true })

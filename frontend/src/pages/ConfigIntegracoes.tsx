@@ -1045,7 +1045,7 @@ export default function ConfigIntegracoes() {
       <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-2.5 px-3 shadow-2xs space-y-2">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2">
-            <div className="p-2 bg-gradient-to-tr from-indigo-600 to-purple-600 text-white rounded-lg shadow-2xs">
+            <div className="p-2 bg-gradient-to-tr from-indigo-600 to-cyan-600 text-white rounded-lg shadow-2xs">
               <Settings size={16} />
             </div>
             <div>
@@ -2276,7 +2276,7 @@ export default function ConfigIntegracoes() {
                       {usuariosList.map((u: any) => (
                         <tr key={u.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors">
                           <td className="p-2 px-3 font-bold text-slate-800 dark:text-slate-100 flex items-center gap-2">
-                            <div className="w-7 h-7 rounded-full bg-gradient-to-tr from-indigo-500 to-purple-600 text-white font-black text-xs flex items-center justify-center uppercase shadow-2xs">
+                            <div className="w-7 h-7 rounded-full bg-gradient-to-tr from-indigo-500 to-cyan-600 text-white font-black text-xs flex items-center justify-center uppercase shadow-2xs">
                               {(u.nome || u.email || 'U').substring(0, 2)}
                             </div>
                             <div>

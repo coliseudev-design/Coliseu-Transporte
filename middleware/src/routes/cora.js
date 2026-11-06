@@ -10,6 +10,27 @@ const router = express.Router();
 const CoraService = require('../services/CoraService');
 const db = require('../db/postgres');
 const logger = require('../config/logger');
+const { isMaskedValue, decryptSecret } = require('../utils/cryptoVault');
+
+async function resolveTempCoraConfig(tenantId, body) {
+    const { cora_cert_pem, cora_private_key, cora_client_id } = body || {};
+    if (!cora_cert_pem) return null;
+
+    let resolvedPrivateKey = '';
+    if (cora_private_key && !isMaskedValue(cora_private_key)) {
+        resolvedPrivateKey = decryptSecret(String(cora_private_key).trim());
+    } else {
+        const stored = await CoraService.getConfig(tenantId).catch(() => null);
+        resolvedPrivateKey = stored?.cora_private_key || '';
+    }
+
+    if (!resolvedPrivateKey) return null;
+    return {
+        cora_cert_pem,
+        cora_private_key: resolvedPrivateKey,
+        cora_client_id: cora_client_id || 'int-6niGnUQSRUDauHBRYg0xCP'
+    };
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/cora/test-connection
@@ -20,13 +41,7 @@ router.post('/test-connection', async (req, res) => {
         const tenantId = req.tenant?.id;
         if (!tenantId) return res.status(401).json({ error: 'Tenant não identificado.' });
 
-        const { cora_cert_pem, cora_private_key, cora_client_id } = req.body || {};
-        const tempConfig = (cora_cert_pem && cora_private_key) ? {
-            cora_cert_pem,
-            cora_private_key,
-            cora_client_id: cora_client_id || 'int-6niGnUQSRUDauHBRYg0xCP'
-        } : null;
-
+        const tempConfig = await resolveTempCoraConfig(tenantId, req.body);
         const result = await CoraService.testConnection(tenantId, tempConfig);
         res.json({ success: true, message: 'Conexão com o Banco Cora realizada com sucesso!', data: result });
     } catch (err) {
@@ -228,51 +243,69 @@ router.post('/emitir-pix', async (req, res) => {
 // GET /api/cora/boleto/:id
 // Consulta o status de um boleto pelo ID do Cora ou renderiza no layout Coliseu.
 // ─────────────────────────────────────────────────────────────────────────────
-router.get('/boleto/:id', async (req, res) => {
+const handleBoletoGet = async (req, res) => {
     try {
         let tenantId = req.tenant?.id || null;
-        const coraId = req.params.id;
+        const rawParamId = String(req.params.id || '').trim();
+        const coraId = rawParamId.replace(/\.pdf$/i, '');
+
+        if (!coraId) {
+            return res.status(400).json({ error: 'Identificador do boleto inválido.' });
+        }
 
         // Busca dados locais do título e cliente
         let titles = [];
         try {
-            const { rows } = await db.query(
-                `SELECT f.*, 
-                        c.nome AS cliente_nome, c.documento AS cliente_documento,
-                        c.endereco_completo AS cliente_endereco, c.cidade AS cliente_cidade, c.estado AS cliente_estado
-                 FROM dash_financeiro f
-                 LEFT JOIN dash_clientes c ON (c.id_firebird = f.cliente_id_firebird OR c.id = f.cliente_id) AND LOWER(c.tenant_id::text) = LOWER(f.tenant_id::text)
-                 WHERE (f.asaas_payment_id = $1 OR f.nosso_numero = $1 OR CAST(f.id AS TEXT) = $1 OR CAST(f.id_firebird AS TEXT) = $1 OR f.bank_slip_url LIKE '%' || $1 || '%' OR f.pdf_url LIKE '%' || $1 || '%')
-                   AND ($2::text IS NULL OR LOWER(f.tenant_id::text) = LOWER($2::text))
-                 ORDER BY f.id DESC
-                 LIMIT 1`,
-                [coraId, tenantId ? String(tenantId) : null]
-            );
-            titles = rows || [];
+            if (tenantId) {
+                const { rows } = await db.query(
+                    `SELECT f.*, 
+                            c.nome AS cliente_nome, c.documento AS cliente_documento,
+                            c.endereco_completo AS cliente_endereco, c.cidade AS cliente_cidade, c.estado AS cliente_estado
+                     FROM dash_financeiro f
+                     LEFT JOIN dash_clientes c ON (c.id_firebird = f.cliente_id_firebird OR c.id = f.cliente_id) AND LOWER(c.tenant_id::text) = LOWER(f.tenant_id::text)
+                     WHERE LOWER(f.tenant_id::text) = LOWER($2::text)
+                       AND (f.asaas_payment_id = $1 OR f.nosso_numero = $1 OR CAST(f.id AS TEXT) = $1 OR CAST(f.id_firebird AS TEXT) = $1)
+                     ORDER BY f.id DESC
+                     LIMIT 1`,
+                    [coraId, String(tenantId)]
+                );
+                titles = rows || [];
+            } else {
+                // Acesso público (link de cobrança): exige token não enumerável de fatura (bloqueia enumeração por ID inteiro sequencial)
+                if (/^\d+$/.test(coraId) || coraId.length < 8) {
+                    return res.status(404).json({ error: 'Boleto não encontrado.' });
+                }
+                const { rows } = await db.query(
+                    `SELECT f.*, 
+                            c.nome AS cliente_nome, c.documento AS cliente_documento,
+                            c.endereco_completo AS cliente_endereco, c.cidade AS cliente_cidade, c.estado AS cliente_estado
+                     FROM dash_financeiro f
+                     LEFT JOIN dash_clientes c ON (c.id_firebird = f.cliente_id_firebird OR c.id = f.cliente_id) AND LOWER(c.tenant_id::text) = LOWER(f.tenant_id::text)
+                     WHERE f.asaas_payment_id = $1
+                     ORDER BY f.id DESC
+                     LIMIT 1`,
+                    [coraId]
+                );
+                titles = rows || [];
+            }
         } catch (dbErr) {
             logger.warn('[Cora] Erro ao buscar título no DB:', dbErr.message);
         }
 
         if (titles.length > 0 && titles[0].tenant_id) {
             tenantId = titles[0].tenant_id;
-        } else if (!tenantId) {
-            try {
-                const { rows: actRows } = await db.query(
-                    `SELECT tenant_id FROM dash_integracoes_config WHERE cora_ativo = true AND cora_cert_pem IS NOT NULL LIMIT 1`
-                );
-                if (actRows[0]?.tenant_id) {
-                    tenantId = actRows[0].tenant_id;
-                }
-            } catch (_) {}
         }
+
         if (!tenantId) {
-            tenantId = '6ab9b8b2-09b1-4698-aead-bea948a42036'; // Tenant Master Coliseu
+            return res.status(404).json({ error: 'Boleto não localizado.' });
         }
+
+        const effectiveCoraId = titles[0]?.asaas_payment_id || coraId;
 
         // Busca dados na API da Cora
         let coraResult = null;
         try {
-            coraResult = await CoraService.consultarBoleto(tenantId, coraId);
+            coraResult = await CoraService.consultarBoleto(tenantId, effectiveCoraId);
         } catch (e) {
             logger.warn('[Cora] Aviso ao consultar boleto na API:', e.message);
         }
@@ -407,28 +440,35 @@ router.get('/boleto/:id', async (req, res) => {
         logger.error('[Cora] Erro na rota GET /boleto/:id', { error: err.message });
         res.status(400).json({ error: err.message });
     }
-});
+};
+
+router.get('/boleto/:id', handleBoletoGet);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DELETE /api/cora/boleto/:id
-// Cancela um boleto emitido pelo ID do Cora e limpa vínculo no sistema.
+// Cancela um boleto emitido pelo ID do Cora e limpa vínculo no sistema (Requer JWT).
 // ─────────────────────────────────────────────────────────────────────────────
 router.delete('/boleto/:id', async (req, res) => {
     try {
-        let tenantId = req.tenant?.id;
-        if (!tenantId) {
-            try {
-                const { rows: actRows } = await db.query(
-                    `SELECT tenant_id FROM dash_integracoes_config WHERE cora_ativo = true AND cora_cert_pem IS NOT NULL LIMIT 1`
-                );
-                if (actRows[0]?.tenant_id) {
-                    tenantId = actRows[0].tenant_id;
-                }
-            } catch (_) {}
+        const tenantId = req.tenant?.id;
+        if (!tenantId || tenantId === '00000000-0000-0000-0000-000000000000') {
+            return res.status(401).json({ error: 'Tenant não autenticado.' });
         }
-        if (!tenantId) tenantId = '6ab9b8b2-09b1-4698-aead-bea948a42036';
 
-        const result = await CoraService.cancelarBoleto(tenantId, req.params.id);
+        // Garante que o boleto pertence ao tenant antes de cancelar na API Cora
+        const checkRes = await db.query(
+            `SELECT id, asaas_payment_id FROM dash_financeiro
+             WHERE LOWER(tenant_id::text) = LOWER($2::text)
+               AND (asaas_payment_id = $1 OR CAST(id AS TEXT) = $1 OR CAST(id_firebird AS TEXT) = $1)
+             LIMIT 1`,
+            [req.params.id, tenantId]
+        );
+        if (checkRes.rowCount === 0) {
+            return res.status(404).json({ error: 'Boleto não encontrado nesta empresa.' });
+        }
+
+        const coraInvoiceId = checkRes.rows[0].asaas_payment_id || req.params.id;
+        const result = await CoraService.cancelarBoleto(tenantId, coraInvoiceId);
 
         // Atualiza status e limpa vínculos do boleto cancelado no banco local
         await db.query(
@@ -441,9 +481,8 @@ router.delete('/boleto/:id', async (req, res) => {
                  asaas_linha_digitavel = NULL,
                  asaas_bar_code = NULL,
                  portador_nome = 'CARTEIRA'
-             WHERE (asaas_payment_id = $1 OR CAST(id AS TEXT) = $1 OR CAST(id_firebird AS TEXT) = $1)
-               AND ($2::text IS NULL OR LOWER(tenant_id::text) = LOWER($2::text))`,
-            [req.params.id, tenantId]
+             WHERE id = $1 AND LOWER(tenant_id::text) = LOWER($2::text)`,
+            [checkRes.rows[0].id, tenantId]
         ).catch(() => {});
 
         res.json({ success: true, message: 'Boleto Cora cancelado com sucesso no banco e no Coliseu Transporte.', data: result });
@@ -455,22 +494,14 @@ router.delete('/boleto/:id', async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /api/cora/auditar-boletos
-// Lista todos os boletos emitidos via Cora para conferência de Pix e status
+// Lista todos os boletos emitidos via Cora para conferência de Pix e status (Requer JWT).
 // ─────────────────────────────────────────────────────────────────────────────
 router.get('/auditar-boletos', async (req, res) => {
     try {
-        let tenantId = req.tenant?.id;
-        if (!tenantId) {
-            try {
-                const { rows: actRows } = await db.query(
-                    `SELECT tenant_id FROM dash_integracoes_config WHERE cora_ativo = true AND cora_cert_pem IS NOT NULL LIMIT 1`
-                );
-                if (actRows[0]?.tenant_id) {
-                    tenantId = actRows[0].tenant_id;
-                }
-            } catch (_) {}
+        const tenantId = req.tenant?.id;
+        if (!tenantId || tenantId === '00000000-0000-0000-0000-000000000000') {
+            return res.status(401).json({ error: 'Tenant não autenticado.' });
         }
-        if (!tenantId) tenantId = '6ab9b8b2-09b1-4698-aead-bea948a42036';
 
         const { rows } = await db.query(
             `SELECT f.id, f.id_firebird, f.descricao, f.valor, f.data_vencimento, f.data_emissao,
@@ -480,7 +511,7 @@ router.get('/auditar-boletos', async (req, res) => {
              FROM dash_financeiro f
              LEFT JOIN dash_clientes c ON (c.id_firebird = f.cliente_id_firebird OR c.id = f.cliente_id) AND LOWER(c.tenant_id::text) = LOWER(f.tenant_id::text)
              WHERE (UPPER(f.portador_nome) = 'CORA' OR f.asaas_payment_id LIKE 'inv_%')
-               AND ($1::text IS NULL OR LOWER(f.tenant_id::text) = LOWER($1::text))
+               AND LOWER(f.tenant_id::text) = LOWER($1::text)
              ORDER BY f.id DESC
              LIMIT 100`,
             [tenantId]
@@ -582,14 +613,9 @@ router.post('/pagar-boleto', async (req, res) => {
 router.post('/registrar-webhook', async (req, res) => {
     try {
         const tenantId = req.tenant.id;
-        const { webhook_url, cora_cert_pem, cora_private_key, cora_client_id } = req.body || {};
+        const { webhook_url } = req.body || {};
 
-        const tempConfig = (cora_cert_pem && cora_private_key) ? {
-            cora_cert_pem,
-            cora_private_key,
-            cora_client_id: cora_client_id || 'int-6niGnUQSRUDauHBRYg0xCP'
-        } : null;
-
+        const tempConfig = await resolveTempCoraConfig(tenantId, req.body);
         const url = webhook_url || `https://transporte.coliseusistemas.com.br/api/webhooks/cora/webhook-receive`;
         const result = await CoraService.registrarWebhook(tenantId, url, tempConfig);
 
@@ -675,5 +701,8 @@ const handleCoraWebhookHttp = async (req, res) => {
 router.post('/', handleCoraWebhookHttp);
 router.post('/webhook', handleCoraWebhookHttp);
 router.post('/webhook-receive', handleCoraWebhookHttp);
+
+router.handleCoraWebhookHttp = handleCoraWebhookHttp;
+router.handleBoletoGet = handleBoletoGet;
 
 module.exports = router;

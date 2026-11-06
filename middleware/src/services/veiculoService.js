@@ -15,21 +15,22 @@ const TIMEOUT_MS = 8000;
 const CACHE = new Map(); // placa → { dados, expiraEm }
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24h
 
+const PLACA_REGEX = /^[A-Z]{3}[0-9][A-Z0-9][0-9]{2}$/;
+
 /**
- * Mapeia o tipo de veículo retornado pela API para o tipo de rodado do CT-e/MDF-e.
+ * Mapeia o tipo de veículo retornado pela API para o tipo de rodado do CT-e/MDF-e (domínio SEFAZ 01..06).
  * Referência: Manual de Orientação do Contribuinte — campo tpRod.
  */
 function mapearTipoRodado(tipoVeiculo) {
-    const t = String(tipoVeiculo || '').toLowerCase();
+    const t = String(tipoVeiculo || '').trim().toLowerCase();
+    if (!t) return '01';
 
-    if (t.includes('caminhão') || t.includes('caminhao')) return '03'; // Cavalo Mecânico
-    if (t.includes('caminhonete') || t.includes('caminhonete')) return '04'; // Van
-    if (t.includes('caminhão') || t.includes('caminhao')) return '01'; // Truck
-    if (t.includes('utilitário') || t.includes('utilitario')) return '05'; // Utilitário
-    if (t.includes('automóvel') || t.includes('automóvel') || t.includes('automoveis')) return '06';
-    if (t.includes('moto')) return '07';
-    if (t.includes('trator')) return '08';
-    if (t.includes('reboque') || t.includes('semirreboque')) return '09';
+    if (t.includes('trator') || t.includes('cavalo')) return '03'; // 03 - Cavalo Mecânico (Caminhão Trator)
+    if (t.includes('toco') || t.includes('semi-pesado') || t.includes('semipesado')) return '02'; // 02 - Toco
+    if (t.includes('truck') || t.includes('caminhão') || t.includes('caminhao')) return '01'; // 01 - Truck
+    if (t.includes('van') || t.includes('furgão') || t.includes('furgao') || t.includes('microonibus') || t.includes('micro-ônibus')) return '04'; // 04 - VAN
+    if (t.includes('caminhonete') || t.includes('camioneta') || t.includes('utilitário') || t.includes('utilitario')) return '05'; // 05 - Utilitário
+    if (t.includes('automóvel') || t.includes('automovel') || t.includes('moto') || t.includes('reboque') || t.includes('semirreboque')) return '06'; // 06 - Outros
     return '01'; // Padrão: Truck
 }
 
@@ -39,26 +40,29 @@ function mapearTipoRodado(tipoVeiculo) {
 function mapearTipoCarroceria(tipoVeiculo) {
     const t = String(tipoVeiculo || '').toLowerCase();
 
-    if (t.includes('sider') || t.includes('porta container') || t.includes('portacontainer')) return '03'; // Sider
-    if (t.includes('tanque')) return '04'; // Tanque
-    if (t.includes('bau') || t.includes('baú')) return '01'; // Fechada/Baú
-    if (t.includes('carroceria aberta') || t.includes('carga seca') || t.includes('carga aberta')) return '02'; // Aberta
-    if (t.includes('frigorific')) return '05'; // Frigorificada
-    return '01';
+    if (t.includes('sider')) return '03'; // Sider
+    if (t.includes('porta container') || t.includes('portacontainer')) return '04'; // Porta Container
+    if (t.includes('bau') || t.includes('baú') || t.includes('fechad') || t.includes('frigorific')) return '02'; // Fechada/Baú
+    if (t.includes('carroceria aberta') || t.includes('carga seca') || t.includes('carga aberta') || t.includes('grade baixa')) return '01'; // Aberta
+    return '00'; // Não aplicável / Preenchimento manual
 }
 
 /**
- * Normaliza a placa para o padrão MERCOSUL (ABC1D23) ou antigo (ABC1234).
+ * Normaliza a placa para 7 caracteres alfanuméricos maiúsculos sem hífen (padrão SEFAZ/Mercosul: ABC1234 ou ABC1D23).
  */
 function normalizarPlaca(placa) {
-    const limpo = String(placa || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
-    if (limpo.length === 7) {
-        // Se os 5 primeiros são letras → MERCOSUL, senão formato antigo
-        return /^[A-Z]{3}\d/.test(limpo)
-            ? `${limpo.slice(0, 3)}-${limpo.slice(3)}`
-            : `${limpo.slice(0, 3)}-${limpo.slice(3)}`;
-    }
-    return limpo;
+    return String(placa || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+}
+
+/**
+ * Formata a placa para exibição amigável (ABC-1234 no padrão antigo ou ABC1D23 no Mercosul).
+ */
+function formatarPlacaExibicao(placa) {
+    const limpa = normalizarPlaca(placa);
+    if (limpa.length !== 7) return limpa;
+    return /^[A-Z]{3}[0-9]{4}$/.test(limpa)
+        ? `${limpa.slice(0, 3)}-${limpa.slice(3)}`
+        : limpa;
 }
 
 /**
@@ -69,8 +73,8 @@ function normalizarPlaca(placa) {
 async function consultarPlaca(placa) {
     const limpa = normalizarPlaca(placa);
 
-    if (!limpa || limpa.length !== 7) {
-        return { encontrado: false, motivo: 'Placa deve ter 7 caracteres (ABC1234 ou ABC1D23).' };
+    if (!limpa || limpa.length !== 7 || !PLACA_REGEX.test(limpa)) {
+        return { encontrado: false, motivo: 'Placa inválida. Informe 7 caracteres no padrão ABC1234 ou ABC1D23.' };
     }
 
     // Cache
@@ -80,6 +84,7 @@ async function consultarPlaca(placa) {
     }
 
     const urls = [
+        `https://brasilapi.com.br/api/fipe/placa/v1/${encodeURIComponent(limpa)}`,
         `https://brasilapi.com.br/api/consulta/placa/${encodeURIComponent(limpa)}`,
         `https://cdn.apiblatt.com.br/consulta/placa/${encodeURIComponent(limpa)}`
     ];
@@ -91,28 +96,30 @@ async function consultarPlaca(placa) {
                 headers: { Accept: 'application/json' }
             });
 
-            const d = res.data;
-            if (!d || (d.marca === undefined && d.modelo === undefined)) continue;
+            const raw = Array.isArray(res.data) ? res.data[0] : res.data;
+            if (!raw || (raw.marca === undefined && raw.modelo === undefined)) continue;
 
+            const tipoVeiculo = raw.tipo_veiculo || raw.especie || raw.segmento || '';
             const resultado = {
                 encontrado: true,
                 dados: {
                     placa: limpa,
-                    marca: d.marca || '',
-                    modelo: d.modelo || '',
-                    cor: d.cor || '',
-                    ano_modelo: d.ano_modelo || '',
-                    ano_fabricacao: d.ano_fabricacao || '',
-                    tipo_veiculo: d.tipo_veiculo || '',
-                    tipo_rodado: mapearTipoRodado(d.tipo_veiculo),
-                    tipo_carroceria: mapearTipoCarroceria(d.tipo_veiculo),
-                    chassi: d.chassi || '',
-                    numero_serie: d.numero_serie || '',
-                    capacidade_kg: d.capacidade_kg ? Number(String(d.capacidade_kg).replace(',', '.')) : null,
-                    eixos: d.eixos || d.quantidade_eixos || null,
-                    municipio: d.municipio || '',
-                    uf: d.uf || '',
-                    fonte: 'BrasilAPI'
+                    placa_formatada: formatarPlacaExibicao(limpa),
+                    marca: raw.marca || '',
+                    modelo: raw.modelo || '',
+                    cor: raw.cor || '',
+                    ano_modelo: raw.ano_modelo || raw.anoModelo || '',
+                    ano_fabricacao: raw.ano_fabricacao || raw.ano || '',
+                    tipo_veiculo: tipoVeiculo,
+                    tipo_rodado: mapearTipoRodado(tipoVeiculo),
+                    tipo_carroceria: mapearTipoCarroceria(tipoVeiculo),
+                    chassi: raw.chassi || '',
+                    numero_serie: raw.numero_serie || '',
+                    capacidade_kg: raw.capacidade_kg ? Number(String(raw.capacidade_kg).replace(',', '.')) : null,
+                    eixos: raw.eixos || raw.quantidade_eixos || null,
+                    municipio: raw.municipio || '',
+                    uf: raw.uf || '',
+                    fonte: new URL(url).hostname
                 }
             };
 
@@ -132,6 +139,7 @@ async function consultarPlaca(placa) {
 module.exports = {
     consultarPlaca,
     normalizarPlaca,
+    formatarPlacaExibicao,
     mapearTipoRodado,
     mapearTipoCarroceria
 };

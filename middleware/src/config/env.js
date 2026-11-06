@@ -9,7 +9,8 @@ function required(key) {
 }
 
 function optional(key, defaultValue = '') {
-    return process.env[key] ?? defaultValue;
+    const val = process.env[key];
+    return val !== undefined && val !== '' ? val : defaultValue;
 }
 
 const config = {
@@ -21,8 +22,9 @@ const config = {
 
     security: {
         jwtDeviceKey: optional('JWT_DEVICE_KEY', 'Coliseu2026!IdentitySuperSecretKeyOauth20'),
+        encryptionKey: optional('ENCRYPTION_KEY', ''),
         expectedModuleSlug: optional('EXPECTED_MODULE_SLUG', 'coliseu-transporte'),
-        internalApiKey: optional('INTERNAL_API_KEY', 'Coliseu2026!IdentitySuperSecretKeyOauth20'),  // Chave de fallback ou depreciada
+        internalApiKey: optional('INTERNAL_API_KEY', 'Coliseu2026!IdentitySuperSecretKeyOauth20'),
         identityApiUrl: optional('IDENTITY_API_URL', 'https://adminlicencas.coliseusistemas.com.br'),
         identityInternalKey: optional('IDENTITY_INTERNAL_KEY', 'Coliseu2026!IdentitySuperSecretKeyOauth20'),
         allowedOrigins: optional('ALLOWED_ORIGINS', '')
@@ -31,6 +33,8 @@ const config = {
             .filter(Boolean),
         rateLimitWindowMs: parseInt(optional('RATE_LIMIT_WINDOW_MS', '60000'), 10),
         rateLimitMax: parseInt(optional('RATE_LIMIT_MAX', '200'), 10),
+        authRateLimitWindowMs: parseInt(optional('AUTH_RATE_LIMIT_WINDOW_MS', '900000'), 10),
+        authRateLimitMax: parseInt(optional('AUTH_RATE_LIMIT_MAX', '20'), 10),
     },
 
     postgres: {

@@ -195,7 +195,7 @@ export default function CamposDinamicosPage() {
                     <td className="px-5 py-3.5 font-mono text-xs text-slate-500 dark:text-slate-400">{c.caminho_focus || '—'}</td>
                     <td className="px-5 py-3.5">
                       {c.condicao_json && Object.keys(c.condicao_json).length > 0 ? (
-                        <span className="inline-flex items-center gap-1 text-[10px] font-mono text-violet-600 dark:text-violet-400">
+                        <span className="inline-flex items-center gap-1 text-[10px] font-mono text-teal-600 dark:text-teal-400">
                           <Eye className="w-3 h-3" />
                           condicional
                         </span>

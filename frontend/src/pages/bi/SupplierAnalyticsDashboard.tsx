@@ -260,7 +260,7 @@ export default function SupplierAnalyticsDashboard() {
         </div>
         <div className="bg-bg-primary border border-border shadow-card rounded-xl p-4 flex flex-col justify-between">
           <div className="flex items-center gap-2 text-[10px] font-bold text-text-muted uppercase tracking-wider mb-2">
-            <ShoppingCart size={14} className="text-purple-500" /> Ticket Médio
+            <ShoppingCart size={14} className="text-cyan-500" /> Ticket Médio
           </div>
           <div>
             <div className="text-xl font-extrabold text-text-primary mb-1">{formatBRL(ticketMedio)}</div>
@@ -307,7 +307,7 @@ export default function SupplierAnalyticsDashboard() {
         </div>
         <div className="bg-bg-primary border border-border shadow-card rounded-xl p-4 flex flex-col justify-between">
           <div className="flex items-center gap-2 text-[10px] font-bold text-text-muted uppercase tracking-wider mb-2">
-            <Building2 size={14} className="text-purple-500" /> Clientes Ativos
+            <Building2 size={14} className="text-cyan-500" /> Clientes Ativos
           </div>
           <div>
             <div className="text-xl font-extrabold text-text-primary mb-1">{overview.clientes}</div>

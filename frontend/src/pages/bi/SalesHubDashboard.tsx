@@ -127,7 +127,7 @@ export default function SalesHubDashboard() {
         {/* TICKET MÉDIO */}
         <div className="bg-bg-primary border border-border shadow-card rounded-xl p-5 relative overflow-hidden">
           <div className="flex items-center gap-2 mb-4">
-            <div className="p-1.5 bg-purple-500/10 text-purple-500 rounded-lg">
+            <div className="p-1.5 bg-cyan-500/10 text-cyan-500 rounded-lg">
               <Target size={16} />
             </div>
             <span className="text-xs font-bold text-text-secondary uppercase tracking-wider">Ticket Médio</span>
@@ -135,9 +135,9 @@ export default function SalesHubDashboard() {
           <div className="text-3xl font-extrabold text-text-primary pl-1 mb-1">
             {formatBRL(data?.ticket_medio || 0)}
           </div>
-          <div className="flex justify-end text-[10px] text-purple-500 font-bold mt-1">92% atingido</div>
+          <div className="flex justify-end text-[10px] text-cyan-500 font-bold mt-1">92% atingido</div>
           <div className="w-full bg-bg-secondary h-1 mt-1 rounded-full overflow-hidden">
-             <div className="bg-purple-500 h-full w-[92%]"></div>
+             <div className="bg-cyan-500 h-full w-[92%]"></div>
           </div>
         </div>
       </div>

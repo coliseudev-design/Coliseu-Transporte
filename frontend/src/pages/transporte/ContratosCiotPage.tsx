@@ -149,7 +149,7 @@ export default function ContratosCiotPage() {
                     Contratante: {c.contratante_nome}
                   </p>
                 </div>
-                <span className="shrink-0 px-2.5 py-1 rounded-full text-[10px] font-bold bg-violet-100 dark:bg-violet-950/60 text-violet-700 dark:text-violet-300">
+                <span className="shrink-0 px-2.5 py-1 rounded-full text-[10px] font-bold bg-teal-100 dark:bg-teal-950/60 text-teal-700 dark:text-teal-300">
                   {rotuloTipo(c.tipo_transporte)}
                 </span>
               </div>

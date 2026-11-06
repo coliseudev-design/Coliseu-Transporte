@@ -28,6 +28,8 @@ services:
           - coliseu-transporte-middleware
     environment:
       - NODE_ENV=${NODE_ENV:-production}
+      # Ambiente do banco: 'demo' habilita seeds de teste (frota). 'production' desabilita.
+      - APP_AMBIENTE=${APP_AMBIENTE:-production}
       - PORT=${PORT:-3200}
       
       # Banco de dados
@@ -38,17 +40,19 @@ services:
       - PG_PASSWORD=${PG_PASSWORD}
       - PG_SSL=${PG_SSL:-false}
       
-      # Identity Server / Segurança
-      - JWT_DEVICE_KEY=${JWT_DEVICE_KEY:-Coliseu2026!IdentitySuperSecretKeyOauth20}
+      # Identity Server / Segurança e Cofre Criptográfico (AES-256-GCM)
+      - JWT_DEVICE_KEY=${JWT_DEVICE_KEY:-}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-}
       - EXPECTED_MODULE_SLUG=${EXPECTED_MODULE_SLUG:-coliseu-transporte}
       - IDENTITY_API_URL=${IDENTITY_API_URL:-https://adminlicencas.coliseusistemas.com.br}
-      - IDENTITY_INTERNAL_KEY=${IDENTITY_INTERNAL_KEY:-Coliseu2026!IdentitySuperSecretKeyOauth20}
+      - IDENTITY_INTERNAL_KEY=${IDENTITY_INTERNAL_KEY:-}
       
       # Comunicação com o Worker
-      - INTERNAL_API_KEY=${INTERNAL_API_KEY:-Coliseu2026!IdentitySuperSecretKeyOauth20}
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY:-}
       
       # Limits
       - RATE_LIMIT_MAX=${RATE_LIMIT_MAX:-1000}
+      - AUTH_RATE_LIMIT_MAX=${AUTH_RATE_LIMIT_MAX:-20}
     
     ports:
       - "3200" # Exposto apenas para a rede interna; Nginx/Traefik cuidam do roteamento externo

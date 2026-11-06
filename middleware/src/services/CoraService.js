@@ -14,6 +14,16 @@ const path = require('path');
 const { randomUUID } = require('crypto');
 const db = require('../db/postgres');
 const logger = require('../config/logger');
+const { encryptSecret, decryptSecret } = require('../utils/cryptoVault');
+
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
 
 // Cache da logo oficial Coliseu em base64 para garantir carregamento instantâneo e offline/impressão
 let COLISEU_LOGO_BASE64 = '';
@@ -45,9 +55,12 @@ const _coraInFlightPromises = new Map();
 class CoraService {
 
     /**
-     * Busca a configuração do Cora para um tenant.
+     * Busca a configuração do Cora para um tenant (decifrando a chave privada mTLS em repouso).
      */
     async getConfig(tenantId) {
+        if (!tenantId || String(tenantId) === '00000000-0000-0000-0000-000000000000') {
+            throw new Error('Selecione uma empresa válida para utilizar o Banco Cora.');
+        }
         const { rows } = await db.query(
             `SELECT cora_ativo, cora_client_id, cora_cert_pem, cora_private_key,
                     cora_juros_padrao, cora_multa_padrao, cora_desconto_padrao,
@@ -56,7 +69,11 @@ class CoraService {
             [tenantId]
         );
         if (!rows[0]) throw new Error('Configuração do Banco Cora não encontrada para este tenant.');
-        return rows[0];
+        return {
+            ...rows[0],
+            cora_private_key: decryptSecret(rows[0].cora_private_key),
+            cora_token_cache: decryptSecret(rows[0].cora_token_cache)
+        };
     }
 
     /**
@@ -71,8 +88,8 @@ class CoraService {
     }
 
     /**
-     * Obtém o Bearer token via Client Credentials + mTLS.
-     * Token é cacheado por 23h no banco de dados.
+     * Obtém o token OAuth2 via Client Credentials + mTLS.
+     * Token é cacheado no banco de dados de forma cifrada.
      */
     async getToken(tenantId, explicitConfig = null) {
         const now = Date.now();
@@ -143,11 +160,11 @@ class CoraService {
                 expiresAtMs
             });
 
-            // Salva no banco de dados se não for teste avulso
+            // Salva no banco de dados cifrado se não for teste avulso
             if (!explicitConfig) {
                 await db.query(
                     `UPDATE dash_integracoes_config SET cora_token_cache = $1, cora_token_expires_at = $2 WHERE tenant_id = $3`,
-                    [token, expiresAt.toISOString(), tenantId]
+                    [encryptSecret(token), expiresAt.toISOString(), tenantId]
                 ).catch(dbErr => {
                     logger.warn('[CoraService] Aviso ao salvar cache do token no banco:', dbErr.message);
                 });
@@ -857,12 +874,11 @@ class CoraService {
     }
 
     /**
-     * Processa evento de Webhook recebido do Banco Cora com conciliação e baixa no ERP.
+     * Processa evento de Webhook recebido do Banco Cora com verificação mTLS na API oficial antes da baixa.
      */
     async processarEventoWebhook({ eventId, eventType, resourceId, body = {} }) {
         const evType = (eventType || body?.event_type || body?.event || body?.type || '').toLowerCase();
-        const resId = resourceId || body?.resource_id || body?.data?.id || body?.id || null;
-        const invData = body?.data || body?.invoice || body || {};
+        const resId = String(resourceId || body?.resource_id || body?.data?.id || body?.id || '').trim();
 
         logger.info('[CoraWebhook] Processando evento webhook Cora', { eventId, evType, resId });
 
@@ -871,39 +887,53 @@ class CoraService {
             return { ignored: true, reason: 'resourceId ausente' };
         }
 
-        // Localiza o título correspondente no dash_financeiro
+        // Localiza o título correspondente estritamente pelo ID não enumerável da fatura Cora
         const { rows: titles } = await db.query(
             `SELECT id, tenant_id, id_firebird, nosso_numero, numero_documento, valor, valor_pago, status_pagamento, status_boleto, asaas_payment_id
              FROM dash_financeiro
-             WHERE asaas_payment_id = $1 
-                OR (nosso_numero IS NOT NULL AND nosso_numero != '—' AND nosso_numero = $1)
+             WHERE asaas_payment_id = $1
              ORDER BY id DESC LIMIT 1`,
             [resId]
         );
 
         if (titles.length === 0) {
-            logger.warn('[CoraWebhook] Título local não encontrado pelo ID direto. Disparando sync em lote dos tenants Cora...', { resId });
-            const { rows: tenants } = await db.query(
-                `SELECT tenant_id FROM dash_integracoes_config WHERE cora_ativo = true AND cora_cert_pem IS NOT NULL`
-            );
-            for (const t of tenants) {
-                await this.sincronizarFaturasCora(t.tenant_id).catch(() => {});
-            }
-            return { success: true, fallbackSync: true };
+            logger.warn('[CoraWebhook] Fatura Cora não localizada localmente; evento descartado sem varredura cross-tenant.', { resId });
+            return { ignored: true, reason: 'invoice_not_found' };
         }
 
         const title = titles[0];
         const tenantId = title.tenant_id;
 
-        if (evType === 'invoice.paid' || invData.status === 'PAID') {
+        // Confirma o status real da fatura diretamente na API Cora via mTLS (impede spoofing de webhook público)
+        let remoteInvoice;
+        try {
+            remoteInvoice = await this.consultarBoleto(tenantId, title.asaas_payment_id || resId);
+        } catch (verifyErr) {
+            logger.warn('[CoraWebhook] Falha ao validar fatura via mTLS na API Cora; evento recusado', {
+                resId,
+                tenantId,
+                error: verifyErr.message
+            });
+            return { unverified: true, error: 'Falha na validação mTLS da fatura' };
+        }
+
+        const remoteStatus = String(remoteInvoice?.status || '').toUpperCase();
+
+        if (remoteStatus === 'PAID') {
             let amountPaid = parseFloat(title.valor || 0);
-            if (invData.total_amount) {
-                amountPaid = invData.total_amount / 100;
-            } else if (invData.amount) {
-                amountPaid = invData.amount / 100;
+            if (remoteInvoice.total_paid) {
+                amountPaid = remoteInvoice.total_paid / 100;
+            } else if (remoteInvoice.total_amount) {
+                amountPaid = remoteInvoice.total_amount / 100;
+            } else if (remoteInvoice.amount) {
+                amountPaid = remoteInvoice.amount / 100;
             }
 
-            const paidDate = invData.paid_at || new Date().toISOString();
+            const paidDate =
+                remoteInvoice.occurrence_date ||
+                remoteInvoice.paid_at ||
+                remoteInvoice.payments?.[0]?.created_at ||
+                new Date().toISOString();
 
             await db.query(
                 `UPDATE dash_financeiro
@@ -913,8 +943,8 @@ class CoraService {
                      valor_pago = COALESCE(NULLIF($2::numeric, 0), valor_pago, valor),
                      portador_nome = 'CORA',
                      asaas_payment_id = COALESCE(asaas_payment_id, $3)
-                 WHERE id = $4`,
-                [paidDate, amountPaid, resId, title.id]
+                 WHERE id = $4 AND tenant_id = $5`,
+                [paidDate, amountPaid, resId, title.id, tenantId]
             );
 
             // Enfileira em pending_payments para o Firebird dar baixa
@@ -937,29 +967,29 @@ class CoraService {
             await db.query(
                 `INSERT INTO dash_cobrancas_ocorrencias (tenant_id, financeiro_id, tipo_contato, observacao, operador)
                  VALUES ($1, $2, 'Webhook Cora', $3, 'Sistema Automático')`,
-                [tenantId, title.id, `Pagamento de R$ ${amountPaid.toFixed(2)} recebido via Webhook Cora (ID: ${resId}).`]
+                [tenantId, title.id, `Pagamento de R$ ${amountPaid.toFixed(2)} confirmado via mTLS Cora (ID: ${resId}).`]
             ).catch(() => {});
 
             await db.query(
                 `INSERT INTO dash_financeiro_logs (tenant_id, titulo_id, tipo_evento, usuario, nosso_numero, descricao)
                  VALUES ($1, $2, 'QUITACAO_CORA', 'Webhook Cora', $3, $4)`,
-                [tenantId, title.id, title.nosso_numero || null, `Quitação confirmada via Webhook Cora (${evType}). Valor: R$ ${amountPaid.toFixed(2)}`]
+                [tenantId, title.id, title.nosso_numero || null, `Quitação confirmada via Webhook + mTLS Cora (${evType || remoteStatus}). Valor: R$ ${amountPaid.toFixed(2)}`]
             ).catch(() => {});
 
-            logger.info('[CoraWebhook] Boleto marcado como PAGO e enfileirado para o Worker', { titleId: title.id, resId });
-        } else if (evType === 'invoice.canceled' || invData.status === 'CANCELED') {
+            logger.info('[CoraWebhook] Boleto verificado via mTLS, marcado como PAGO e enfileirado para o Worker', { titleId: title.id, resId });
+        } else if (remoteStatus === 'CANCELED') {
             await db.query(
-                `UPDATE dash_financeiro SET status_boleto = 'CANCELADO' WHERE id = $1 AND status_pagamento != 'PAGO'`,
-                [title.id]
+                `UPDATE dash_financeiro SET status_boleto = 'CANCELADO' WHERE id = $1 AND tenant_id = $2 AND status_pagamento != 'PAGO'`,
+                [title.id, tenantId]
             );
-        } else if (evType === 'invoice.overdue' || invData.status === 'OVERDUE') {
+        } else if (remoteStatus === 'OVERDUE' || remoteStatus === 'LATE') {
             await db.query(
-                `UPDATE dash_financeiro SET status_boleto = 'VENCIDO' WHERE id = $1 AND status_pagamento != 'PAGO'`,
-                [title.id]
+                `UPDATE dash_financeiro SET status_boleto = 'VENCIDO' WHERE id = $1 AND tenant_id = $2 AND status_pagamento != 'PAGO'`,
+                [title.id, tenantId]
             );
         }
 
-        return { success: true, processed: true };
+        return { success: true, processed: true, remoteStatus };
     }
 
     /**
@@ -1102,32 +1132,33 @@ class CoraService {
         const site = 'https://coliseusistemas.com.br/';
         const logoUrl = COLISEU_LOGO_BASE64 || 'https://transporte.coliseusistemas.com.br/logo-nexus.png';
 
-        const clienteNome = cliente.nome || titulo.cliente_nome || 'Cliente';
-        const clienteDoc = cliente.documento || titulo.cliente_documento || '—';
-        const clienteEndereco = cliente.endereco_completo || cliente.endereco || titulo.cliente_endereco || '—';
+        const clienteNome = escapeHtml(cliente.nome || titulo.cliente_nome || 'Cliente');
+        const clienteDoc = escapeHtml(cliente.documento || titulo.cliente_documento || '—');
+        const clienteEndereco = escapeHtml(cliente.endereco_completo || cliente.endereco || titulo.cliente_endereco || '—');
 
         const valorNum = parseFloat(titulo.valor || 0);
         const valorFormatado = valorNum.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
         
-        const vencimentoFormatado = formatarDataBr(titulo.data_vencimento);
-        const emissaoFormatada = formatarDataBr(titulo.data_emissao) !== '—' ? formatarDataBr(titulo.data_emissao) : new Date().toLocaleDateString('pt-BR');
+        const vencimentoFormatado = escapeHtml(formatarDataBr(titulo.data_vencimento));
+        const emissaoFormatada = escapeHtml(formatarDataBr(titulo.data_emissao) !== '—' ? formatarDataBr(titulo.data_emissao) : new Date().toLocaleDateString('pt-BR'));
 
         const rawLinhaDigitavel = cora.linhaDigitavel || titulo.asaas_linha_digitavel || titulo.linha_digitavel || '';
-        const linhaDigitavel = formatLinhaDigitavel(rawLinhaDigitavel) || rawLinhaDigitavel;
+        const linhaDigitavel = escapeHtml(formatLinhaDigitavel(rawLinhaDigitavel) || rawLinhaDigitavel);
         const rawBarCode = cora.barCode || titulo.asaas_bar_code || titulo.bar_code || '';
         const barCodeDigits = rawBarCode.replace(/\D/g, '') || rawLinhaDigitavel.replace(/\D/g, '');
-        const nossoNumero = cora.nossoNumero || titulo.nosso_numero || String(titulo.id || '');
-        const numeroDocumento = String(titulo.id_firebird || titulo.id || '');
-        const descricao = titulo.descricao || 'Cobrança Referente ao Sistema Coliseu';
-        const multaPercentual = titulo.multa_percentual || 2.0;
-        const jurosPercentual = titulo.juros_percentual || 1.0;
+        const nossoNumero = escapeHtml(cora.nossoNumero || titulo.nosso_numero || String(titulo.id || ''));
+        const numeroDocumento = escapeHtml(String(titulo.id_firebird || titulo.id || ''));
+        const descricao = escapeHtml(titulo.descricao || 'Cobrança Referente ao Sistema Coliseu');
+        const multaPercentual = parseFloat(titulo.multa_percentual || 2.0) || 2.0;
+        const jurosPercentual = parseFloat(titulo.juros_percentual || 1.0) || 1.0;
         const multaValor = ((valorNum * multaPercentual) / 100).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-        const pdfUrl = cora.pdfUrl || 'https://coliseusistemas.com.br';
+        const rawPdfUrl = String(cora.pdfUrl || 'https://coliseusistemas.com.br');
+        const pdfUrl = escapeHtml(/^https?:\/\//i.test(rawPdfUrl) ? rawPdfUrl : 'https://coliseusistemas.com.br');
 
         // Pix Copia e Cola: utiliza estritamente o código EMV gerado pelo Banco Cora.
-        // NUNCA gerar fallback com a chave CNPJ da Coliseu porque essa chave está registrada no Banco Asaas,
-        // o que causava desvio indevido do pagamento Pix para o Asaas enquanto o boleto era do Cora.
-        const pixCopiaECola = (cora.pixCopiaECola && String(cora.pixCopiaECola).trim() !== '') ? String(cora.pixCopiaECola).trim() : null;
+        const rawPixEmv = (cora.pixCopiaECola && String(cora.pixCopiaECola).trim() !== '') ? String(cora.pixCopiaECola).trim() : null;
+        const pixCopiaECola = rawPixEmv ? escapeHtml(rawPixEmv) : null;
+        const pixJsLiteral = rawPixEmv ? JSON.stringify(rawPixEmv).replace(/</g, '\\u003c') : null;
 
         // Gera os códigos de barras SVG server-side
         const topBarcodeSvg = generateItfSvg(barCodeDigits, 46);
@@ -1561,7 +1592,7 @@ class CoraService {
             <span class="diamond-icon">❖</span> Código Pix copia e cola
             <span id="pixTooltip" class="copy-tooltip">✓ Copiado!</span>
           </div>
-          <div class="copyable-code" id="pixCodeText" onclick="copyToClipboard('${pixCopiaECola.replace(/'/g, "\\'")}', 'pixTooltip')" title="Clique para copiar o código Pix">
+          <div class="copyable-code" id="pixCodeText" onclick="copyToClipboard(this.textContent.trim(), 'pixTooltip')" title="Clique para copiar o código Pix">
             ${pixCopiaECola}
           </div>
         </div>
@@ -1593,7 +1624,7 @@ class CoraService {
           <span>Pague o boleto com Pix usando o QR Code abaixo</span>
         </div>
         <div class="qr-box" id="qrcode">
-          <img src="https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(pixCopiaECola)}" alt="QR Code Pix" onerror="this.style.display='none'; renderQrFallback();" />
+          <img src="https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(rawPixEmv)}" alt="QR Code Pix" onerror="this.style.display='none'; renderQrFallback();" />
         </div>
       </div>
       ` : `
@@ -1787,11 +1818,11 @@ class CoraService {
     function renderQrFallback() {
       try {
         const box = document.getElementById("qrcode");
-        ${pixCopiaECola ? `
+        ${pixJsLiteral ? `
         if (box && typeof QRCode !== "undefined") {
-          box.innerHTML = "";
+          box.replaceChildren();
           new QRCode(box, {
-            text: "${pixCopiaECola.replace(/"/g, '\\"')}",
+            text: ${pixJsLiteral},
             width: 124,
             height: 124,
             colorDark: "#0f172a",

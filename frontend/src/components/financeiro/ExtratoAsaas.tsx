@@ -757,7 +757,7 @@ export default function ExtratoAsaas({ startDate: startProp, endDate: endProp }:
             <span className="font-mono font-black">-{fmtBRL(totalDebito)}</span>
           </div>
 
-          <div className="px-4 py-1.5 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-xl font-black flex items-center gap-2 shadow-md text-xs whitespace-nowrap">
+          <div className="px-4 py-1.5 bg-gradient-to-r from-indigo-600 to-cyan-600 text-white rounded-xl font-black flex items-center gap-2 shadow-md text-xs whitespace-nowrap">
             <span className="text-[10px] uppercase font-extrabold tracking-wider text-indigo-200">TOTAL SALDO:</span>
             <span className="text-sm font-black">{saldo != null ? fmtBRL(saldo) : 'R$ 0,00'}</span>
           </div>

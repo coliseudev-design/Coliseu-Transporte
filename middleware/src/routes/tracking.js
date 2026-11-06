@@ -59,6 +59,22 @@ async function ensureTrackingTables() {
 // Ensure tables on module load
 ensureTrackingTables();
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const DEFAULT_FALLBACK_URL = 'https://coliseusistemas.com.br';
+
+function sanitizeTrackingRedirectUrl(rawUrl) {
+    if (!rawUrl || typeof rawUrl !== 'string') return DEFAULT_FALLBACK_URL;
+    try {
+        const parsed = new URL(rawUrl.trim());
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+            return DEFAULT_FALLBACK_URL;
+        }
+        return parsed.toString();
+    } catch (_) {
+        return DEFAULT_FALLBACK_URL;
+    }
+}
+
 /**
  * GET /track/open/:email_id
  * Or GET /api/track/open/:email_id
@@ -79,7 +95,7 @@ router.get('/open/:email_id', async (req, res) => {
     // Asynchronously record event (fail-silent)
     try {
         const { email_id } = req.params;
-        if (!email_id || email_id.length < 10) return;
+        if (!email_id || !UUID_REGEX.test(email_id)) return;
 
         const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || '';
         const userAgent = req.headers['user-agent'] || '';
@@ -95,6 +111,8 @@ router.get('/open/:email_id', async (req, res) => {
              RETURNING tenant_id, campanha_id`,
             [email_id]
         );
+
+        if (updRes.rowCount === 0) return;
 
         const tenantId = updRes.rows[0]?.tenant_id || null;
         const campanhaId = updRes.rows[0]?.campanha_id || null;
@@ -113,22 +131,19 @@ router.get('/open/:email_id', async (req, res) => {
 /**
  * GET /track/click/:email_id?url=...
  * Or GET /api/track/click/:email_id?url=...
- * Records click event and redirects to destination URL.
+ * Records click event and redirects to destination URL only when email_id is valid and HTTP(S).
  */
 router.get('/click/:email_id', async (req, res) => {
     const { email_id } = req.params;
-    const targetUrl = req.query.url;
+    const requestedUrl = sanitizeTrackingRedirectUrl(req.query.url ? String(req.query.url) : '');
+    let destination = DEFAULT_FALLBACK_URL;
 
-    // Default safe fallback if url is missing
-    const destination = targetUrl ? String(targetUrl) : 'https://coliseusistemas.com.br';
-
-    // Asynchronously record click (fail-silent)
     try {
-        if (email_id && email_id.length >= 10) {
+        if (email_id && UUID_REGEX.test(email_id)) {
             const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || '';
             const userAgent = req.headers['user-agent'] || '';
 
-            // 1. Update dash_email_sends
+            // 1. Update dash_email_sends (only redirect to external URL if email_id belongs to a sent email)
             const updRes = await db.query(
                 `UPDATE dash_email_sends
                  SET total_cliques = COALESCE(total_cliques, 0) + 1,
@@ -140,21 +155,22 @@ router.get('/click/:email_id', async (req, res) => {
                 [email_id]
             );
 
-            const tenantId = updRes.rows[0]?.tenant_id || null;
-            const campanhaId = updRes.rows[0]?.campanha_id || null;
+            if (updRes.rowCount > 0) {
+                destination = requestedUrl;
+                const tenantId = updRes.rows[0]?.tenant_id || null;
+                const campanhaId = updRes.rows[0]?.campanha_id || null;
 
-            // 2. Insert into dash_email_events
-            await db.query(
-                `INSERT INTO dash_email_events (tenant_id, email_id, campanha_id, type, url, ip, user_agent, created_at)
-                 VALUES ($1, $2::uuid, $3, 'click', $4, $5, $6, NOW())`,
-                [tenantId, email_id, campanhaId, destination, String(ip).slice(0, 100), String(userAgent).slice(0, 500)]
-            );
+                await db.query(
+                    `INSERT INTO dash_email_events (tenant_id, email_id, campanha_id, type, url, ip, user_agent, created_at)
+                     VALUES ($1, $2::uuid, $3, 'click', $4, $5, $6, NOW())`,
+                    [tenantId, email_id, campanhaId, destination, String(ip).slice(0, 100), String(userAgent).slice(0, 500)]
+                );
+            }
         }
     } catch (err) {
         logger.warn('[Tracking Click] Warning processing click event:', err.message);
     }
 
-    // Always redirect user to destination immediately
     return res.redirect(302, destination);
 });
 

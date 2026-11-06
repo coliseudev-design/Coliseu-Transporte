@@ -313,7 +313,7 @@ export default function FrotaPage() {
                         <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold whitespace-nowrap ${
                           v.tipo_proprietario === '1'
                             ? 'bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300'
-                            : 'bg-violet-100 dark:bg-violet-950/60 text-violet-700 dark:text-violet-300'
+                            : 'bg-teal-100 dark:bg-teal-950/60 text-teal-700 dark:text-teal-300'
                         }`}>
                           {v.tipo_proprietario === '1' ? 'Próprio' : 'Terceiro/TAC'}
                         </span>

@@ -121,6 +121,9 @@ router.get('/me', async (req, res) => {
         }
 
         const user = result.rows[0];
+        if (!user.ativo) {
+            return res.status(403).json({ error: 'Usuário inativo', code: 'USER_INACTIVE' });
+        }
         return res.json({ user });
     } catch (err) {
         logger.error('[Auth] Erro ao buscar /me', err);
@@ -168,20 +171,25 @@ router.post('/alterar-senha', async (req, res) => {
             return res.status(400).json({ error: 'A nova senha deve ter no mínimo 6 caracteres.' });
         }
 
+        if (!senhaAtual || typeof senhaAtual !== 'string' || senhaAtual.trim().length === 0) {
+            return res.status(400).json({ error: 'A senha atual é obrigatória para confirmar sua identidade.' });
+        }
+
         // Buscar hash atual no banco
-        const userRes = await db.query('SELECT senha_hash FROM dash_usuarios WHERE id = $1', [userId]);
+        const userRes = await db.query('SELECT senha_hash, ativo FROM dash_usuarios WHERE id = $1', [userId]);
         if (userRes.rowCount === 0) {
             return res.status(404).json({ error: 'Usuário não localizado.' });
+        }
+        if (!userRes.rows[0].ativo) {
+            return res.status(403).json({ error: 'Usuário inativo.' });
         }
 
         const currentHash = userRes.rows[0].senha_hash;
 
-        // Se informou senha atual, verifica a validade
-        if (senhaAtual && senhaAtual !== '123456') {
-            const isMatch = await bcrypt.compare(senhaAtual, currentHash);
-            if (!isMatch) {
-                return res.status(400).json({ error: 'Senha atual incorreta.' });
-            }
+        // Valida incondicionalmente a senha atual contra o hash armazenado (inclusive quando for '123456')
+        const isMatch = await bcrypt.compare(senhaAtual, currentHash);
+        if (!isMatch) {
+            return res.status(400).json({ error: 'Senha atual incorreta.' });
         }
 
         // Gerar novo hash e atualizar banco

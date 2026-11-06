@@ -9,6 +9,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db/postgres');
 const logger = require('../config/logger');
+const { requireAdmin, invalidateUserAuthCache } = require('../middleware/auth');
 
 // JSONs de Permissões Padrão para os Grupos "Master" e "Comercial"
 const DEFAULT_MASTER_PERMISSIONS = {
@@ -101,18 +102,26 @@ async function ensureGruposTableAndSeeds(tenantId) {
       [tenantId]
     );
 
+    let comercialGroupId;
     if (comercialRes.rows.length === 0) {
-      await db.query(
+      const newComercial = await db.query(
         `INSERT INTO dash_grupos_acesso (tenant_id, nome, descricao, permissoes_menus, permissoes_acoes, ativo)
-         VALUES ($1, 'Comercial', 'Perfil Comercial (Sem acesso à Gestão Financeira e sem permissão de cancelamentos)', $2, $3, true)`,
+         VALUES ($1, 'Comercial', 'Perfil Comercial (Sem acesso à Gestão Financeira e sem permissão de cancelamentos)', $2, $3, true)
+         RETURNING id`,
         [tenantId, DEFAULT_COMERCIAL_PERMISSIONS.permissoes_menus, DEFAULT_COMERCIAL_PERMISSIONS.permissoes_acoes]
       );
+      comercialGroupId = newComercial.rows[0].id;
+    } else {
+      comercialGroupId = comercialRes.rows[0].id;
     }
 
-    // 4. Associa todos os usuários sem grupo ao grupo Master por padrão
+    // 4. Associa usuários sem grupo respeitando o menor privilégio:
+    // Somente admin/master recebem grupo Master; demais perfis recebem Comercial.
     await db.query(
-      `UPDATE dash_usuarios SET grupo_id = $1 WHERE tenant_id = $2 AND grupo_id IS NULL`,
-      [masterGroupId, tenantId]
+      `UPDATE dash_usuarios
+       SET grupo_id = CASE WHEN LOWER(COALESCE(role, '')) IN ('master', 'admin') THEN $1::int ELSE $2::int END
+       WHERE tenant_id = $3 AND grupo_id IS NULL`,
+      [masterGroupId, comercialGroupId, tenantId]
     );
 
     return masterGroupId;
@@ -175,7 +184,7 @@ router.get('/:id', async (req, res, next) => {
  * POST /api/grupos-acesso
  * Cria um novo grupo de acesso
  */
-router.post('/', async (req, res, next) => {
+router.post('/', requireAdmin, async (req, res, next) => {
   try {
     const tenantId = req.tenant.id;
     const { nome, descricao, permissoes_menus, permissoes_acoes } = req.body;
@@ -209,7 +218,7 @@ router.post('/', async (req, res, next) => {
  * PUT /api/grupos-acesso/:id
  * Atualiza permissões e dados de um grupo de acesso
  */
-router.put('/:id', async (req, res, next) => {
+router.put('/:id', requireAdmin, async (req, res, next) => {
   try {
     const tenantId = req.tenant.id;
     const { id } = req.params;
@@ -240,6 +249,7 @@ router.put('/:id', async (req, res, next) => {
       return res.status(404).json({ error: 'Grupo de acesso não localizado.' });
     }
 
+    invalidateUserAuthCache();
     res.json({ success: true, message: 'Grupo de acesso atualizado com sucesso!', data: rows[0] });
   } catch (err) {
     next(err);
@@ -250,11 +260,20 @@ router.put('/:id', async (req, res, next) => {
  * DELETE /api/grupos-acesso/:id
  * Desativa/Exclui um grupo de acesso
  */
-router.delete('/:id', async (req, res, next) => {
+router.delete('/:id', requireAdmin, async (req, res, next) => {
   try {
     const tenantId = req.tenant.id;
     const { id } = req.params;
     const groupId = parseInt(id, 10);
+
+    // Impede remoção do grupo padrão Master
+    const checkGroup = await db.query(
+      `SELECT nome FROM dash_grupos_acesso WHERE tenant_id = $1 AND id = $2 LIMIT 1`,
+      [tenantId, groupId]
+    );
+    if (checkGroup.rows.length > 0 && String(checkGroup.rows[0].nome).toLowerCase() === 'master') {
+      return res.status(400).json({ error: 'O grupo padrão Master não pode ser excluído.' });
+    }
 
     // Verifica se há usuários vinculados a este grupo
     const { rows: users } = await db.query(
@@ -263,15 +282,15 @@ router.delete('/:id', async (req, res, next) => {
     );
 
     if (users[0].count > 0) {
-      // Reatribui os usuários ao grupo Master
-      const masterRes = await db.query(
-        `SELECT id FROM dash_grupos_acesso WHERE tenant_id = $1 AND LOWER(nome) = 'master' LIMIT 1`,
+      // Reatribui os usuários ao grupo Comercial (menor privilégio)
+      const comercialRes = await db.query(
+        `SELECT id FROM dash_grupos_acesso WHERE tenant_id = $1 AND LOWER(nome) = 'comercial' LIMIT 1`,
         [tenantId]
       );
-      if (masterRes.rows.length > 0) {
+      if (comercialRes.rows.length > 0) {
         await db.query(
           `UPDATE dash_usuarios SET grupo_id = $1 WHERE tenant_id = $2 AND grupo_id = $3`,
-          [masterRes.rows[0].id, tenantId, groupId]
+          [comercialRes.rows[0].id, tenantId, groupId]
         );
       }
     }
@@ -281,6 +300,7 @@ router.delete('/:id', async (req, res, next) => {
       [tenantId, groupId]
     );
 
+    invalidateUserAuthCache();
     res.json({ success: true, message: 'Grupo de acesso removido com sucesso!' });
   } catch (err) {
     next(err);

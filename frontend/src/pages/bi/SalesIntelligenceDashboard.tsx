@@ -92,7 +92,7 @@ export default function SalesIntelligenceDashboard() {
   const clientsList = data?.top_clients || [];
 
   // Helper colors for treemap/seller brands
-  const brandColors = ['#10B981', '#3B82F6', '#F59E0B', '#EF4444', '#8B5CF6'];
+  const brandColors = ['#10B981', '#3B82F6', '#F59E0B', '#EF4444', '#0891B2'];
 
   return (
     <div className="space-y-6 animate-in fade-in duration-300">
@@ -139,9 +139,9 @@ export default function SalesIntelligenceDashboard() {
 
         {/* TICKET MÉDIO */}
         <div className="bg-bg-primary border border-border shadow-card rounded-xl p-5 relative overflow-hidden">
-          <div className="absolute top-0 left-0 w-1 h-full bg-purple-500"></div>
+          <div className="absolute top-0 left-0 w-1 h-full bg-cyan-500"></div>
           <div className="flex items-center gap-2 mb-2">
-            <div className="p-1.5 bg-purple-500/10 text-purple-500 rounded-lg">
+            <div className="p-1.5 bg-cyan-500/10 text-cyan-500 rounded-lg">
               <Target size={16} />
             </div>
             <span className="text-xs font-bold text-text-secondary uppercase tracking-wider">Ticket Médio</span>

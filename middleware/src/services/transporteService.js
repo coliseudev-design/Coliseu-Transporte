@@ -3,6 +3,8 @@
 const db = require('../db/postgres');
 const logger = require('../config/logger');
 const FocusClient = require('./focus/focusClient');
+const { safeCompare } = require('../middleware/auth');
+const { decryptSecret, decryptBuffer, isMaskedValue } = require('../utils/cryptoVault');
 
 const CAPITAIS_IBGE_FALLBACK = {
   AC: { codigo: '1200401', nome: 'Rio Branco' },
@@ -116,22 +118,28 @@ class TransporteService {
       ? 'producao'
       : 'homologacao';
 
+    const emitTok = decryptSecret(emitente?.focus_token || '');
+    const emitTokHomolog = decryptSecret(emitente?.focus_token_homologacao || '');
+    const emitTokProd = decryptSecret(emitente?.focus_token_producao || '');
+    const cfgTokHomolog = decryptSecret(cfg?.focus_token_homologacao || '');
+    const cfgTokProd = decryptSecret(cfg?.focus_token_producao || '');
+
     const tokenHomologacao =
-      emitente?.focus_token_homologacao ||
-      cfg?.focus_token_homologacao ||
-      (emitente?.focus_ambiente !== 'producao' ? emitente?.focus_token : '') ||
+      emitTokHomolog ||
+      cfgTokHomolog ||
+      (emitente?.focus_ambiente !== 'producao' ? emitTok : '') ||
       '';
 
     const tokenProducao =
-      emitente?.focus_token_producao ||
-      cfg?.focus_token_producao ||
-      (emitente?.focus_ambiente === 'producao' ? emitente?.focus_token : '') ||
+      emitTokProd ||
+      cfgTokProd ||
+      (emitente?.focus_ambiente === 'producao' ? emitTok : '') ||
       '';
 
     const tokenAtivo =
       ambiente === 'producao'
-        ? tokenProducao || emitente?.focus_token || tokenHomologacao || ''
-        : tokenHomologacao || emitente?.focus_token || tokenProducao || '';
+        ? tokenProducao || emitTok || tokenHomologacao || ''
+        : tokenHomologacao || emitTok || tokenProducao || '';
 
     const ufRaw = (emitente?.uf || cfg?.focus_uf || 'MS').toUpperCase();
     const ibge = resolverIbgeMunicipio(
@@ -185,16 +193,36 @@ class TransporteService {
    */
   static async getFocusClient(tenantId, emitenteId = null, overrideOpts = null) {
     const emitente = await this.getEmitente(tenantId, emitenteId);
+    const cleanOverride = (v) => (v && !isMaskedValue(v) ? decryptSecret(v) : '');
     const client = new FocusClient({
-      token: overrideOpts?.token || emitente.focus_token,
-      tokenHomologacao: overrideOpts?.tokenHomologacao || emitente.focus_token_homologacao,
-      tokenProducao: overrideOpts?.tokenProducao || emitente.focus_token_producao,
+      token: cleanOverride(overrideOpts?.token) || emitente.focus_token,
+      tokenHomologacao: cleanOverride(overrideOpts?.tokenHomologacao) || emitente.focus_token_homologacao,
+      tokenProducao: cleanOverride(overrideOpts?.tokenProducao) || emitente.focus_token_producao,
       ambiente: overrideOpts?.ambiente || emitente.focus_ambiente || 'homologacao',
     });
     return {
       client,
       focus: client,
       emitente,
+    };
+  }
+
+  /**
+   * Obtém o certificado digital A1 decifrado do emitente (quando armazenado no cofre local).
+   */
+  static async getCertificadoEmitente(tenantId, emitenteId) {
+    const { rows } = await db.query(
+      `SELECT id, emitente_id, nome_arquivo, arquivo_pfx, senha, valido_de, valido_ate, status
+       FROM dash_certificados
+       WHERE tenant_id = $1 AND emitente_id = $2 AND status = 'ATIVO'
+       LIMIT 1`,
+      [tenantId, emitenteId]
+    );
+    if (!rows[0]) return null;
+    return {
+      ...rows[0],
+      arquivo_pfx: decryptBuffer(rows[0].arquivo_pfx),
+      senha: decryptSecret(rows[0].senha),
     };
   }
 
@@ -212,10 +240,11 @@ class TransporteService {
       emitente = {};
     }
 
+    const cleanOverride = (v) => (v && !isMaskedValue(v) ? decryptSecret(v) : '');
     const focus = new FocusClient({
-      token: token || emitente.focus_token,
-      tokenHomologacao: tokenHomologacao || emitente.focus_token_homologacao,
-      tokenProducao: tokenProducao || emitente.focus_token_producao,
+      token: cleanOverride(token) || emitente.focus_token,
+      tokenHomologacao: cleanOverride(tokenHomologacao) || emitente.focus_token_homologacao,
+      tokenProducao: cleanOverride(tokenProducao) || emitente.focus_token_producao,
       ambiente: ambiente || emitente.focus_ambiente || 'homologacao',
     });
 
@@ -1857,9 +1886,10 @@ class TransporteService {
   }
 
   /**
-   * Trata retornos assíncronos enviados pela Focus NFe (autorizado, cancelado, rejeitado).
+   * Trata retornos assíncronos enviados pela Focus NFe (autorizado, cancelado, rejeitado),
+   * exigindo assinatura de webhook ou verificação cruzada direta na API oficial Focus NFe.
    */
-  static async processarWebhook(payload) {
+  static async processarWebhook(payload, headers = {}) {
     const {
       ref,
       status,
@@ -1876,54 +1906,155 @@ class TransporteService {
       erros,
     } = payload || {};
 
-    if (!ref) {
+    if (!ref || typeof ref !== 'string') {
       logger.warn('[Webhook Focus] Webhook recebido sem referência (ref)');
       return { ignored: true };
     }
 
-    logger.info(`[Webhook Focus] Processando retorno de ref=${ref}, status=${status}`);
+    // 1. Localiza o documento fiscal pelo ref antes de qualquer alteração
+    let docType = null;
+    let docRecord = null;
 
-    const chaveFinal = chave_cte || chave_mdfe || chave || null;
-    const xmlFinal = caminho_xml_nota_fiscal || caminho_xml || null;
-
-    // 1. Tenta atualizar CT-e
-    const cteRes = await db.query(
-      `UPDATE dash_ctes SET
-          status = CASE
-              WHEN $1 = 'autorizado' THEN 'AUTORIZADO'
-              WHEN $1 = 'cancelado' THEN 'CANCELADO'
-              WHEN $1 = 'erro_autorizacao' OR $1 = 'denegado' THEN 'REJEITADO'
-              ELSE status
-          END,
-          chave_cte = COALESCE($2, chave_cte),
-          caminho_xml = COALESCE($3, caminho_xml),
-          caminho_dacte = COALESCE($4, caminho_dacte),
-          protocolo = COALESCE($5, protocolo),
-          status_sefaz = COALESCE($6, status_sefaz),
-          mensagem_sefaz = COALESCE($7, mensagem_sefaz),
-          erros = $8,
-          retorno_focus = jsonb_set(COALESCE(retorno_focus, '{}'::jsonb), '{webhook}', $9::jsonb),
-          updated_at = NOW()
-       WHERE ref = $10 RETURNING id, tenant_id`,
-      [
-        status,
-        chaveFinal,
-        xmlFinal,
-        caminho_dacte || null,
-        protocolo || null,
-        status_sefaz || null,
-        mensagem_sefaz || null,
-        JSON.stringify(erros || []),
-        JSON.stringify(payload),
-        ref,
-      ]
+    const cteLookup = await db.query(
+      `SELECT id, tenant_id, emitente_id, modelo FROM dash_ctes WHERE ref = $1 LIMIT 1`,
+      [ref]
     );
-
-    if (cteRes.rows.length > 0) {
-      return { success: true, tipo: 'CTE', id: cteRes.rows[0].id };
+    if (cteLookup.rowCount > 0) {
+      docType = 'CTE';
+      docRecord = cteLookup.rows[0];
+    } else {
+      const mdfeLookup = await db.query(
+        `SELECT id, tenant_id, emitente_id FROM dash_mdfes WHERE ref = $1 LIMIT 1`,
+        [ref]
+      );
+      if (mdfeLookup.rowCount > 0) {
+        docType = 'MDFE';
+        docRecord = mdfeLookup.rows[0];
+      }
     }
 
-    // 2. Se não for CT-e, tenta atualizar MDF-e
+    if (!docRecord) {
+      logger.warn(`[Webhook Focus] Referência ${ref} não encontrada nem em CT-e nem em MDF-e`);
+      return { found: false };
+    }
+
+    // 2. Verifica autenticidade: segredo configurado ou consulta ativa na API Focus NFe
+    const cfgRes = await db.query(
+      `SELECT focus_webhook_secret FROM dash_integracoes_config WHERE tenant_id = $1 LIMIT 1`,
+      [docRecord.tenant_id]
+    ).catch(() => ({ rows: [] }));
+
+    const configuredSecret =
+      decryptSecret(cfgRes.rows[0]?.focus_webhook_secret || '') ||
+      process.env.FOCUS_WEBHOOK_SECRET ||
+      '';
+
+    const extractHeaderToken = () => {
+      const direct = headers['x-focus-token'] || headers['x-webhook-secret'] || '';
+      if (direct) return String(direct).trim();
+      const auth = headers['authorization'] || '';
+      if (typeof auth === 'string') {
+        if (auth.startsWith('Bearer ')) return auth.slice(7).trim();
+        if (auth.startsWith('Basic ')) {
+          const decoded = Buffer.from(auth.slice(6).trim(), 'base64').toString('utf8');
+          return decoded.split(':')[0] || '';
+        }
+        return auth.trim();
+      }
+      return '';
+    };
+
+    let authoritative = payload || {};
+
+    if (configuredSecret) {
+      const providedSecret = extractHeaderToken();
+      if (!safeCompare(providedSecret, configuredSecret)) {
+        logger.warn('[Webhook Focus] Token de webhook inválido recusado', {
+          ref,
+          tenantId: docRecord.tenant_id,
+        });
+        return { unauthorized: true };
+      }
+    } else {
+      try {
+        const { focus } = await this.getFocusClient(docRecord.tenant_id, docRecord.emitente_id);
+        if (docType === 'MDFE') {
+          authoritative = await focus.consultarMdfe(ref, true);
+        } else if (String(docRecord.modelo) === '67') {
+          authoritative = await focus.consultarCteOs(ref, true);
+        } else {
+          authoritative = await focus.consultarCte(ref, true);
+        }
+      } catch (verifyErr) {
+        logger.warn('[Webhook Focus] Falha ao validar retorno diretamente na Focus NFe; ignorando webhook não autenticado', {
+          ref,
+          tenantId: docRecord.tenant_id,
+          error: verifyErr.message,
+        });
+        return { unverified: true };
+      }
+    }
+
+    const effStatus = authoritative.status || status;
+    const chaveFinal =
+      authoritative.chave_cte ||
+      authoritative.chave_mdfe ||
+      authoritative.chave ||
+      chave_cte ||
+      chave_mdfe ||
+      chave ||
+      null;
+    const xmlFinal =
+      authoritative.caminho_xml_nota_fiscal ||
+      authoritative.caminho_xml ||
+      caminho_xml_nota_fiscal ||
+      caminho_xml ||
+      null;
+    const dacteFinal = authoritative.caminho_dacte || caminho_dacte || null;
+    const damdfeFinal = authoritative.caminho_damdfe || caminho_damdfe || null;
+    const protocoloFinal = authoritative.protocolo || protocolo || null;
+    const statusSefazFinal = authoritative.status_sefaz || status_sefaz || null;
+    const msgSefazFinal = authoritative.mensagem_sefaz || mensagem_sefaz || null;
+    const errosFinal = authoritative.erros || erros || [];
+
+    logger.info(`[Webhook Focus] Processando retorno verificado de ref=${ref}, status=${effStatus}`);
+
+    if (docType === 'CTE') {
+      const cteRes = await db.query(
+        `UPDATE dash_ctes SET
+            status = CASE
+                WHEN $1 = 'autorizado' THEN 'AUTORIZADO'
+                WHEN $1 = 'cancelado' THEN 'CANCELADO'
+                WHEN $1 = 'erro_autorizacao' OR $1 = 'denegado' THEN 'REJEITADO'
+                ELSE status
+            END,
+            chave_cte = COALESCE($2, chave_cte),
+            caminho_xml = COALESCE($3, caminho_xml),
+            caminho_dacte = COALESCE($4, caminho_dacte),
+            protocolo = COALESCE($5, protocolo),
+            status_sefaz = COALESCE($6, status_sefaz),
+            mensagem_sefaz = COALESCE($7, mensagem_sefaz),
+            erros = $8,
+            retorno_focus = jsonb_set(COALESCE(retorno_focus, '{}'::jsonb), '{webhook}', $9::jsonb),
+            updated_at = NOW()
+         WHERE id = $10 AND tenant_id = $11 RETURNING id, tenant_id`,
+        [
+          effStatus,
+          chaveFinal,
+          xmlFinal,
+          dacteFinal,
+          protocoloFinal,
+          statusSefazFinal,
+          msgSefazFinal,
+          JSON.stringify(errosFinal),
+          JSON.stringify(authoritative),
+          docRecord.id,
+          docRecord.tenant_id,
+        ]
+      );
+      return { success: true, tipo: 'CTE', id: cteRes.rows[0]?.id || docRecord.id };
+    }
+
     const mdfeRes = await db.query(
       `UPDATE dash_mdfes SET
           status = CASE
@@ -1942,27 +2073,23 @@ class TransporteService {
           erros = $8,
           retorno_focus = jsonb_set(COALESCE(retorno_focus, '{}'::jsonb), '{webhook}', $9::jsonb),
           updated_at = NOW()
-       WHERE ref = $10 RETURNING id, tenant_id`,
+       WHERE id = $10 AND tenant_id = $11 RETURNING id, tenant_id`,
       [
-        status,
+        effStatus,
         chaveFinal,
         xmlFinal,
-        caminho_damdfe || null,
-        protocolo || null,
-        status_sefaz || null,
-        mensagem_sefaz || null,
-        JSON.stringify(erros || []),
-        JSON.stringify(payload),
-        ref,
+        damdfeFinal,
+        protocoloFinal,
+        statusSefazFinal,
+        msgSefazFinal,
+        JSON.stringify(errosFinal),
+        JSON.stringify(authoritative),
+        docRecord.id,
+        docRecord.tenant_id,
       ]
     );
 
-    if (mdfeRes.rows.length > 0) {
-      return { success: true, tipo: 'MDFE', id: mdfeRes.rows[0].id };
-    }
-
-    logger.warn(`[Webhook Focus] Referência ${ref} não encontrada nem em CT-e nem em MDF-e`);
-    return { found: false };
+    return { success: true, tipo: 'MDFE', id: mdfeRes.rows[0]?.id || docRecord.id };
   }
 }
 

@@ -18,7 +18,7 @@ export function PromptViewer({ title, description, prompt }: PromptViewerProps) 
 
   return (
     <div className="bg-bg-primary border border-brand-500/30 shadow-[0_0_15px_rgba(59,130,246,0.1)] rounded-xl overflow-hidden flex flex-col mt-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-      <div className="bg-gradient-to-r from-brand-500/10 to-purple-500/10 p-5 border-b border-brand-500/20 flex justify-between items-center">
+      <div className="bg-gradient-to-r from-brand-500/10 to-cyan-500/10 p-5 border-b border-brand-500/20 flex justify-between items-center">
         <div>
           <h3 className="font-bold text-brand-500 text-lg flex items-center gap-2">
             <Sparkles size={20} className="text-brand-500" /> {title}

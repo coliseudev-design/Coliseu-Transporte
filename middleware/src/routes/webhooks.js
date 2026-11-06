@@ -1,9 +1,19 @@
 'use strict';
 
+const crypto = require('crypto');
 const express = require('express');
 const router = express.Router();
 const db = require('../db/postgres');
 const logger = require('../config/logger');
+const { decryptSecret } = require('../utils/cryptoVault');
+const TransporteService = require('../services/transporteService');
+
+function timingSafeMatch(a, b) {
+    if (typeof a !== 'string' || typeof b !== 'string' || !a || !b) return false;
+    const hashA = crypto.createHash('sha256').update(a, 'utf8').digest();
+    const hashB = crypto.createHash('sha256').update(b, 'utf8').digest();
+    return crypto.timingSafeEqual(hashA, hashB);
+}
 
 /**
  * Normalizes Brazilian phone numbers for database matching.
@@ -118,20 +128,20 @@ router.get('/whatsapp-meta', async (req, res) => {
                 // Verify if token exists for any tenant config
                 const { rows } = await db.query(
                     'SELECT tenant_id FROM dash_integracoes_config WHERE whatsapp_meta_verify_token = $1',
-                    [token]
+                    [String(token)]
                 );
 
                 if (rows.length > 0) {
                     logger.info(`[🔗 WEBHOOK META] Webhook verificado com sucesso para o tenant ${rows[0].tenant_id}`);
-                    return res.status(200).send(challenge);
+                    return res.type('text/plain').status(200).send(String(challenge ?? ''));
                 }
             }
         }
         logger.warn('[🔗 WEBHOOK META] Falha na verificação do Webhook Meta (Token incorreto ou nulo)');
-        return res.status(403).send('Forbidden');
+        return res.type('text/plain').status(403).send('Forbidden');
     } catch (err) {
         logger.error('[🔗 WEBHOOK META] Erro durante verificação GET:', err.message);
-        return res.status(500).send('Internal Server Error');
+        return res.type('text/plain').status(500).send('Internal Server Error');
     }
 });
 
@@ -140,7 +150,7 @@ router.get('/whatsapp-meta', async (req, res) => {
  * @desc Receives WhatsApp inbound messages from Meta Cloud API
  */
 router.post('/whatsapp-meta', async (req, res) => {
-    const body = req.body;
+    const body = req.body || {};
 
     try {
         // Confirm it's a message event
@@ -151,15 +161,35 @@ router.post('/whatsapp-meta', async (req, res) => {
             if (change && change.messages && change.messages.length > 0) {
                 const phoneId = change.metadata?.phone_number_id;
                 
-                // 1. Resolve tenant
+                // 1. Resolve tenant + optional Meta App Secret for HMAC verification
                 const { rows } = await db.query(
-                    'SELECT tenant_id FROM dash_integracoes_config WHERE whatsapp_meta_phone_id = $1',
-                    [phoneId]
+                    'SELECT tenant_id, whatsapp_meta_app_secret FROM dash_integracoes_config WHERE whatsapp_meta_phone_id = $1',
+                    [String(phoneId || '')]
                 );
 
                 if (rows.length === 0) {
                     logger.warn(`[🔗 WEBHOOK META] Evento recebido para Phone ID não cadastrado: ${phoneId}`);
                     return res.status(200).send('OK'); // Return 200 to prevent Meta retries
+                }
+
+                const appSecret =
+                    decryptSecret(rows[0].whatsapp_meta_app_secret || '') ||
+                    process.env.WHATSAPP_META_APP_SECRET ||
+                    '';
+
+                if (appSecret) {
+                    const sigHeader = String(req.headers['x-hub-signature-256'] || '').trim();
+                    const rawPayload = Buffer.isBuffer(req.rawBody)
+                        ? req.rawBody
+                        : Buffer.from(JSON.stringify(body), 'utf8');
+                    const expectedSig =
+                        'sha256=' +
+                        crypto.createHmac('sha256', appSecret).update(rawPayload).digest('hex');
+
+                    if (!timingSafeMatch(sigHeader, expectedSig)) {
+                        logger.warn(`[🔗 WEBHOOK META] Assinatura X-Hub-Signature-256 inválida para tenant ${rows[0].tenant_id}`);
+                        return res.status(401).send('Invalid signature');
+                    }
                 }
 
                 const tenantId = rows[0].tenant_id;
@@ -188,9 +218,23 @@ router.post('/whatsapp-meta', async (req, res) => {
  * @desc Receives WhatsApp inbound messages from Uazapi Broker
  */
 router.post('/whatsapp-uazapi', async (req, res) => {
-    const body = req.body;
+    const body = req.body || {};
 
     try {
+        const expectedUazapiSecret = process.env.UAZAPI_WEBHOOK_SECRET || '';
+        if (expectedUazapiSecret) {
+            const provided = String(
+                req.headers['x-webhook-secret'] ||
+                req.headers['x-uazapi-secret'] ||
+                (req.headers['authorization'] || '').replace(/^Bearer\s+/i, '') ||
+                ''
+            ).trim();
+            if (!timingSafeMatch(provided, expectedUazapiSecret)) {
+                logger.warn('[🔗 WEBHOOK UAZAPI] Segredo de webhook inválido recusado');
+                return res.status(401).send('Unauthorized');
+            }
+        }
+
         // Uazapi standard is messages.upsert or direct body.message
         if (body.event === 'messages.upsert' || body.message || body.data?.message) {
             const instanceId = body.instanceId;
@@ -198,7 +242,7 @@ router.post('/whatsapp-uazapi', async (req, res) => {
             // 1. Resolve tenant
             const { rows } = await db.query(
                 'SELECT tenant_id FROM dash_integracoes_config WHERE whatsapp_instancia_id = $1',
-                [instanceId]
+                [String(instanceId || '')]
             );
 
             if (rows.length === 0) {
@@ -224,6 +268,23 @@ router.post('/whatsapp-uazapi', async (req, res) => {
     } catch (err) {
         logger.error('[🔗 WEBHOOK UAZAPI] Erro ao processar payload POST:', err.message);
         return res.status(200).send('OK');
+    }
+});
+
+/**
+ * @route POST /api/v1/webhooks/focus
+ * @desc Focus NFe CT-e / MDF-e webhook endpoint
+ */
+router.post('/focus', async (req, res) => {
+    try {
+        const resultado = await TransporteService.processarWebhook(req.body, req.headers);
+        if (resultado?.unauthorized) {
+            return res.status(401).json({ error: 'Não autorizado', code: 'INVALID_WEBHOOK_SECRET' });
+        }
+        return res.status(200).json({ received: true, ...resultado });
+    } catch (err) {
+        logger.error('[🔗 WEBHOOK FOCUS] Erro ao processar payload POST:', err.message);
+        return res.status(200).json({ received: true, error: 'Erro ao processar webhook' });
     }
 });
 

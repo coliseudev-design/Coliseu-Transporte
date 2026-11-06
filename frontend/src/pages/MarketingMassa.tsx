@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useApiQuery } from '../hooks/useApi'
 import api from '../services/api'
+import SafeHtml from '../components/SafeHtml'
 import clsx from 'clsx'
 import {
   Send, Users, FileText, CheckCircle2, XCircle, Search, Filter, Play, Check, X,
@@ -1897,9 +1898,9 @@ export default function MarketingMassa() {
 
                         if (channelMode === 'email' || currentTemplate.conteudo.includes('<') && currentTemplate.conteudo.includes('>')) {
                           return (
-                            <div 
+                            <SafeHtml
                               className="text-xs text-text-secondary leading-relaxed bg-white p-3 rounded border border-slate-200"
-                              dangerouslySetInnerHTML={{ __html: currentTemplate.conteudo }}
+                              html={currentTemplate.conteudo}
                             />
                           );
                         }

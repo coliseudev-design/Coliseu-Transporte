@@ -29,6 +29,8 @@ export interface TituloDetalhado {
   numero_documento?: string
   asaas_payment_id?: string
   portador_nome?: string
+  portador?: string
+  pdf_url?: string
   especie_nome?: string
   alerta_bloqueio?: boolean
   bank_slip_url?: string

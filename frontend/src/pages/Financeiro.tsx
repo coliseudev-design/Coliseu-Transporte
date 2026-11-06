@@ -1276,7 +1276,7 @@ export default function Financeiro() {
         {/* Lado Esquerdo: Rótulo "GESTÃO FINANCEIRA" com Ícone e Fonte Moderna + Tabs */}
         <div className="flex flex-wrap items-center gap-2.5">
           <div className="flex items-center gap-2 px-1 border-r border-slate-300 dark:border-slate-700 pr-3">
-            <div className="p-1 bg-gradient-to-tr from-indigo-600 to-purple-600 text-white rounded-lg shadow-sm flex items-center justify-center shrink-0">
+            <div className="p-1 bg-gradient-to-tr from-indigo-600 to-cyan-600 text-white rounded-lg shadow-sm flex items-center justify-center shrink-0">
               <Wallet size={15} />
             </div>
             <span className="text-xs font-black text-slate-900 dark:text-slate-100 uppercase tracking-tight font-heading">
@@ -1683,7 +1683,7 @@ export default function Financeiro() {
                 <span className="font-mono font-black">-{formatBRL(caixaTotals.saidas)}</span>
               </div>
 
-              <div className="px-4 py-1.5 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-xl font-black flex items-center gap-2 shadow-md text-xs whitespace-nowrap">
+              <div className="px-4 py-1.5 bg-gradient-to-r from-indigo-600 to-cyan-600 text-white rounded-xl font-black flex items-center gap-2 shadow-md text-xs whitespace-nowrap">
                 <span className="text-[10px] uppercase font-extrabold tracking-wider text-indigo-200">TOTAL SALDO:</span>
                 <span className="text-sm font-black">{formatBRL(caixaTotals.atual)}</span>
               </div>
@@ -2349,7 +2349,7 @@ export default function Financeiro() {
                   <button
                     onClick={handleOpenBatchModal}
                     title="Abrir tela de Emissão e Cobrança de Boletos em Lote (Preenchimento automático + trava para vencidos)"
-                    className="px-3 py-1.5 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-xs font-extrabold flex items-center gap-1.5 shadow-xs cursor-pointer"
+                    className="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-700 text-white rounded-lg text-xs font-extrabold flex items-center gap-1.5 shadow-xs cursor-pointer"
                   >
                     <Layers size={13} /> ⚡ Cobrança em Lote
                   </button>
@@ -2664,7 +2664,7 @@ export default function Financeiro() {
               <button
                 type="button"
                 onClick={handleOpenManutencaoModal}
-                className="px-2.5 py-1 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white font-extrabold text-[11px] rounded-lg shadow-sm transition-all cursor-pointer flex items-center gap-1.5 shrink-0"
+                className="px-2.5 py-1 bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-700 hover:to-indigo-700 text-white font-extrabold text-[11px] rounded-lg shadow-sm transition-all cursor-pointer flex items-center gap-1.5 shrink-0"
                 title="Executar varredura automática de títulos e boletos idênticos por Cliente/CNPJ, Vencimento e Valor"
               >
                 <Settings size={13} className="animate-spin-slow" /> Manutenção de Títulos
@@ -2759,7 +2759,7 @@ export default function Financeiro() {
               <select
                 value={boletosVinculoFilter}
                 onChange={(e) => setBoletosVinculoFilter(e.target.value as 'todos' | 'vinculados' | 'sem_vinculo')}
-                className="input !w-auto shrink-0 !py-0.5 !px-2 text-xs font-bold border-slate-300 rounded-lg cursor-pointer bg-white dark:bg-slate-800 text-purple-700 dark:text-purple-300 font-mono"
+                className="input !w-auto shrink-0 !py-0.5 !px-2 text-xs font-bold border-slate-300 rounded-lg cursor-pointer bg-white dark:bg-slate-800 text-cyan-700 dark:text-cyan-300 font-mono"
                 title="Filtrar por Vínculo com Título Coliseu Transporte"
               >
                 <option value="todos">🔗 Todos Vínculos</option>
@@ -3696,7 +3696,7 @@ export default function Financeiro() {
                     type="button"
                     onClick={handleRunBatchCobranca}
                     disabled={isBatchSending || batchSelectedIds.length === 0}
-                    className="px-5 py-2 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white font-extrabold text-xs rounded-xl shadow-md transition-all flex items-center gap-2 cursor-pointer disabled:opacity-50"
+                    className="px-5 py-2 bg-gradient-to-r from-indigo-600 to-cyan-600 hover:from-indigo-700 hover:to-cyan-700 text-white font-extrabold text-xs rounded-xl shadow-md transition-all flex items-center gap-2 cursor-pointer disabled:opacity-50"
                   >
                     {isBatchSending ? (
                       <>
@@ -4281,13 +4281,13 @@ export default function Financeiro() {
             {/* Header */}
             <div className="flex justify-between items-center border-b border-slate-200 dark:border-slate-800 pb-3">
               <div className="flex items-center gap-2.5">
-                <div className="p-2 bg-gradient-to-tr from-purple-600 to-indigo-600 text-white rounded-xl shadow-md">
+                <div className="p-2 bg-gradient-to-tr from-cyan-600 to-indigo-600 text-white rounded-xl shadow-md">
                   <Settings size={20} className={isScanningMatches ? 'animate-spin' : ''} />
                 </div>
                 <div>
                   <h3 className="font-extrabold text-slate-900 dark:text-white text-base flex items-center gap-2">
                     Manutenção & Auto-Vínculo de Títulos
-                    <span className="px-2 py-0.5 bg-purple-100 dark:bg-purple-950 text-purple-700 dark:text-purple-300 font-mono text-[10.5px] rounded-md font-bold border border-purple-300">
+                    <span className="px-2 py-0.5 bg-cyan-100 dark:bg-cyan-950 text-cyan-700 dark:text-cyan-300 font-mono text-[10.5px] rounded-md font-bold border border-cyan-300">
                       Regra: Cliente/CNPJ + Vencimento + Valor
                     </span>
                   </h3>
@@ -4402,7 +4402,7 @@ export default function Financeiro() {
                         {/* LADO TÍTULO COLISEU TRANSPORTE */}
                         <div className="flex-1 bg-indigo-50/70 dark:bg-indigo-950/50 p-2.5 rounded-xl border border-indigo-200 dark:border-indigo-800 space-y-1">
                           <div className="flex items-center justify-between gap-1">
-                            <span className="text-[9.5px] font-black uppercase text-purple-600 dark:text-purple-400">
+                            <span className="text-[9.5px] font-black uppercase text-cyan-600 dark:text-cyan-400">
                               TÍTULO COLISEU TRANSPORTE (#{m.titulo.id_firebird || m.titulo.id})
                             </span>
                             <span className={clsx(
@@ -4416,13 +4416,13 @@ export default function Financeiro() {
                             {m.titulo.cliente || m.titulo.cliente_nome || m.titulo.descricao}
                           </span>
                           {(m.titulo.cliente_documento || m.titulo.cpf_cnpj) && (
-                            <span className="inline-block px-1.5 py-0.5 bg-purple-100 dark:bg-purple-950 text-purple-800 dark:text-purple-300 font-mono font-bold text-[10px] rounded">
+                            <span className="inline-block px-1.5 py-0.5 bg-cyan-100 dark:bg-cyan-950 text-cyan-800 dark:text-cyan-300 font-mono font-bold text-[10px] rounded">
                               CNPJ/CPF: {m.titulo.cliente_documento || m.titulo.cpf_cnpj}
                             </span>
                           )}
                           <div className="flex items-center justify-between pt-1 border-t border-indigo-200/60 dark:border-indigo-800/60 text-[11px] font-mono">
                             <span className="text-slate-600 dark:text-slate-400">Venc: <strong className="text-slate-800 dark:text-slate-200">{m.titulo.data_vencimento ? formatDate(m.titulo.data_vencimento) : '—'}</strong></span>
-                            <span className="text-purple-700 dark:text-purple-300 font-black">Val: {formatBRL(m.titulo.valor)}</span>
+                            <span className="text-cyan-700 dark:text-cyan-300 font-black">Val: {formatBRL(m.titulo.valor)}</span>
                           </div>
                         </div>
                       </div>

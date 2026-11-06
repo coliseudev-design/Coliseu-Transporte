@@ -155,7 +155,7 @@ export default function CiotConsultaPage() {
       <div className="bg-white dark:bg-slate-800 px-6 py-5 rounded-2xl border border-slate-200/80 dark:border-slate-700/80 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
         <div>
           <h1 className="text-xl font-bold tracking-tight text-slate-900 dark:text-white flex items-center gap-2.5">
-            <BadgeCheck className="w-6 h-6 text-violet-600 dark:text-violet-400" />
+            <BadgeCheck className="w-6 h-6 text-teal-600 dark:text-teal-400" />
             Consulta de CIOT
           </h1>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
@@ -165,7 +165,7 @@ export default function CiotConsultaPage() {
         <div className="flex items-center gap-2">
           <button
             onClick={() => setModalCriar(true)}
-            className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-bold text-white bg-violet-600 hover:bg-violet-700 shadow-sm transition-colors"
+            className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-bold text-white bg-teal-600 hover:bg-teal-700 shadow-sm transition-colors"
           >
             <Plus className="w-3.5 h-3.5" />
             Nova Operação (CIOT)
@@ -210,7 +210,7 @@ export default function CiotConsultaPage() {
           </p>
           <button
             onClick={() => setModalCriar(true)}
-            className="mt-4 px-4 py-2 rounded-xl bg-violet-600 text-white text-xs font-bold hover:bg-violet-700 transition-colors"
+            className="mt-4 px-4 py-2 rounded-xl bg-teal-600 text-white text-xs font-bold hover:bg-teal-700 transition-colors"
           >
             Nova Operação (CIOT)
           </button>
@@ -321,7 +321,7 @@ export default function CiotConsultaPage() {
                       <div className="flex items-center justify-end gap-1.5" onClick={e => e.stopPropagation()}>
                         <button
                           onClick={() => gerarPayload(c.id)}
-                          className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-violet-50 dark:bg-violet-950/50 text-violet-700 dark:text-violet-300 border border-violet-200 dark:border-violet-800 hover:bg-violet-100 text-[11px] font-semibold transition-colors"
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-teal-50 dark:bg-teal-950/50 text-teal-700 dark:text-teal-300 border border-teal-200 dark:border-teal-800 hover:bg-teal-100 text-[11px] font-semibold transition-colors"
                         >
                           <Eye className="w-3 h-3" />
                           <span className="hidden xl:inline">Consultar</span>
@@ -352,7 +352,7 @@ export default function CiotConsultaPage() {
             <div className="flex items-start justify-between mb-5">
               <div>
                 <h2 className="text-lg font-bold text-slate-900 dark:text-white flex items-center gap-2">
-                  <BadgeCheck className="w-5 h-5 text-violet-600" />
+                  <BadgeCheck className="w-5 h-5 text-teal-600" />
                   Nova Operação de Transporte (CIOT)
                 </h2>
                 <p className="text-xs text-slate-500 mt-1">
@@ -496,7 +496,7 @@ export default function CiotConsultaPage() {
                 </button>
                 <button
                   type="submit" disabled={salvando}
-                  className="inline-flex items-center gap-1.5 px-5 py-2.5 rounded-xl text-xs font-bold text-white bg-violet-600 hover:bg-violet-700 disabled:opacity-50 shadow-sm"
+                  className="inline-flex items-center gap-1.5 px-5 py-2.5 rounded-xl text-xs font-bold text-white bg-teal-600 hover:bg-teal-700 disabled:opacity-50 shadow-sm"
                 >
                   {salvando ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
                   Criar Operação
@@ -551,7 +551,7 @@ export default function CiotConsultaPage() {
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-white dark:bg-slate-800 w-full max-w-2xl rounded-2xl p-6 shadow-xl border border-slate-200 dark:border-slate-700">
             <h3 className="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
-              <FileText className="w-5 h-5 text-violet-600" />
+              <FileText className="w-5 h-5 text-teal-600" />
               Payload do CIOT
             </h3>
             <p className="text-xs text-slate-500 mt-1 mb-4">

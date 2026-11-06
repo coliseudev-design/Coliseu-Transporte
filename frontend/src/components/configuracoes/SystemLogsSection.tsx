@@ -68,7 +68,7 @@ export default function SystemLogsSection() {
     }
     if (t.includes('EMAIL') || t.includes('BOLETO') || t.includes('ENVIO')) {
       return (
-        <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-purple-100 text-purple-800 dark:bg-purple-950 dark:text-purple-300 border border-purple-300 flex items-center gap-1 w-fit">
+        <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-cyan-100 text-cyan-800 dark:bg-cyan-950 dark:text-cyan-300 border border-cyan-300 flex items-center gap-1 w-fit">
           <Send size={11} /> {tipo}
         </span>
       )

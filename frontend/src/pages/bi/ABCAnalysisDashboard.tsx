@@ -119,7 +119,7 @@ export default function InventoryManagementDashboard() {
           <p className="text-sm text-text-secondary mt-1">Controle de estoque, curva ABC e saúde do mix de produtos</p>
         </div>
         <div className="flex items-center gap-4">
-          <button className="bg-purple-500/10 text-purple-500 hover:bg-purple-500/20 px-4 py-2 rounded-lg font-bold text-xs flex items-center gap-2 transition-colors border border-purple-500/20">
+          <button className="bg-cyan-500/10 text-cyan-500 hover:bg-cyan-500/20 px-4 py-2 rounded-lg font-bold text-xs flex items-center gap-2 transition-colors border border-cyan-500/20">
             <Sparkles size={14} /> Analisar com IA
           </button>
           <span className="text-xs font-extrabold text-text-muted uppercase tracking-wider">COMPENSADOS DOURADOS</span>
@@ -161,7 +161,7 @@ export default function InventoryManagementDashboard() {
 
         <div className="bg-bg-primary border border-border shadow-card rounded-xl p-4 flex flex-col justify-between">
           <div className="flex items-center gap-2 text-[10px] font-bold text-text-muted uppercase tracking-wider mb-2">
-            <div className="p-1.5 bg-purple-500/10 rounded-lg"><RefreshCcw size={14} className="text-purple-500" /></div> GIRO (TURNOVER)
+            <div className="p-1.5 bg-cyan-500/10 rounded-lg"><RefreshCcw size={14} className="text-cyan-500" /></div> GIRO (TURNOVER)
           </div>
           <div className="text-2xl font-extrabold text-text-primary mt-2">-</div>
           <div className="text-[10px] text-text-muted mt-1">Renovação anual do Inventário</div>
@@ -349,7 +349,7 @@ export default function InventoryManagementDashboard() {
           <div className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-danger"></span> Crítico</div>
           <div className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-warning"></span> Atenção</div>
           <div className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-success"></span> Ideal</div>
-          <div className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-purple-500"></span> Sem Giro</div>
+          <div className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-cyan-500"></span> Sem Giro</div>
           <div className="ml-auto">{filteredData.length} itens encontrados</div>
         </div>
 
@@ -386,7 +386,7 @@ export default function InventoryManagementDashboard() {
                       row.status === 'Crítico' ? "bg-danger/10 text-danger" : 
                       row.status === 'Atenção' ? "bg-warning/10 text-warning" : 
                       row.status === 'Ideal' ? "bg-success/10 text-success" : 
-                      "bg-purple-500/10 text-purple-500"
+                      "bg-cyan-500/10 text-cyan-500"
                     )}>{row.status}</span>
                   </td>
                   <td className="py-3 px-2 text-right font-mono font-bold flex justify-end items-center gap-1">

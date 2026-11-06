@@ -22,6 +22,21 @@ try {
     }
 }
 
+const ALLOWED_IMAGE_MIMES = new Map([
+    ['png', 'png'],
+    ['jpeg', 'jpg'],
+    ['jpg', 'jpg'],
+    ['webp', 'webp'],
+    ['gif', 'gif']
+]);
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024; // 10MB
+
+function isSafePathInside(baseDir, candidatePath) {
+    const resolvedBase = path.resolve(baseDir);
+    const resolvedCandidate = path.resolve(candidatePath);
+    return resolvedCandidate.startsWith(resolvedBase + path.sep);
+}
+
 /**
  * Saves a base64 image string to disk and returns its public HTTP URL
  */
@@ -29,15 +44,23 @@ function saveBase64Image(base64Str) {
     if (!base64Str || typeof base64Str !== 'string') return null;
     const trimmed = base64Str.trim();
     
-    // Check if it's a data URI
-    const matches = trimmed.match(/^data:image\/([a-zA-Z0-9+\-]+);base64,(.+)$/s);
+    // Allow strictly safe raster image MIME types (blocks SVG/HTML/XML Stored XSS)
+    const matches = trimmed.match(/^data:image\/([a-zA-Z0-9+\-]+);base64,([A-Za-z0-9+/=\s]+)$/s);
     if (!matches) {
         return null;
     }
 
+    const rawMimeSub = String(matches[1] || '').toLowerCase();
+    const ext = ALLOWED_IMAGE_MIMES.get(rawMimeSub);
+    if (!ext) {
+        return null;
+    }
+
     try {
-        const ext = matches[1] === 'jpeg' ? 'jpg' : matches[1] || 'png';
         const buffer = Buffer.from(matches[2], 'base64');
+        if (!buffer.length || buffer.length > MAX_IMAGE_BYTES) {
+            return null;
+        }
         
         // Save to BOTH primary public disk directory AND /tmp fallback
         const primaryDir = path.join(__dirname, '../../public/uploads/arts');
@@ -48,16 +71,22 @@ function saveBase64Image(base64Str) {
         try { if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true }); } catch (_) {}
         try { if (!fs.existsSync(legacyTmpDir)) fs.mkdirSync(legacyTmpDir, { recursive: true }); } catch (_) {}
 
-        const hash = crypto.createHash('md5').update(buffer).digest('hex');
+        const hash = crypto.createHash('sha256').update(buffer).digest('hex').slice(0, 32);
         const filename = `${hash}.${ext}`;
 
         const primaryPath = path.join(primaryDir, filename);
         const tmpPath = path.join(tmpDir, filename);
         const legacyTmpPath = path.join(legacyTmpDir, filename);
 
-        try { if (!fs.existsSync(primaryPath)) fs.writeFileSync(primaryPath, buffer); } catch (_) {}
-        try { if (!fs.existsSync(tmpPath)) fs.writeFileSync(tmpPath, buffer); } catch (_) {}
-        try { if (!fs.existsSync(legacyTmpPath)) fs.writeFileSync(legacyTmpPath, buffer); } catch (_) {}
+        if (isSafePathInside(primaryDir, primaryPath)) {
+            try { if (!fs.existsSync(primaryPath)) fs.writeFileSync(primaryPath, buffer); } catch (_) {}
+        }
+        if (isSafePathInside(tmpDir, tmpPath)) {
+            try { if (!fs.existsSync(tmpPath)) fs.writeFileSync(tmpPath, buffer); } catch (_) {}
+        }
+        if (isSafePathInside(legacyTmpDir, legacyTmpPath)) {
+            try { if (!fs.existsSync(legacyTmpPath)) fs.writeFileSync(legacyTmpPath, buffer); } catch (_) {}
+        }
 
         const baseUrl = process.env.PUBLIC_API_URL || 'https://transporte.coliseusistemas.com.br';
         return `${baseUrl}/api/uploads/arts/${filename}`;
@@ -149,14 +178,26 @@ function sanitizeEmailHtml(html) {
     // Apenas as regras acima (src vazio, null, undefined, #, about:blank) já cobrem os casos inválidos.
 
     // 7. Remove <img> tags pointing to non-existent /uploads/ files on server disk
+    const publicUploadsBase = path.join(__dirname, '../../public/uploads');
+    const tmpColiseuBase = path.join('/tmp', 'coliseu_uploads_arts');
+    const tmpNexusBase = path.join('/tmp', 'nexus_uploads_arts');
+
     cleaned = cleaned.replace(/<img[^>]*src=["']([^"']+)["'][^>]*\/?>/gi, (imgTag, srcUrl) => {
         if (srcUrl.includes('/uploads/')) {
             const pathPart = srcUrl.includes('/api/uploads/')
                 ? srcUrl.substring(srcUrl.indexOf('/api/uploads/')).replace('/api/', '/')
                 : srcUrl.substring(srcUrl.indexOf('/uploads/'));
             const diskPath = path.join(__dirname, '../../public', pathPart);
-            const tmpPath = path.join('/tmp', pathPart.replace('/uploads/', 'nexus_uploads_'));
-            if (!fs.existsSync(diskPath) && !fs.existsSync(tmpPath)) {
+            const fileBasename = path.basename(pathPart);
+            const tmpColiseuPath = path.join(tmpColiseuBase, fileBasename);
+            const tmpNexusPath = path.join(tmpNexusBase, fileBasename);
+
+            const existsPrimary = isSafePathInside(publicUploadsBase, diskPath) && fs.existsSync(diskPath);
+            const existsTmp =
+                (isSafePathInside(tmpColiseuBase, tmpColiseuPath) && fs.existsSync(tmpColiseuPath)) ||
+                (isSafePathInside(tmpNexusBase, tmpNexusPath) && fs.existsSync(tmpNexusPath));
+
+            if (!existsPrimary && !existsTmp) {
                 return ''; // Purge broken 404 image tag
             }
         }
@@ -174,20 +215,33 @@ function isValidImageUrl(url) {
     const trimmed = url.trim();
     if (!trimmed || trimmed === 'null' || trimmed === 'undefined' || trimmed === 'false') return false;
 
-    // Base64 images are valid data URIs
-    if (trimmed.startsWith('data:image/')) return true;
+    // Base64 images are valid data URIs only for safe raster image formats
+    if (trimmed.startsWith('data:image/')) {
+        return /^data:image\/(png|jpeg|jpg|webp|gif);base64,/i.test(trimmed);
+    }
 
     const resolved = resolvePublicImageUrl(trimmed);
     if (!resolved) return false;
 
-    // If local /uploads/ file, check if file exists on disk
+    // If local /uploads/ file, check if file exists safely inside uploads directory
     if (resolved.includes('/uploads/')) {
+        const publicUploadsBase = path.join(__dirname, '../../public/uploads');
+        const tmpColiseuBase = path.join('/tmp', 'coliseu_uploads_arts');
+        const tmpNexusBase = path.join('/tmp', 'nexus_uploads_arts');
         const pathPart = resolved.includes('/api/uploads/')
             ? resolved.substring(resolved.indexOf('/api/uploads/')).replace('/api/', '/')
             : resolved.substring(resolved.indexOf('/uploads/'));
         const diskPath = path.join(__dirname, '../../public', pathPart);
-        const tmpPath = path.join('/tmp', pathPart.replace('/uploads/', 'nexus_uploads_'));
-        if (!fs.existsSync(diskPath) && !fs.existsSync(tmpPath)) {
+        const fileBasename = path.basename(pathPart);
+        const tmpColiseuPath = path.join(tmpColiseuBase, fileBasename);
+        const tmpNexusPath = path.join(tmpNexusBase, fileBasename);
+
+        const existsPrimary = isSafePathInside(publicUploadsBase, diskPath) && fs.existsSync(diskPath);
+        const existsTmp =
+            (isSafePathInside(tmpColiseuBase, tmpColiseuPath) && fs.existsSync(tmpColiseuPath)) ||
+            (isSafePathInside(tmpNexusBase, tmpNexusPath) && fs.existsSync(tmpNexusPath));
+
+        if (!existsPrimary && !existsTmp) {
             return false;
         }
     }

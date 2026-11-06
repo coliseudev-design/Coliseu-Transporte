@@ -24,7 +24,7 @@ const QUICK_SHORTCUTS = [
     title: 'Marketing em Massa',
     description: 'Crie e gerencie campanhas e comunicações em massa.',
     icon: Megaphone,
-    color: '#9333EA',
+    color: '#0891B2',
     route: '/marketing',
   },
   {
@@ -70,7 +70,7 @@ const LEFT_CARDS = [
     title: 'Marketing em Massa',
     description: 'Crie e gerencie campanhas e comunicações em massa.',
     icon: Megaphone,
-    color: '#9333EA',
+    color: '#0891B2',
     route: '/marketing',
   },
 ]
@@ -184,7 +184,7 @@ export default function DashboardBI() {
               href="https://www.instagram.com/coliseusistemas/"
               target="_blank"
               rel="noopener noreferrer"
-              className="px-4 py-2 rounded-xl bg-gradient-to-r from-purple-600 via-pink-600 to-amber-500 hover:opacity-95 text-white font-extrabold text-xs shadow-2xs hover:shadow-xs transition-all flex items-center gap-2 cursor-pointer active:scale-95"
+              className="px-4 py-2 rounded-xl bg-gradient-to-r from-cyan-600 via-pink-600 to-amber-500 hover:opacity-95 text-white font-extrabold text-xs shadow-2xs hover:shadow-xs transition-all flex items-center gap-2 cursor-pointer active:scale-95"
             >
               <Instagram size={15} />
               <span>Instagram Coliseu</span>

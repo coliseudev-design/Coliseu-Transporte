@@ -42,12 +42,29 @@ async function query(text, params) {
 }
 
 /**
- * Usado para inicialização e checagem de saúde.
+ * Usado para checagem rápida de saúde (/health/readiness) e conectividade.
  */
 async function checkConnection() {
     try {
+        await pool.query('SELECT 1 AS ok');
+        return true;
+    } catch (err) {
+        logger.error('[DB] Falha ao conectar ao PostgreSQL', { error: err.message });
+        return false;
+    }
+}
+
+let startupMaintenanceExecuted = false;
+
+/**
+ * Executa migrações estruturais idempotentes APENAS UMA VEZ na inicialização do servidor.
+ */
+async function runStartupMaintenance() {
+    if (startupMaintenanceExecuted) return true;
+    startupMaintenanceExecuted = true;
+    try {
         await query('SELECT 1 AS ok', []);
-        logger.info('[DB] Conectado ao PostgreSQL (coliseu_dashboard)');
+        logger.info('[DB] Conectado ao PostgreSQL (coliseu_dashboard) — verificando estrutura base...');
         
         // Auto-migration: Garante que as novas tabelas e colunas existam em produção
         try {
@@ -74,8 +91,6 @@ async function checkConnection() {
             logger.warn('[DB] Base tables not found yet, skipping initial auto-migration.', { erro: migErr1.message });
         }
         
-        // Mini-migrator silencioso para garantir colunas recém-adicionadas na v2.4.0
-        // Como o Postgres <= 15 não suporta IF NOT EXISTS para várias colunas de uma vez elegantemente num ALTER padrão, faremos col a col
         try {
             await query(`ALTER TABLE dash_produtos ADD COLUMN IF NOT EXISTS preco DECIMAL(15,2) DEFAULT 0;`, []);
             await query(`ALTER TABLE dash_produtos ADD COLUMN IF NOT EXISTS custo DECIMAL(15,2) DEFAULT 0;`, []);
@@ -98,23 +113,11 @@ async function checkConnection() {
             await query(`ALTER TABLE dash_produtos ADD COLUMN IF NOT EXISTS margem_lucro_max DECIMAL(7,2) DEFAULT 0;`, []);
             await query(`ALTER TABLE dash_produtos ADD COLUMN IF NOT EXISTS observacoes TEXT;`, []);
             
-            // Tabela de Caixas
-            await query(`
-                CREATE TABLE IF NOT EXISTS dash_caixas (
-                    id SERIAL PRIMARY KEY,
-                    tenant_id UUID NOT NULL,
-                    id_firebird INTEGER NOT NULL,
-                    descricao TEXT NOT NULL,
-                    sincronizado_em TIMESTAMPTZ DEFAULT NOW(),
-                    UNIQUE(tenant_id, id_firebird)
-                );
-            `, []);
             await query(`ALTER TABLE dash_financeiro ADD COLUMN IF NOT EXISTS caixa_id_firebird INTEGER;`, []);
             await query(`ALTER TABLE dash_financeiro ADD COLUMN IF NOT EXISTS depto_id INTEGER;`, []);
             await query(`ALTER TABLE dash_financeiro ADD COLUMN IF NOT EXISTS centro_custo INTEGER;`, []);
             await query(`ALTER TABLE dash_financeiro ADD COLUMN IF NOT EXISTS tipo_documento VARCHAR(50);`, []);
 
-            // Colunas de CFOP, es, processo e datas adicionais nas vendas
             await query(`ALTER TABLE dash_vendas ADD COLUMN IF NOT EXISTS data_vencimento TIMESTAMPTZ DEFAULT NULL;`, []);
             await query(`ALTER TABLE dash_vendas ADD COLUMN IF NOT EXISTS cfop INTEGER DEFAULT NULL;`, []);
             await query(`ALTER TABLE dash_vendas ADD COLUMN IF NOT EXISTS numero_nota INTEGER DEFAULT NULL;`, []);
@@ -143,7 +146,6 @@ async function checkConnection() {
             await query(`ALTER TABLE dash_financeiro ADD COLUMN IF NOT EXISTS parcela INTEGER DEFAULT 1;`, []);
             await query(`ALTER TABLE dash_financeiro ADD COLUMN IF NOT EXISTS dias_carencia INTEGER DEFAULT 0;`, []);
 
-            // Auto-migration para dash_clientes e dash_fornecedores
             await query(`ALTER TABLE dash_clientes ADD COLUMN IF NOT EXISTS razao_social TEXT;`, []);
             await query(`ALTER TABLE dash_clientes ADD COLUMN IF NOT EXISTS nome_fantasia TEXT;`, []);
             await query(`ALTER TABLE dash_clientes ADD COLUMN IF NOT EXISTS classe VARCHAR(100) DEFAULT 'Geral';`, []);
@@ -178,7 +180,6 @@ async function checkConnection() {
             await query(`ALTER TABLE dash_fornecedores ADD COLUMN IF NOT EXISTS nome_fantasia TEXT;`, []);
             await query(`ALTER TABLE dash_fornecedores ADD COLUMN IF NOT EXISTS classe VARCHAR(100) DEFAULT 'Geral';`, []);
 
-            // Auto-migration para pending_payments (Quitações pendentes para o ERP Coliseu/Firebird)
             await query(`
                 CREATE TABLE IF NOT EXISTS pending_payments (
                     id SERIAL PRIMARY KEY,
@@ -216,7 +217,6 @@ async function checkConnection() {
                 END $$;
             `, []);
 
-            // Auto-migration para colunas de conciliação do dash_financeiro
             await query(`
                 ALTER TABLE dash_financeiro ADD COLUMN IF NOT EXISTS categoria_pagamento VARCHAR(100);
                 ALTER TABLE dash_financeiro ADD COLUMN IF NOT EXISTS billing_type VARCHAR(100);
@@ -225,7 +225,6 @@ async function checkConnection() {
                 ALTER TABLE dash_financeiro ADD COLUMN IF NOT EXISTS asaas_nosso_numero VARCHAR(100);
             `, []);
 
-            // Auto-migration de Índices de Alta Performance para conciliação e buscas
             await query(`
                 CREATE INDEX IF NOT EXISTS idx_dash_fin_tenant_asaas ON dash_financeiro(tenant_id, asaas_payment_id);
                 CREATE INDEX IF NOT EXISTS idx_dash_fin_tenant_nosso_num ON dash_financeiro(tenant_id, nosso_numero);
@@ -235,22 +234,6 @@ async function checkConnection() {
                 CREATE INDEX IF NOT EXISTS idx_dash_clientes_tenant_fb ON dash_clientes(tenant_id, id_firebird);
             `, []);
 
-            // Auto-cleanup: Limpa registros onde nome_fantasia foi erroneamente igualado ao nome/razão social
-            await query(`
-                UPDATE dash_clientes 
-                SET nome_fantasia = NULL 
-                WHERE TRIM(UPPER(nome_fantasia)) = TRIM(UPPER(nome)) 
-                   OR TRIM(UPPER(nome_fantasia)) = TRIM(UPPER(razao_social));
-            `, []);
-
-            // Auto-cleanup: Remove títulos fictícios duplicados criados pela sincronização do Asaas
-            await query(`
-                DELETE FROM dash_financeiro 
-                WHERE origem = 'ASAAS_SYNC' 
-                   OR descricao LIKE 'Cobrança gerada automaticamente%';
-            `, []);
-
-            // Auto-migration: Colunas de boleto, e-mail e régua que podem estar ausentes em DBs legados
             await query(`
                 ALTER TABLE dash_financeiro ADD COLUMN IF NOT EXISTS bank_slip_url TEXT;
                 ALTER TABLE dash_financeiro ADD COLUMN IF NOT EXISTS pdf_url TEXT;
@@ -262,7 +245,6 @@ async function checkConnection() {
                 ALTER TABLE dash_financeiro ADD COLUMN IF NOT EXISTS status_boleto VARCHAR(50);
             `, []);
 
-            // Auto-migration: Garante estrutura completa de dash_estatisticas_software
             await query(`
                 CREATE TABLE IF NOT EXISTS dash_estatisticas_software (
                     id SERIAL PRIMARY KEY,
@@ -311,73 +293,24 @@ async function checkConnection() {
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_dash_estatisticas_software_tenant_fb ON dash_estatisticas_software(tenant_id, cliente_id_firebird);
             `, []);
 
-            // Auto-migration: Coluna moeda e centro de custo padrão
             await query(`
                 ALTER TABLE dash_financeiro ADD COLUMN IF NOT EXISTS moeda VARCHAR(20) DEFAULT 'REAL';
                 ALTER TABLE dash_integracoes_config ADD COLUMN IF NOT EXISTS padrao_centro_custo_id INTEGER;
+                ALTER TABLE dash_integracoes_config ADD COLUMN IF NOT EXISTS asaas_webhook_secret TEXT;
+                ALTER TABLE dash_integracoes_config ADD COLUMN IF NOT EXISTS focus_webhook_secret TEXT;
+                ALTER TABLE dash_integracoes_config ADD COLUMN IF NOT EXISTS whatsapp_meta_app_secret TEXT;
             `, []);
 
-            // Auto-repair: Formata documentos de clientes que estejam sem máscara
             await query(`
-                UPDATE dash_clientes 
-                SET documento = '46.890.912/0001-87' 
-                WHERE documento = '46890912000187' OR id_firebird = 2630;
-
-                UPDATE dash_clientes
-                SET documento = REGEXP_REPLACE(documento, '^(\\d{2})(\\d{3})(\\d{3})(\\d{4})(\\d{2})$', '\\1.\\2.\\3/\\4-\\5')
-                WHERE documento ~ '^\\d{14}$';
-
-                UPDATE dash_clientes
-                SET documento = REGEXP_REPLACE(documento, '^(\\d{3})(\\d{3})(\\d{3})(\\d{2})$', '\\1.\\2.\\3-\\4')
-                WHERE documento ~ '^\\d{11}$';
+                ALTER TABLE dash_emitentes ADD COLUMN IF NOT EXISTS focus_token_homologacao TEXT;
+                ALTER TABLE dash_emitentes ADD COLUMN IF NOT EXISTS focus_token_producao TEXT;
+                ALTER TABLE dash_emitentes ALTER COLUMN focus_token TYPE TEXT;
+                ALTER TABLE dash_emitentes ALTER COLUMN focus_token_homologacao TYPE TEXT;
+                ALTER TABLE dash_emitentes ALTER COLUMN focus_token_producao TYPE TEXT;
             `, []).catch(() => {});
 
-            // Auto-repair: Enfileira atualização de documento do cliente 2630 para o Firebird
             await query(`
-                INSERT INTO dash_sync_metadata (tenant_id, tabela, operacao, payload, status, created_at)
-                SELECT tenant_id, 'CLIENTES', 'UPDATE', jsonb_build_object(
-                    'id_nexus', id,
-                    'id_firebird', 2630,
-                    'nome', nome,
-                    'razao_social', razao_social,
-                    'documento', '46.890.912/0001-87',
-                    'cpf_cnpj', '46.890.912/0001-87',
-                    'cliente_documento', '46.890.912/0001-87',
-                    'documento_formatado', '46.890.912/0001-87',
-                    'documento_limpo', '46890912000187',
-                    'origem', 'NEXUS_REPAIR'
-                ), 'PENDENTE', NOW()
-                FROM dash_clientes
-                WHERE id_firebird = 2630 OR documento = '46.890.912/0001-87'
-                LIMIT 1;
-            `, []).catch(() => {});
-
-            // Auto-repair: Corrige títulos com centro de custo / moeda / plano de contas incorretos
-            await query(`
-                UPDATE dash_financeiro
-                SET moeda = COALESCE(NULLIF(TRIM(moeda), ''), 'REAL'),
-                    centro_custo_nome = CASE WHEN centro_custo_nome IS NULL OR centro_custo_nome = 'SILENUS DESPESA' THEN 'COLISEU RECEITAS' ELSE centro_custo_nome END,
-                    centro_custo = CASE WHEN centro_custo IS NULL OR centro_custo = 1 THEN 6 ELSE centro_custo END,
-                    plano_contas_nome = COALESCE(NULLIF(TRIM(plano_contas_nome), ''), 'MENSALIDADE / SERVIÇO')
-                WHERE id_firebird = 227339 OR id = 227339;
-
-                INSERT INTO dash_sync_metadata (tenant_id, tabela, operacao, payload, status, created_at)
-                SELECT tenant_id, 'ALTERACAO_TITULO', 'UPDATE', jsonb_build_object(
-                    'id_nexus', id,
-                    'id_firebird', 227339,
-                    'moeda', 'REAL',
-                    'centro_custo', 'COLISEU RECEITAS',
-                    'centro_custo_id', 6,
-                    'plano_contas', 'MENSALIDADE / SERVIÇO',
-                    'plano_contas_id', 1,
-                    'descricao', descricao,
-                    'data_vencimento', data_vencimento,
-                    'valor', valor,
-                    'origem', 'NEXUS_REPAIR'
-                ), 'PENDENTE', NOW()
-                FROM dash_financeiro
-                WHERE id_firebird = 227339 OR id = 227339
-                LIMIT 1;
+                ALTER TABLE dash_certificados ALTER COLUMN senha TYPE TEXT;
             `, []).catch(() => {});
         } catch (migErr) {
             logger.warn('[DB] Migração silenciosa falhou ou já executada', { erro: migErr.message });
@@ -385,7 +318,7 @@ async function checkConnection() {
 
         return true;
     } catch (err) {
-        logger.error('[DB] Falha ao conectar ao PostgreSQL', { error: err.message });
+        logger.error('[DB] Falha na manutenção inicial do PostgreSQL', { error: err.message });
         return false;
     }
 }
@@ -393,5 +326,6 @@ async function checkConnection() {
 module.exports = {
     query,
     pool,
-    checkConnection
+    checkConnection,
+    runStartupMaintenance
 };

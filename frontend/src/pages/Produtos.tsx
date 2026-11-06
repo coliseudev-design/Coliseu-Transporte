@@ -258,7 +258,7 @@ export default function Produtos() {
         <div className="flex flex-wrap items-center gap-2">
           {/* Badge principal de identificação */}
           <div className="flex items-center gap-2 px-1 border-r border-slate-300 dark:border-slate-700 pr-3">
-            <div className="p-1 bg-gradient-to-tr from-indigo-600 to-purple-600 text-white rounded-lg shadow-sm flex items-center justify-center shrink-0">
+            <div className="p-1 bg-gradient-to-tr from-indigo-600 to-cyan-600 text-white rounded-lg shadow-sm flex items-center justify-center shrink-0">
               <Package size={15} />
             </div>
             <span className="text-xs font-black text-slate-900 dark:text-slate-100 uppercase tracking-tight font-heading">
