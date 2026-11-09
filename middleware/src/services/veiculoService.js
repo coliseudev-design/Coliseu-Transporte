@@ -15,6 +15,8 @@ const TIMEOUT_MS = 8000;
 const CACHE = new Map(); // placa → { dados, expiraEm }
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24h
 
+const PLACA_ANTIGA_REGEX = /^[A-Z]{3}[0-9]{4}$/;
+const PLACA_MERCOSUL_REGEX = /^[A-Z]{3}[0-9][A-Z][0-9]{2}$/;
 const PLACA_REGEX = /^[A-Z]{3}[0-9][A-Z0-9][0-9]{2}$/;
 
 /**
@@ -55,12 +57,41 @@ function normalizarPlaca(placa) {
 }
 
 /**
+ * Valida placas brasileiras tanto no padrão antigo (ABC-1234 / ABC1234) quanto Mercosul (ABC1D23).
+ */
+function validarPlaca(placa) {
+    const limpa = normalizarPlaca(placa);
+    if (PLACA_ANTIGA_REGEX.test(limpa)) {
+        return {
+            valida: true,
+            limpa,
+            padrao: 'ANTIGA',
+            formatada: `${limpa.slice(0, 3)}-${limpa.slice(3)}`
+        };
+    }
+    if (PLACA_MERCOSUL_REGEX.test(limpa)) {
+        return {
+            valida: true,
+            limpa,
+            padrao: 'MERCOSUL',
+            formatada: limpa
+        };
+    }
+    return {
+        valida: false,
+        limpa,
+        padrao: null,
+        formatada: limpa
+    };
+}
+
+/**
  * Formata a placa para exibição amigável (ABC-1234 no padrão antigo ou ABC1D23 no Mercosul).
  */
 function formatarPlacaExibicao(placa) {
     const limpa = normalizarPlaca(placa);
     if (limpa.length !== 7) return limpa;
-    return /^[A-Z]{3}[0-9]{4}$/.test(limpa)
+    return PLACA_ANTIGA_REGEX.test(limpa)
         ? `${limpa.slice(0, 3)}-${limpa.slice(3)}`
         : limpa;
 }
@@ -138,6 +169,7 @@ async function consultarPlaca(placa) {
 
 module.exports = {
     consultarPlaca,
+    validarPlaca,
     normalizarPlaca,
     formatarPlacaExibicao,
     mapearTipoRodado,

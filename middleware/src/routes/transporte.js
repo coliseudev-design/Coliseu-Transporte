@@ -1297,22 +1297,74 @@ router.get('/veiculos', async (req, res) => {
 router.post('/veiculos', async (req, res) => {
     const tenantId = req.tenant.id;
     const {
-        id, placa, renavam, chassi, uf, tipo_rodado = '01', tipo_carroceria = '01',
+        id, placa, renavam, chassi, uf, tipo_rodado = '01', tipo_carroceria = '02',
         tara_kg = 0, capacidade_kg = 0, capacidade_m3 = 0, tipo_proprietario = '1',
         rntrc = null, cpf_cnpj_proprietario = null, nome_proprietario = null, uf_proprietario = null
     } = req.body || {};
 
-    if (!placa || String(placa).replace(/\D/g, '').length < 7) {
-        return res.status(400).json({ error: 'Placa é obrigatória (7 caracteres).' });
+    const checkPlaca = veiculoService.validarPlaca(placa);
+    if (!checkPlaca.valida) {
+        return res.status(400).json({
+            error: 'Placa inválida. Informe uma placa brasileira no padrão antigo (ABC-1234) ou Mercosul (ABC1D23).'
+        });
     }
 
+    const cleanRenavam = renavam ? String(renavam).replace(/\D/g, '').slice(0, 20) : null;
+    const cleanChassi = chassi ? String(chassi).trim().toUpperCase().slice(0, 40) : null;
+    const cleanUf = uf ? String(uf).replace(/[^A-Za-z]/g, '').toUpperCase().slice(0, 2) : null;
+    const cleanRntrc = rntrc ? String(rntrc).replace(/\D/g, '').slice(0, 20) : null;
+    const cleanDocProp = cpf_cnpj_proprietario
+        ? String(cpf_cnpj_proprietario).replace(/\D/g, '').slice(0, 14)
+        : null;
+    const cleanNomeProp = nome_proprietario ? String(nome_proprietario).trim().slice(0, 255) : null;
+    const cleanUfProp = uf_proprietario
+        ? String(uf_proprietario).replace(/[^A-Za-z]/g, '').toUpperCase().slice(0, 2)
+        : null;
+    const parsedTara = Number.isFinite(parseFloat(tara_kg)) ? parseFloat(tara_kg) : 0;
+    const parsedCapKg = Number.isFinite(parseFloat(capacidade_kg)) ? parseFloat(capacidade_kg) : 0;
+    const parsedCapM3 = Number.isFinite(parseFloat(capacidade_m3)) ? parseFloat(capacidade_m3) : 0;
+    const numericId = Number(id) > 0 ? parseInt(id, 10) : null;
+
     try {
+        if (numericId) {
+            const upd = await db.query(
+                `UPDATE dash_veiculos SET
+                    placa = $1,
+                    renavam = $2,
+                    chassi = $3,
+                    uf = $4,
+                    tipo_rodado = $5,
+                    tipo_carroceria = $6,
+                    tara_kg = $7,
+                    capacidade_kg = $8,
+                    capacidade_m3 = $9,
+                    tipo_proprietario = $10,
+                    rntrc = $11,
+                    cpf_cnpj_proprietario = $12,
+                    nome_proprietario = $13,
+                    uf_proprietario = $14,
+                    ativo = true,
+                    updated_at = NOW()
+                 WHERE id = $15 AND tenant_id = $16
+                 RETURNING *`,
+                [
+                    checkPlaca.limpa, cleanRenavam, cleanChassi, cleanUf,
+                    tipo_rodado, tipo_carroceria, parsedTara, parsedCapKg, parsedCapM3,
+                    tipo_proprietario, cleanRntrc, cleanDocProp, cleanNomeProp, cleanUfProp,
+                    numericId, tenantId
+                ]
+            );
+            if (upd.rowCount > 0) {
+                return res.json({ success: true, data: upd.rows[0] });
+            }
+        }
+
         const { rows } = await db.query(
             `INSERT INTO dash_veiculos (
-                tenant_id, id, placa, renavam, chassi, uf, tipo_rodado, tipo_carroceria,
+                tenant_id, placa, renavam, chassi, uf, tipo_rodado, tipo_carroceria,
                 tara_kg, capacidade_kg, capacidade_m3, tipo_proprietario,
                 rntrc, cpf_cnpj_proprietario, nome_proprietario, uf_proprietario
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
              ON CONFLICT (tenant_id, placa) DO UPDATE SET
                 renavam = COALESCE(NULLIF(EXCLUDED.renavam, ''), dash_veiculos.renavam),
                 chassi = COALESCE(NULLIF(EXCLUDED.chassi, ''), dash_veiculos.chassi),
@@ -1331,11 +1383,11 @@ router.post('/veiculos', async (req, res) => {
                 updated_at = NOW()
              RETURNING *`,
             [
-                tenantId, id || null, veiculoService.normalizarPlaca(placa), renavam || null,
-                chassi || null, uf || null, tipo_rodado, tipo_carroceria,
-                parseFloat(tara_kg || 0), parseFloat(capacidade_kg || 0), parseFloat(capacidade_m3 || 0),
-                tipo_proprietario, rntrc || null, cpf_cnpj_proprietario || null,
-                nome_proprietario || null, uf_proprietario || null
+                tenantId, checkPlaca.limpa, cleanRenavam,
+                cleanChassi, cleanUf, tipo_rodado, tipo_carroceria,
+                parsedTara, parsedCapKg, parsedCapM3,
+                tipo_proprietario, cleanRntrc, cleanDocProp,
+                cleanNomeProp, cleanUfProp
             ]
         );
         return res.status(201).json({ success: true, data: rows[0] });
@@ -1383,15 +1435,43 @@ router.post('/motoristas', async (req, res) => {
     const tenantId = req.tenant.id;
     const { id, cpf, nome, cnh = null, cnh_categoria = null, cnh_validade = null, telefone = null } = req.body || {};
 
-    if (!cpf || !nome) {
-        return res.status(400).json({ error: 'CPF e nome são obrigatórios.' });
+    const cleanCpf = String(cpf || '').replace(/\D/g, '');
+    const cleanNome = String(nome || '').trim();
+    if (cleanCpf.length !== 11 || !cleanNome) {
+        return res.status(400).json({ error: 'CPF válido (11 dígitos) e nome completo são obrigatórios.' });
     }
 
+    const cleanCnh = cnh ? String(cnh).replace(/\D/g, '').slice(0, 20) : null;
+    const cleanCat = cnh_categoria ? String(cnh_categoria).trim().toUpperCase().slice(0, 4) : null;
+    const cleanValidade = cnh_validade && String(cnh_validade).trim() ? String(cnh_validade).slice(0, 10) : null;
+    const cleanFone = telefone ? String(telefone).trim().slice(0, 30) : null;
+    const numericId = Number(id) > 0 ? parseInt(id, 10) : null;
+
     try {
+        if (numericId) {
+            const upd = await db.query(
+                `UPDATE dash_motoristas SET
+                    cpf = $1,
+                    nome = $2,
+                    cnh = $3,
+                    cnh_categoria = $4,
+                    cnh_validade = $5,
+                    telefone = $6,
+                    ativo = true,
+                    updated_at = NOW()
+                 WHERE id = $7 AND tenant_id = $8
+                 RETURNING *`,
+                [cleanCpf, cleanNome, cleanCnh, cleanCat, cleanValidade, cleanFone, numericId, tenantId]
+            );
+            if (upd.rowCount > 0) {
+                return res.json({ success: true, data: upd.rows[0] });
+            }
+        }
+
         const { rows } = await db.query(
             `INSERT INTO dash_motoristas (
-                tenant_id, id, cpf, nome, cnh, cnh_categoria, cnh_validade, telefone
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+                tenant_id, cpf, nome, cnh, cnh_categoria, cnh_validade, telefone
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7)
              ON CONFLICT (tenant_id, cpf) DO UPDATE SET
                 nome = EXCLUDED.nome,
                 cnh = COALESCE(NULLIF(EXCLUDED.cnh, ''), dash_motoristas.cnh),
@@ -1401,10 +1481,7 @@ router.post('/motoristas', async (req, res) => {
                 ativo = true,
                 updated_at = NOW()
              RETURNING *`,
-            [
-                tenantId, id || null, String(cpf).replace(/\D/g, ''), nome,
-                cnh || null, cnh_categoria || null, cnh_validade || null, telefone || null
-            ]
+            [tenantId, cleanCpf, cleanNome, cleanCnh, cleanCat, cleanValidade, cleanFone]
         );
         return res.status(201).json({ success: true, data: rows[0] });
     } catch (err) {

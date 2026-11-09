@@ -143,7 +143,27 @@ export function TextareaFiscal({ value, onChange, placeholder, rows = 3, classNa
     );
 }
 
-/** Máscaras de entrada frequently usadas em dados fiscais. */
+/**
+ * Identifica o padrão oficial da placa brasileira:
+ * - ANTIGA: 3 letras + 4 números (ex: QAR-5644 / QAR5644)
+ * - MERCOSUL: 3 letras + 1 número + 1 letra + 2 números (ex: QAR5G44)
+ */
+export function identificarPadraoPlaca(valor: string): 'ANTIGA' | 'MERCOSUL' | null {
+    const limpa = String(valor || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+    if (/^[A-Z]{3}[0-9]{4}$/.test(limpa)) return 'ANTIGA';
+    if (/^[A-Z]{3}[0-9][A-Z][0-9]{2}$/.test(limpa)) return 'MERCOSUL';
+    return null;
+}
+
+export function formatarPlacaExibicao(valor: string): string {
+    const limpa = String(valor || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 7);
+    if (/^[A-Z]{3}[0-9]{4}$/.test(limpa)) {
+        return `${limpa.slice(0, 3)}-${limpa.slice(3)}`;
+    }
+    return limpa;
+}
+
+/** Máscaras de entrada usadas em dados fiscais. */
 export const mascaras = {
     cpfCnpj: (v: string) => {
         const d = v.replace(/\D/g, '').slice(0, 14);
@@ -151,8 +171,21 @@ export const mascaras = {
         return d.replace(/(\d{2})(\d{3})(\d{3})(\d{4})(\d{0,2})/, '$1.$2.$3/$4-$5');
     },
     placa: (v: string) => {
-        const d = v.replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 7);
-        return d.length <= 3 ? d : `${d.slice(0, 3)}-${d.slice(3)}`;
+        const raw = v.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+        let clean = '';
+        for (const ch of raw) {
+            const pos = clean.length;
+            if (pos >= 7) break;
+            if (pos < 3 && /[A-Z]/.test(ch)) clean += ch;
+            else if (pos === 3 && /[0-9]/.test(ch)) clean += ch;
+            else if (pos === 4 && /[A-Z0-9]/.test(ch)) clean += ch;
+            else if ((pos === 5 || pos === 6) && /[0-9]/.test(ch)) clean += ch;
+        }
+        // Padrão antigo (5º caractere numérico): ABC-1234 | Mercosul (5º letra): ABC1D23
+        if (clean.length >= 5 && /[0-9]/.test(clean[4])) {
+            return `${clean.slice(0, 3)}-${clean.slice(3)}`;
+        }
+        return clean;
     },
     telefone: (v: string) => {
         const d = v.replace(/\D/g, '').slice(0, 11);
