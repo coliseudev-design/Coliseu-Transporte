@@ -56,7 +56,22 @@ router.get('/', async (req, res) => {
         query += ` ORDER BY u.created_at DESC`;
         
         const result = await db.query(query, params);
-        res.json(result.rows);
+        const { resolveManyIdentityCompanies } = require('../services/identityCompanyCache');
+        const identityMap = await resolveManyIdentityCompanies(result.rows.map((r) => r.tenant_id));
+
+        const enrichedRows = result.rows.map((row) => {
+            const info = identityMap.get(row.tenant_id);
+            return {
+                ...row,
+                empresa_nome: info?.nome || row.empresa_nome || null,
+                modulo_transporte_ativo:
+                    row.tenant_id === '00000000-0000-0000-0000-000000000000'
+                        ? true
+                        : Boolean(info?.moduloTransporteAtivo)
+            };
+        });
+
+        res.json(enrichedRows);
     } catch (err) {
         logger.error('[Usuarios] Erro ao listar', err);
         res.status(500).json({ error: 'Erro ao listar usuários' });

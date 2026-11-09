@@ -55,6 +55,13 @@ router.post('/login', async (req, res) => {
             return res.status(401).json({ error: 'Senha incorreta', code: 'INVALID_LOGIN' });
         }
 
+        const { resolveIdentityCompanyInfo } = require('../services/identityCompanyCache');
+        const identityInfo = await resolveIdentityCompanyInfo(user.tenant_id);
+        const resolvedEmpresaNome =
+            identityInfo?.nome ||
+            user.empresa_nome ||
+            (user.tenant_id === '00000000-0000-0000-0000-000000000000' ? 'Coliseu Sistemas (Master)' : null);
+
         // Gerar JWT
         const token = jwt.sign(
             {
@@ -63,7 +70,7 @@ router.post('/login', async (req, res) => {
                 tenant: user.tenant_id,
                 tenantId: user.tenant_id,
                 module: config.security.expectedModuleSlug,
-                companyName: user.tenant_id === '00000000-0000-0000-0000-000000000000' ? 'Coliseu Sistemas (Master)' : 'Empresa Cliente',
+                companyName: resolvedEmpresaNome || 'Empresa Cliente',
                 role: user.role,
                 grupoId: user.grupo_id
             },
@@ -87,7 +94,7 @@ router.post('/login', async (req, res) => {
                 layout_version: user.layout_version,
                 grupo_id: user.grupo_id,
                 grupo_nome: user.grupo_nome,
-                empresa_nome: user.empresa_nome || (user.tenant_id === '00000000-0000-0000-0000-000000000000' ? 'Coliseu Sistemas (Master)' : null),
+                empresa_nome: resolvedEmpresaNome,
                 permissoes_menus: user.permissoes_menus,
                 permissoes_acoes: user.permissoes_acoes,
                 precisa_alterar_senha: isDefaultPassword
@@ -145,6 +152,14 @@ router.get('/me', async (req, res) => {
         if (!user.ativo) {
             return res.status(403).json({ error: 'Usuário inativo', code: 'USER_INACTIVE' });
         }
+
+        const { resolveIdentityCompanyInfo } = require('../services/identityCompanyCache');
+        const identityInfo = await resolveIdentityCompanyInfo(user.tenant_id);
+        user.empresa_nome =
+            identityInfo?.nome ||
+            user.empresa_nome ||
+            (user.tenant_id === '00000000-0000-0000-0000-000000000000' ? 'Coliseu Sistemas (Master)' : null);
+
         return res.json({ user });
     } catch (err) {
         logger.error('[Auth] Erro ao buscar /me', err);

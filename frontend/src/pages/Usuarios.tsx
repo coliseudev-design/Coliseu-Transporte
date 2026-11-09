@@ -5,7 +5,7 @@ import api from '../services/api'
 import DataTable from '../components/DataTable'
 import {
   Shield, UserPlus, CheckCircle, XCircle, Building2, Plus, Edit2, Trash2,
-  Users as UsersIcon, Check, Ban
+  Users as UsersIcon, Check, Ban, Search, Truck
 } from 'lucide-react'
 import { useAuthStore } from '../store/authStore'
 import { useBranch } from '../contexts/BranchContext'
@@ -23,6 +23,7 @@ interface UserRow {
   permissions: string[] | null
   tenant_id: string
   empresa_nome?: string | null
+  modulo_transporte_ativo?: boolean
   layout_version?: string
   filial_acesso?: string
   grupo_id?: number
@@ -218,6 +219,8 @@ export default function Usuarios() {
 
   const [grupoModalOpen, setGrupoModalOpen] = useState(false)
   const [editingGrupo, setEditingGrupo] = useState<GrupoAcesso | null>(null)
+  const [buscaFiltro, setBuscaFiltro] = useState('')
+  const [apenasTransporte, setApenasTransporte] = useState(false)
 
   const { data: gruposListRaw, isLoading: isLoadingGrupos } = useQuery<any[]>({
     queryKey: ['grupos-acesso'],
@@ -344,13 +347,73 @@ export default function Usuarios() {
       </div>
 
       {/* SEÇÃO 1: USUÁRIOS */}
-      {activeSection === 'usuarios' && (
-        <div className="bg-bg-primary rounded-2xl shadow-sm border border-border overflow-hidden">
-          <DataTable
-            loading={isLoading}
-            data={users || []}
-            empty="Nenhum usuário cadastrado."
-            columns={[
+      {activeSection === 'usuarios' && (() => {
+        const termo = buscaFiltro.trim().toLowerCase()
+        const totalTransporte = (users || []).filter(
+          (u) => u.modulo_transporte_ativo || u.tenant_id === MASTER_TENANT_ID
+        ).length
+        const usuariosFiltrados = (users || []).filter((u) => {
+          if (isCurrentMasterTenant && apenasTransporte && !u.modulo_transporte_ativo && u.tenant_id !== MASTER_TENANT_ID) {
+            return false
+          }
+          if (!termo) return true
+          return (
+            String(u.nome || '').toLowerCase().includes(termo) ||
+            String(u.email || '').toLowerCase().includes(termo) ||
+            String(u.empresa_nome || '').toLowerCase().includes(termo) ||
+            String(u.tenant_id || '').toLowerCase().includes(termo)
+          )
+        })
+
+        return (
+          <div className="bg-bg-primary rounded-2xl shadow-sm border border-border overflow-hidden">
+            {/* Barra de Busca e Filtro por Módulo (Admin Licenças) */}
+            <div className="p-3.5 border-b border-border flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-bg-secondary/30">
+              <div className="relative flex-1 max-w-md">
+                <Search className="w-4 h-4 text-text-secondary absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  type="text"
+                  value={buscaFiltro}
+                  onChange={(e) => setBuscaFiltro(e.target.value)}
+                  placeholder="Buscar por nome, e-mail, empresa (Admin Licenças) ou UUID..."
+                  className="w-full pl-9 pr-3 py-1.5 text-xs rounded-xl border border-border bg-bg-primary text-text-primary focus:outline-none focus:border-brand-500"
+                />
+              </div>
+
+              {isCurrentMasterTenant && (
+                <div className="flex items-center gap-1.5 text-xs">
+                  <button
+                    type="button"
+                    onClick={() => setApenasTransporte(false)}
+                    className={`px-3 py-1.5 rounded-xl font-bold transition-colors cursor-pointer ${
+                      !apenasTransporte
+                        ? 'bg-slate-900 text-white dark:bg-sky-600'
+                        : 'bg-bg-primary border border-border text-text-secondary hover:text-text-primary'
+                    }`}
+                  >
+                    Todas ({users?.length || 0})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setApenasTransporte(true)}
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl font-bold transition-colors cursor-pointer ${
+                      apenasTransporte
+                        ? 'bg-emerald-600 text-white'
+                        : 'bg-bg-primary border border-border text-text-secondary hover:text-text-primary'
+                    }`}
+                  >
+                    <Truck className="w-3.5 h-3.5" />
+                    Coliseu Transporte ({totalTransporte})
+                  </button>
+                </div>
+              )}
+            </div>
+
+            <DataTable
+              loading={isLoading}
+              data={usuariosFiltrados}
+              empty="Nenhum usuário encontrado para o filtro selecionado."
+              columns={[
               {
                 key: 'nome',
                 label: 'NOME',
@@ -426,8 +489,23 @@ export default function Usuarios() {
                   const isMaster = r.tenant_id === MASTER_TENANT_ID
                   return (
                     <div>
-                      <div className="font-medium text-text-primary text-sm">
-                        {isMaster ? 'Coliseu Sistemas (Master)' : r.empresa_nome || 'Empresa Cliente'}
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="font-semibold text-text-primary text-sm">
+                          {isMaster
+                            ? 'Coliseu Sistemas (Master)'
+                            : r.empresa_nome || 'Não localizada no Admin Licenças'}
+                        </span>
+                        {!isMaster && isCurrentMasterTenant && (
+                          <span
+                            className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                              r.modulo_transporte_ativo
+                                ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300'
+                                : 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400'
+                            }`}
+                          >
+                            {r.modulo_transporte_ativo ? 'Coliseu Transporte' : 'Outro Módulo'}
+                          </span>
+                        )}
                       </div>
                       <div className="text-xs text-text-secondary font-mono mt-0.5">
                         {isMaster ? 'Master Key' : r.tenant_id}
@@ -487,8 +565,9 @@ export default function Usuarios() {
               }
             ]}
           />
-        </div>
-      )}
+          </div>
+        )
+      })()}
 
       {/* Modal de Criação */}
       {modalOpen && (

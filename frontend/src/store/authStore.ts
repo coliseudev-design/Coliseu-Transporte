@@ -41,7 +41,22 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
     if (token && userStr) {
       try {
         set({ token, user: JSON.parse(userStr) })
-      } catch { /* ignore */ }
+        api
+          .get('/auth/me')
+          .then((res) => {
+            if (res.data?.user) {
+              const prev = get().user || {}
+              const merged = { ...prev, ...res.data.user }
+              localStorage.setItem('coliseu_user', JSON.stringify(merged))
+              set({ user: merged as User })
+            }
+          })
+          .catch(() => {
+            /* silencioso caso offline */
+          })
+      } catch {
+        /* ignore */
+      }
     }
   },
   login: async (email, senha) => {
