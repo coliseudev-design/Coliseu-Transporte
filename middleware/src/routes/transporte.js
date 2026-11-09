@@ -1426,9 +1426,19 @@ router.delete('/motoristas/:id', async (req, res) => {
 // 5. CONFIGURAÇÕES FISCAIS / EMITENTES
 // ─────────────────────────────────────────────────────────────
 
+router.get('/emitentes/consultar-cnpj/:cnpj', async (req, res) => {
+    try {
+        const dados = await TransporteService.consultarCnpjReceita(req.params.cnpj);
+        return res.json({ success: true, data: dados });
+    } catch (err) {
+        return res.status(400).json({ error: err.message });
+    }
+});
+
 router.get('/emitentes', async (req, res) => {
     const tenantId = req.tenant.id;
     try {
+        await TransporteService.autoHidratarEmitentePeloCertificado(tenantId);
         let { rows } = await db.query(
             `SELECT * FROM dash_emitentes
              WHERE tenant_id = $1
@@ -2872,6 +2882,7 @@ router.post('/roteiro/:mdfe_id/concluir', async (req, res) => {
 router.get('/certificados', async (req, res) => {
     const tenantId = req.tenant.id;
     try {
+        await TransporteService.autoHidratarEmitentePeloCertificado(tenantId);
         const { rows } = await db.query(
             `SELECT c.id, c.emitente_id, e.razao_social AS emitente_nome, e.cnpj,
                     c.nome_arquivo, c.valido_de, c.valido_ate,
@@ -2947,8 +2958,13 @@ router.post('/certificados', async (req, res) => {
 
         let focusSync = null;
         if (sincronizar_focus !== false) {
+            await TransporteService.autoHidratarEmitentePeloCertificado(tenantId);
+            const emitRefresh = await db.query(
+                `SELECT cnpj, focus_empresa_id FROM dash_emitentes WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
+                [emitente_id, tenantId]
+            );
             const masterCfg = await TransporteService.getMasterFocusConfig();
-            const cnpjEmit = emitCheck.rows[0]?.cnpj;
+            const cnpjEmit = emitRefresh.rows[0]?.cnpj;
             if (masterCfg.temMasterToken && TransporteService.validarCnpjReal(cnpjEmit)) {
                 try {
                     focusSync = await TransporteService.provisionarEmpresaFocus(tenantId, emitente_id, {
@@ -2977,6 +2993,7 @@ router.post('/certificados/:id/sincronizar-focus', async (req, res) => {
         if (rows.length === 0) {
             return res.status(404).json({ error: 'Certificado não encontrado.' });
         }
+        await TransporteService.autoHidratarEmitentePeloCertificado(tenantId);
         const result = await TransporteService.provisionarEmpresaFocus(tenantId, rows[0].emitente_id, {
             incluirCertificado: true,
             registrarWebhooks: true,

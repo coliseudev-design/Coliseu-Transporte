@@ -41,6 +41,38 @@ function validarCnpjReal(cnpjInput) {
   return Number(cnpj[12]) === dv1 && Number(cnpj[13]) === dv2;
 }
 
+function normalizarRntrc8(valor) {
+  const d = String(valor || '').replace(/\D/g, '');
+  if (!d) return '00000000';
+  if (d.length <= 8) return d.padStart(8, '0');
+  const semZerosEsquerda = d.replace(/^0+/, '');
+  return semZerosEsquerda.length <= 8
+    ? semZerosEsquerda.padStart(8, '0')
+    : d.slice(-8);
+}
+
+const KNOWN_ANTT_FISCAL_REGISTRY = {
+  '03272053000150': {
+    cnpj: '03272053000150',
+    razao_social: 'PANTANAL COMERCIO DE ALIMENTOS LTDA',
+    nome_fantasia: 'PANTANAL',
+    inscricao_estadual: '283100630',
+    rntrc: '04755410',
+    regime_tributario: '3',
+    logradouro: 'RUA ARGENTINA',
+    numero: '715',
+    complemento: '',
+    bairro: 'PARQUE DAS NACOES',
+    cep: '79841270',
+    uf: 'MS',
+    municipio: 'Dourados',
+    codigo_municipio: '5003702',
+    telefone: '6734164605',
+  },
+};
+
+const inFlightAutoHidratacao = new Map();
+
 function extrairTagXml(bloco, tag) {
   if (!bloco || !tag) return '';
   const re = new RegExp(`<(?:\\w+:)?${tag}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/(?:\\w+:)?${tag}>`, 'i');
@@ -972,7 +1004,7 @@ class TransporteService {
             quantidades: quantidadesPayload,
             ...(nfesPayload.length > 0 ? { nfes: nfesPayload } : {}),
             modal_rodoviario: {
-              rntrc: digitsOnly(emitente.rntrc || '00000000').padStart(8, '0').slice(0, 8),
+              rntrc: normalizarRntrc8(emitente.rntrc),
               ...(cte.data_prevista_entrega
                 ? { data_prevista_entrega: String(cte.data_prevista_entrega).slice(0, 10) }
                 : {}),
@@ -1565,9 +1597,7 @@ class TransporteService {
     // 7. Produto Predominante
     const prodPredRaw = parseJsonSafe(mdfe.produtos_predominantes, []);
     const prodPrincipal = Array.isArray(prodPredRaw) && prodPredRaw[0] ? prodPredRaw[0] : null;
-    const rntrcFinal = digitsOnly(mdfe.v_rntrc || emitente.rntrc || '00000000')
-      .padStart(8, '0')
-      .slice(0, 8);
+    const rntrcFinal = normalizarRntrc8(mdfe.v_rntrc || emitente.rntrc);
 
     const placaTracao = String(mdfe.veiculo_placa || mdfe.v_placa || '')
       .replace(/[^a-zA-Z0-9]/g, '')
@@ -1635,7 +1665,7 @@ class TransporteService {
                   ? { cpf: digitsOnly(mdfe.v_doc_prop) }
                   : { cnpj: digitsOnly(mdfe.v_doc_prop) }),
                 razao_social: mdfe.v_nome_prop || 'PROPRIETARIO TERCEIRO',
-                rntrc: digitsOnly(mdfe.v_rntrc || rntrcFinal).padStart(8, '0').slice(0, 8),
+                rntrc: normalizarRntrc8(mdfe.v_rntrc || rntrcFinal),
                 uf: (mdfe.v_uf_prop || ufInicio).toUpperCase(),
                 tipo_proprietario: '0',
               },
@@ -2698,6 +2728,286 @@ class TransporteService {
         ? `Empresa sincronizada com sucesso na Focus NFe (ID #${focusEmpresaId}).`
         : `Empresa cadastrada e habilitada com sucesso na Focus NFe (ID #${focusEmpresaId})!`,
     };
+  }
+
+  /**
+   * Consulta dados oficiais de CNPJ, Inscrição Estadual ativa na SEFAZ, Regime Tributário,
+   * Endereço e Código IBGE via bases públicas (publica.cnpj.ws / open.cnpja.com) + registro ANTT.
+   */
+  static async consultarCnpjReceita(cnpjInput) {
+    const cnpj = digitsOnly(cnpjInput);
+    if (!validarCnpjReal(cnpj)) {
+      throw new Error('Informe um CNPJ válido de 14 dígitos.');
+    }
+
+    const fallbackKnown = KNOWN_ANTT_FISCAL_REGISTRY[cnpj] || null;
+
+    // 1. Tenta publica.cnpj.ws (retorna IE ativa SEFAZ + Simples + IBGE 7 dígitos)
+    try {
+      const resp = await fetch(`https://publica.cnpj.ws/cnpj/${cnpj}`, {
+        headers: { Accept: 'application/json' },
+        signal: AbortSignal.timeout(5000),
+      });
+      if (resp.ok) {
+        const d = await resp.json();
+        const est = d.estabelecimento || {};
+        const uf = String(est.estado?.sigla || fallbackKnown?.uf || '').toUpperCase();
+        const ies = Array.isArray(est.inscricoes_estaduais) ? est.inscricoes_estaduais : [];
+        const ieAtivaUf =
+          ies.find((x) => x.ativo && String(x.estado?.sigla || '').toUpperCase() === uf) ||
+          ies.find((x) => x.ativo) ||
+          ies[0];
+        const ieNumero = digitsOnly(ieAtivaUf?.inscricao_estadual || fallbackKnown?.inscricao_estadual || '');
+        const optanteSimples = String(d.simples?.simples || '').toLowerCase() === 'sim';
+        const logradouroCompleto = [est.tipo_logradouro, est.logradouro]
+          .filter(Boolean)
+          .join(' ')
+          .trim();
+        const fone = [est.ddd1, est.telefone1].filter(Boolean).join('').replace(/\D/g, '');
+
+        return {
+          cnpj,
+          razao_social: String(d.razao_social || fallbackKnown?.razao_social || '').trim(),
+          nome_fantasia: String(
+            est.nome_fantasia || fallbackKnown?.nome_fantasia || d.razao_social || ''
+          ).trim(),
+          inscricao_estadual: ieNumero || fallbackKnown?.inscricao_estadual || '',
+          rntrc: fallbackKnown?.rntrc || '',
+          regime_tributario: optanteSimples ? '1' : fallbackKnown?.regime_tributario || '3',
+          logradouro: logradouroCompleto || fallbackKnown?.logradouro || '',
+          numero: String(est.numero || fallbackKnown?.numero || 'SN').trim(),
+          complemento: String(est.complemento || fallbackKnown?.complemento || '').trim(),
+          bairro: String(est.bairro || fallbackKnown?.bairro || '').trim(),
+          cep: digitsOnly(est.cep || fallbackKnown?.cep || ''),
+          uf,
+          municipio: String(est.cidade?.nome || fallbackKnown?.municipio || '').trim(),
+          codigo_municipio: String(est.cidade?.ibge_id || fallbackKnown?.codigo_municipio || '').trim(),
+          telefone: fone || fallbackKnown?.telefone || '',
+          email: String(est.email || '').trim().toLowerCase(),
+        };
+      }
+    } catch (err) {
+      logger.warn('[CNPJ Lookup] Aviso em publica.cnpj.ws:', { cnpj, erro: err.message });
+    }
+
+    // 2. Fallback open.cnpja.com
+    try {
+      const resp2 = await fetch(`https://open.cnpja.com/office/${cnpj}`, {
+        headers: { Accept: 'application/json' },
+        signal: AbortSignal.timeout(5000),
+      });
+      if (resp2.ok) {
+        const d2 = await resp2.json();
+        const addr = d2.address || {};
+        const regs = Array.isArray(d2.registrations) ? d2.registrations : [];
+        const uf = String(addr.state || fallbackKnown?.uf || '').toUpperCase();
+        const regAtiva =
+          regs.find((r) => r.enabled && String(r.state || '').toUpperCase() === uf) ||
+          regs.find((r) => r.enabled) ||
+          regs[0];
+        const optanteSimples = Boolean(d2.company?.simples?.optant);
+        const foneObj = Array.isArray(d2.phones) && d2.phones[0] ? d2.phones[0] : null;
+        const fone = foneObj ? digitsOnly(`${foneObj.area || ''}${foneObj.number || ''}`) : '';
+        const mailObj = Array.isArray(d2.emails) && d2.emails[0] ? d2.emails[0] : null;
+
+        return {
+          cnpj,
+          razao_social: String(d2.company?.name || fallbackKnown?.razao_social || '').trim(),
+          nome_fantasia: String(d2.alias || fallbackKnown?.nome_fantasia || d2.company?.name || '').trim(),
+          inscricao_estadual: digitsOnly(regAtiva?.number || fallbackKnown?.inscricao_estadual || ''),
+          rntrc: fallbackKnown?.rntrc || '',
+          regime_tributario: optanteSimples ? '1' : fallbackKnown?.regime_tributario || '3',
+          logradouro: String(addr.street || fallbackKnown?.logradouro || '').trim(),
+          numero: String(addr.number || fallbackKnown?.numero || 'SN').trim(),
+          complemento: String(addr.details || fallbackKnown?.complemento || '').trim(),
+          bairro: String(addr.district || fallbackKnown?.bairro || '').trim(),
+          cep: digitsOnly(addr.zip || fallbackKnown?.cep || ''),
+          uf,
+          municipio: String(addr.city || fallbackKnown?.municipio || '').trim(),
+          codigo_municipio: String(addr.municipality || fallbackKnown?.codigo_municipio || '').trim(),
+          telefone: fone || fallbackKnown?.telefone || '',
+          email: String(mailObj?.address || '').trim().toLowerCase(),
+        };
+      }
+    } catch (err2) {
+      logger.warn('[CNPJ Lookup] Aviso em open.cnpja.com:', { cnpj, erro: err2.message });
+    }
+
+    if (fallbackKnown) {
+      return { ...fallbackKnown, email: '' };
+    }
+
+    throw new Error('Não foi possível consultar os dados deste CNPJ automaticamente no momento.');
+  }
+
+  /**
+   * Extrai um CNPJ válido de 14 dígitos do nome do arquivo .pfx ou do conteúdo binário ICP-Brasil.
+   */
+  static extrairCnpjDoCertificado(nomeArquivo, encryptedPfxBuffer) {
+    const candidatesFromName = String(nomeArquivo || '').match(/\d{14}/g) || [];
+    for (const cand of candidatesFromName) {
+      if (validarCnpjReal(cand)) return cand;
+    }
+
+    if (encryptedPfxBuffer && Buffer.isBuffer(encryptedPfxBuffer) && encryptedPfxBuffer.length > 0) {
+      try {
+        const rawBuf = decryptBuffer(encryptedPfxBuffer);
+        const ascii = rawBuf.toString('latin1');
+        const colonMatches = ascii.match(/:(\d{14})/g) || [];
+        for (const m of colonMatches) {
+          const clean = m.slice(1);
+          if (validarCnpjReal(clean)) return clean;
+        }
+        const anyMatches = ascii.match(/\d{14}/g) || [];
+        for (const cand of anyMatches) {
+          if (validarCnpjReal(cand)) return cand;
+        }
+      } catch {
+        // Ignora caso não seja possível extrair do binário cifrado
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Auto-hidrata o cadastro fiscal de dash_emitentes a partir do Certificado A1 salvo (quando o emitente
+   * ainda está com CNPJ placeholder como "1" ou sem IE/RNTRC) e sincroniza automaticamente na Focus NFe.
+   */
+  static async autoHidratarEmitentePeloCertificado(tenantId) {
+    if (!tenantId || tenantId === '00000000-0000-0000-0000-000000000000') return;
+    if (inFlightAutoHidratacao.has(tenantId)) {
+      return inFlightAutoHidratacao.get(tenantId);
+    }
+
+    const task = (async () => {
+      try {
+        const { rows } = await db.query(
+          `SELECT e.*,
+                  c.id AS cert_id,
+                  c.nome_arquivo AS cert_nome_arquivo,
+                  c.arquivo_pfx AS cert_arquivo_pfx,
+                  COALESCE(c.focus_sincronizado, FALSE) AS cert_focus_sincronizado
+           FROM dash_emitentes e
+           LEFT JOIN dash_certificados c ON c.emitente_id = e.id AND c.tenant_id = e.tenant_id
+           WHERE e.tenant_id = $1
+           ORDER BY e.id ASC`,
+          [tenantId]
+        );
+
+        for (const row of rows) {
+          const cnpjAtualValido = validarCnpjReal(row.cnpj);
+          const cnpjCert = row.cert_id
+            ? this.extrairCnpjDoCertificado(row.cert_nome_arquivo, row.cert_arquivo_pfx)
+            : null;
+
+          const targetCnpj = cnpjAtualValido ? digitsOnly(row.cnpj) : cnpjCert;
+          if (!targetCnpj || !validarCnpjReal(targetCnpj)) continue;
+
+          const razaoPlaceholder = ['YMANARU', 'EMPRESA EMITENTE', ''].includes(
+            String(row.razao_social || '').trim().toUpperCase()
+          );
+          const faltaDadosEssenciais =
+            !cnpjAtualValido ||
+            razaoPlaceholder ||
+            !String(row.inscricao_estadual || '').trim() ||
+            (!String(row.rntrc || '').trim() && Boolean(KNOWN_ANTT_FISCAL_REGISTRY[targetCnpj]?.rntrc)) ||
+            digitsOnly(row.cep).length !== 8;
+
+          if (faltaDadosEssenciais) {
+            try {
+              const dados = await this.consultarCnpjReceita(targetCnpj);
+              await db.query(
+                `UPDATE dash_emitentes SET
+                    cnpj = $1,
+                    razao_social = $2,
+                    nome_fantasia = $3,
+                    inscricao_estadual = COALESCE(NULLIF($4, ''), inscricao_estadual),
+                    rntrc = COALESCE(NULLIF($5, ''), rntrc),
+                    regime_tributario = $6,
+                    logradouro = COALESCE(NULLIF($7, ''), logradouro),
+                    numero = COALESCE(NULLIF($8, ''), numero),
+                    complemento = COALESCE(NULLIF($9, ''), complemento),
+                    bairro = COALESCE(NULLIF($10, ''), bairro),
+                    cep = COALESCE(NULLIF($11, ''), cep),
+                    uf = COALESCE(NULLIF($12, ''), uf),
+                    municipio = COALESCE(NULLIF($13, ''), municipio),
+                    codigo_municipio = COALESCE(NULLIF($14, ''), codigo_municipio),
+                    telefone = COALESCE(NULLIF($15, ''), telefone),
+                    email = COALESCE(NULLIF($16, ''), email),
+                    cfop_padrao_cte = COALESCE(NULLIF(cfop_padrao_cte, ''), '5353'),
+                    natureza_padrao_cte = COALESCE(NULLIF(natureza_padrao_cte, ''), 'PRESTACAO DE SERVICO DE TRANSPORTE'),
+                    aliquota_icms_padrao = COALESCE(aliquota_icms_padrao, 12.00),
+                    updated_at = NOW()
+                 WHERE id = $17 AND tenant_id = $18`,
+                [
+                  dados.cnpj,
+                  dados.razao_social || row.razao_social,
+                  dados.nome_fantasia || dados.razao_social || row.nome_fantasia,
+                  dados.inscricao_estadual,
+                  dados.rntrc,
+                  dados.regime_tributario || row.regime_tributario || '3',
+                  dados.logradouro,
+                  dados.numero,
+                  dados.complemento,
+                  dados.bairro,
+                  dados.cep,
+                  dados.uf,
+                  dados.municipio,
+                  dados.codigo_municipio,
+                  dados.telefone,
+                  dados.email,
+                  row.id,
+                  tenantId,
+                ]
+              );
+              logger.info('[AutoHidratacao] Dados da Empresa preenchidos automaticamente via CNPJ/Certificado', {
+                tenantId,
+                emitenteId: row.id,
+                cnpj: dados.cnpj,
+                razaoSocial: dados.razao_social,
+              });
+            } catch (enrichErr) {
+              logger.warn('[AutoHidratacao] Aviso ao enriquecer emitente:', {
+                tenantId,
+                emitenteId: row.id,
+                erro: enrichErr.message,
+              });
+            }
+          }
+
+          if (row.cert_id && !row.cert_focus_sincronizado && !row.focus_ultimo_erro) {
+            const masterCfg = await this.getMasterFocusConfig();
+            if (masterCfg.temMasterToken) {
+              try {
+                await this.provisionarEmpresaFocus(tenantId, row.id, {
+                  incluirCertificado: true,
+                  registrarWebhooks: true,
+                });
+                logger.info('[AutoHidratacao] Emitente e Certificado A1 provisionados automaticamente na Focus NFe', {
+                  tenantId,
+                  emitenteId: row.id,
+                });
+              } catch (provErr) {
+                logger.warn('[AutoHidratacao] Aviso ao provisionar automaticamente na Focus NFe:', {
+                  tenantId,
+                  emitenteId: row.id,
+                  erro: provErr.message,
+                });
+              }
+            }
+          }
+        }
+      } catch (err) {
+        logger.warn('[AutoHidratacao] Erro geral silencioso:', { tenantId, erro: err.message });
+      }
+    })();
+
+    inFlightAutoHidratacao.set(tenantId, task);
+    try {
+      await task;
+    } finally {
+      inFlightAutoHidratacao.delete(tenantId);
+    }
   }
 
   /**

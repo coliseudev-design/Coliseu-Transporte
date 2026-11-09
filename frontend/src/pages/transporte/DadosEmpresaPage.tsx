@@ -74,6 +74,7 @@ export default function DadosEmpresaPage() {
   const [registrandoHooks, setRegistrandoHooks] = useState(false);
   const [trocandoAmb, setTrocandoAmb] = useState(false);
   const [buscandoCep, setBuscandoCep] = useState(false);
+  const [buscandoCnpj, setBuscandoCnpj] = useState(false);
 
   // Estado Super Admin Master (Software House Focus NFe)
   const [masterTokenInput, setMasterTokenInput] = useState('');
@@ -171,7 +172,7 @@ export default function DadosEmpresaPage() {
         aliquota_icms_padrao: String(emAtual.aliquota_icms_padrao ?? '12.00')
       });
     }
-  }, [emAtual?.id, emAtual?.cnpj]);
+  }, [emAtual?.id, emAtual?.cnpj, emAtual?.inscricao_estadual, emAtual?.rntrc, emAtual?.razao_social]);
 
   const cnpjDigitos = String(form.cnpj || '').replace(/\D/g, '');
   const cnpjValido = validarCnpj14(cnpjDigitos);
@@ -383,6 +384,55 @@ export default function DadosEmpresaPage() {
       // silencioso caso offline
     } finally {
       setBuscandoCep(false);
+    }
+  };
+
+  const handleBuscarCnpj = async (cnpjValor?: string) => {
+    const limpo = String(cnpjValor ?? form.cnpj ?? '').replace(/\D/g, '');
+    if (!validarCnpj14(limpo)) {
+      setFeedbackBanner({
+        ok: false,
+        msg: 'Digite um CNPJ válido de 14 dígitos para buscar os dados automaticamente.'
+      });
+      return;
+    }
+    setBuscandoCnpj(true);
+    setFeedbackBanner(null);
+    try {
+      const res = await api.get(`/transporte/emitentes/consultar-cnpj/${limpo}`);
+      const d = res.data?.data;
+      if (d) {
+        setForm(prev => ({
+          ...prev,
+          cnpj: formatarCnpjMask(d.cnpj || limpo),
+          razao_social: d.razao_social || prev.razao_social,
+          nome_fantasia: d.nome_fantasia || prev.nome_fantasia,
+          inscricao_estadual: d.inscricao_estadual || prev.inscricao_estadual,
+          rntrc: d.rntrc || prev.rntrc,
+          regime_tributario: String(d.regime_tributario || prev.regime_tributario || '3'),
+          cep: d.cep || prev.cep,
+          logradouro: d.logradouro || prev.logradouro,
+          numero: d.numero || prev.numero,
+          complemento: d.complemento || prev.complemento,
+          bairro: d.bairro || prev.bairro,
+          uf: (d.uf || prev.uf).toUpperCase(),
+          municipio: d.municipio || prev.municipio,
+          codigo_municipio: d.codigo_municipio || prev.codigo_municipio,
+          telefone: d.telefone || prev.telefone,
+          email: d.email || prev.email
+        }));
+        setFeedbackBanner({
+          ok: true,
+          msg: `Dados oficiais de "${d.razao_social}" carregados automaticamente! Confira e clique em Provisionar Automaticamente na Focus NFe.`
+        });
+      }
+    } catch (err: any) {
+      setFeedbackBanner({
+        ok: false,
+        msg: err.response?.data?.error || 'Não foi possível consultar o CNPJ automaticamente.'
+      });
+    } finally {
+      setBuscandoCnpj(false);
     }
   };
 
@@ -760,18 +810,30 @@ export default function DadosEmpresaPage() {
             <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1.5">
               CNPJ da Empresa *
             </label>
-            <input
-              type="text"
-              required
-              placeholder="00.000.000/0001-00"
-              value={form.cnpj}
-              onChange={e => setForm({ ...form, cnpj: formatarCnpjMask(e.target.value) })}
-              className={`w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border rounded-xl text-slate-900 dark:text-white font-mono focus:ring-2 focus:ring-brand-500 ${
-                cnpjDigitos.length > 0 && !cnpjValido
-                  ? 'border-red-400 dark:border-red-600'
-                  : 'border-slate-200 dark:border-slate-700'
-              }`}
-            />
+            <div className="flex gap-2">
+              <input
+                type="text"
+                required
+                placeholder="00.000.000/0001-00"
+                value={form.cnpj}
+                onChange={e => setForm({ ...form, cnpj: formatarCnpjMask(e.target.value) })}
+                className={`flex-1 min-w-0 px-3.5 py-2.5 bg-white dark:bg-slate-900 border rounded-xl text-slate-900 dark:text-white font-mono focus:ring-2 focus:ring-brand-500 ${
+                  cnpjDigitos.length > 0 && !cnpjValido
+                    ? 'border-red-400 dark:border-red-600'
+                    : 'border-slate-200 dark:border-slate-700'
+                }`}
+              />
+              <button
+                type="button"
+                onClick={() => handleBuscarCnpj()}
+                disabled={buscandoCnpj || !cnpjValido}
+                title="Consultar dados cadastrais, IE e endereço pelo CNPJ"
+                aria-label="Consultar dados pelo CNPJ"
+                className="px-3 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 disabled:opacity-50 transition-colors cursor-pointer shrink-0 flex items-center justify-center"
+              >
+                {buscandoCnpj ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
+              </button>
+            </div>
             {cnpjDigitos.length > 0 && !cnpjValido && (
               <p className="text-[11px] text-red-600 dark:text-red-400 mt-1 flex items-center gap-1">
                 <AlertTriangle className="w-3 h-3 shrink-0" />
