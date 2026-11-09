@@ -43,7 +43,7 @@ function Protected({ children }: { children: JSX.Element }) {
 function RequirePermission({ module, submenu, children }: { module?: string; submenu?: string; children: JSX.Element }) {
   const user = useAuthStore((s) => s.user)
   if (!user) return <Navigate to="/login" replace />
-  if (user.role === 'master' || (user.grupo_nome && user.grupo_nome.toLowerCase() === 'master')) {
+  if (user.tenant_id === '00000000-0000-0000-0000-000000000000' || user.role === 'master' || user.role === 'admin' || (user.grupo_nome && user.grupo_nome.toLowerCase() === 'master')) {
     return children
   }
   if (module && user.permissoes_menus && typeof user.permissoes_menus === 'object' && Object.keys(user.permissoes_menus).length > 0) {

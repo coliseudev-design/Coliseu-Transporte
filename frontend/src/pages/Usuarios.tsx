@@ -5,7 +5,7 @@ import api from '../services/api'
 import DataTable from '../components/DataTable'
 import {
   Shield, UserPlus, CheckCircle, XCircle, Building2, Plus, Edit2, Trash2,
-  Users as UsersIcon, Check, Ban, Search, Truck
+  Users as UsersIcon, Check, Ban, Search, Truck, KeyRound, Eye, EyeOff, RefreshCw, Copy
 } from 'lucide-react'
 import { useAuthStore } from '../store/authStore'
 import { useBranch } from '../contexts/BranchContext'
@@ -30,6 +30,7 @@ interface UserRow {
   grupo_nome?: string
   permissoes_menus?: any
   permissoes_acoes?: any
+  precisa_alterar_senha?: boolean
 }
 
 const AVAILABLE_MODULES = [
@@ -89,6 +90,16 @@ export default function Usuarios() {
   const [password, setPassword] = useState('')
   const [companyKey, setCompanyKey] = useState('')
   const [errorMsg, setErrorMsg] = useState('')
+
+  const [passwordModalOpen, setPasswordModalOpen] = useState(false)
+  const [passwordTargetUser, setPasswordTargetUser] = useState<UserRow | null>(null)
+  const [newUserPassword, setNewUserPassword] = useState('')
+  const [confirmUserPassword, setConfirmUserPassword] = useState('')
+  const [showNewPassword, setShowNewPassword] = useState(false)
+  const [forcarTrocaSenha, setForcarTrocaSenha] = useState(false)
+  const [copiedSenha, setCopiedSenha] = useState(false)
+  const [passwordError, setPasswordError] = useState('')
+  const [passwordSuccess, setPasswordSuccess] = useState('')
 
   const { data: users, isLoading } = useQuery<UserRow[]>({
     queryKey: ['usuarios'],
@@ -197,6 +208,96 @@ export default function Usuarios() {
     setFilialModalOpen(true)
   }
 
+  const resetUserPassword = useMutation({
+    mutationFn: async ({
+      id,
+      novaSenha,
+      forcarTroca
+    }: {
+      id: number
+      novaSenha: string
+      forcarTroca: boolean
+    }) => {
+      const res = await api.put(`/usuarios/${id}/senha`, { novaSenha, forcarTroca })
+      return res.data
+    },
+    onSuccess: () => {
+      setPasswordError('')
+      setPasswordSuccess('Senha alterada com sucesso!')
+      queryClient.invalidateQueries({ queryKey: ['usuarios'] })
+      setTimeout(() => {
+        setPasswordModalOpen(false)
+        setPasswordTargetUser(null)
+        setNewUserPassword('')
+        setConfirmUserPassword('')
+        setPasswordSuccess('')
+      }, 1100)
+    },
+    onError: (err: any) => {
+      setPasswordError(err.response?.data?.error || 'Erro ao redefinir a senha do usuário.')
+    }
+  })
+
+  const openPasswordModal = (userRow: UserRow) => {
+    setPasswordTargetUser(userRow)
+    setNewUserPassword('')
+    setConfirmUserPassword('')
+    setShowNewPassword(false)
+    setForcarTrocaSenha(false)
+    setCopiedSenha(false)
+    setPasswordError('')
+    setPasswordSuccess('')
+    setPasswordModalOpen(true)
+  }
+
+  const handleGeneratePassword = () => {
+    const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789@#'
+    const bytes = new Uint32Array(10)
+    window.crypto.getRandomValues(bytes)
+    const generated = Array.from(bytes, (b) => alphabet[b % alphabet.length]).join('')
+    setNewUserPassword(generated)
+    setConfirmUserPassword(generated)
+    setShowNewPassword(true)
+    setCopiedSenha(false)
+    setPasswordError('')
+  }
+
+  const handleCopyGeneratedPassword = async () => {
+    if (!newUserPassword) return
+    try {
+      await navigator.clipboard.writeText(newUserPassword)
+      setCopiedSenha(true)
+      setTimeout(() => setCopiedSenha(false), 2000)
+    } catch {
+      /* ignore clipboard error */
+    }
+  }
+
+  const handleSavePassword = (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!passwordTargetUser) return
+    setPasswordError('')
+    setPasswordSuccess('')
+
+    const cleanPwd = newUserPassword.trim()
+    const cleanConfirm = confirmUserPassword.trim()
+
+    if (cleanPwd.length < 6) {
+      setPasswordError('A nova senha deve possuir no mínimo 6 caracteres.')
+      return
+    }
+    if (cleanPwd !== cleanConfirm) {
+      setPasswordError('A nova senha e a confirmação não coincidem.')
+      return
+    }
+
+    resetUserPassword.mutate({
+      id: passwordTargetUser.id,
+      novaSenha: cleanPwd,
+      forcarTroca: forcarTrocaSenha
+    })
+  }
+
   const togglePermission = (id: string) => {
     setSelectedPermissions((prev) =>
       prev.includes(id) ? prev.filter((p) => p !== id) : [...prev, id]
@@ -285,6 +386,14 @@ export default function Usuarios() {
     return ''
   }
 
+  const usuariosEscopados = useMemo(
+    () =>
+      (users || []).filter((u) =>
+        isCurrentMasterTenant ? true : u.tenant_id === currentUser?.tenant_id
+      ),
+    [users, isCurrentMasterTenant, currentUser?.tenant_id]
+  )
+
   return (
     <div className="space-y-6 sm:space-y-8 animate-fade-in">
       {/* CABEÇALHO */}
@@ -294,7 +403,11 @@ export default function Usuarios() {
             Gestão de Usuários & Perfis de Acesso
           </h2>
           <p className="text-text-secondary text-sm">
-            Controle de segurança, grupos de acesso (RBAC) e filiais autorizadas no Coliseu Transporte.
+            {isCurrentMasterTenant
+              ? 'Controle global de segurança, empresas vinculadas, grupos RBAC e credenciais.'
+              : `Controle de usuários, grupos de acesso (RBAC) e senhas da empresa ${
+                  currentUser?.empresa_nome || 'vinculada'
+                }.`}
           </p>
         </div>
 
@@ -332,7 +445,7 @@ export default function Usuarios() {
               : 'border-transparent text-text-secondary hover:text-text-primary'
           }`}
         >
-          <UsersIcon size={16} /> Usuários do Sistema ({users?.length || 0})
+          <UsersIcon size={16} /> Usuários do Sistema ({usuariosEscopados.length})
         </button>
         <button
           onClick={() => setActiveSection('grupos')}
@@ -349,10 +462,10 @@ export default function Usuarios() {
       {/* SEÇÃO 1: USUÁRIOS */}
       {activeSection === 'usuarios' && (() => {
         const termo = buscaFiltro.trim().toLowerCase()
-        const totalTransporte = (users || []).filter(
+        const totalTransporte = usuariosEscopados.filter(
           (u) => u.modulo_transporte_ativo || u.tenant_id === MASTER_TENANT_ID
         ).length
-        const usuariosFiltrados = (users || []).filter((u) => {
+        const usuariosFiltrados = usuariosEscopados.filter((u) => {
           if (isCurrentMasterTenant && apenasTransporte && !u.modulo_transporte_ativo && u.tenant_id !== MASTER_TENANT_ID) {
             return false
           }
@@ -518,13 +631,20 @@ export default function Usuarios() {
                 key: 'ativo',
                 label: 'STATUS',
                 render: (r: UserRow) => (
-                  <span
-                    className={`text-xs font-bold px-2.5 py-1 rounded-full ${
-                      r.ativo ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
-                    }`}
-                  >
-                    {r.ativo ? 'Ativo' : 'Inativo'}
-                  </span>
+                  <div className="flex flex-col items-start gap-1">
+                    <span
+                      className={`text-xs font-bold px-2.5 py-1 rounded-full ${
+                        r.ativo ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
+                      }`}
+                    >
+                      {r.ativo ? 'Ativo' : 'Inativo'}
+                    </span>
+                    {r.precisa_alterar_senha && (
+                      <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300">
+                        Troca no login
+                      </span>
+                    )}
+                  </div>
                 )
               },
               {
@@ -549,6 +669,14 @@ export default function Usuarios() {
                         <span>Filiais</span>
                       </button>
                     )}
+                    <button
+                      onClick={() => openPasswordModal(r)}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium text-amber-600 hover:bg-amber-50 dark:text-amber-400 dark:hover:bg-amber-950/40 transition-colors cursor-pointer"
+                      title="Alterar / Redefinir Senha do Usuário"
+                    >
+                      <KeyRound size={16} />
+                      <span>Senha</span>
+                    </button>
                     <button
                       onClick={() => toggleStatus.mutate({ id: r.id, ativo: !r.ativo })}
                       disabled={toggleStatus.isPending}
@@ -954,6 +1082,160 @@ export default function Usuarios() {
           queryClient.invalidateQueries({ queryKey: ['usuarios'] })
         }}
       />
+
+      {/* Modal de Redefinição de Senha do Usuário */}
+      {passwordModalOpen && passwordTargetUser && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-bg-primary rounded-2xl shadow-xl border border-border w-full max-w-md overflow-hidden animate-fade-in">
+            <div className="p-5 border-b border-border flex justify-between items-center bg-bg-secondary/50">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-xl bg-amber-500/15 text-amber-600 dark:text-amber-400">
+                  <KeyRound size={18} />
+                </div>
+                <div>
+                  <h3 className="font-semibold text-base text-text-primary leading-tight">
+                    Alterar Senha do Usuário
+                  </h3>
+                  <p className="text-xs text-text-secondary mt-0.5">
+                    Redefinição administrativa direta sem senha anterior
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                aria-label="Fechar modal de senha"
+                onClick={() => setPasswordModalOpen(false)}
+                className="text-text-secondary hover:text-text-primary cursor-pointer"
+              >
+                <XCircle size={22} />
+              </button>
+            </div>
+
+            <form onSubmit={handleSavePassword} className="p-6 space-y-4">
+              {/* Resumo do usuário alvo */}
+              <div className="p-3.5 rounded-xl bg-bg-secondary/60 border border-border space-y-1">
+                <div className="text-sm font-bold text-text-primary">{passwordTargetUser.nome}</div>
+                <div className="text-xs text-text-secondary">{passwordTargetUser.email}</div>
+                <div className="text-[11px] font-semibold text-sky-700 dark:text-sky-400 pt-0.5">
+                  Empresa:{' '}
+                  {passwordTargetUser.tenant_id === MASTER_TENANT_ID
+                    ? 'Coliseu Sistemas (Master)'
+                    : passwordTargetUser.empresa_nome || passwordTargetUser.tenant_id}
+                </div>
+              </div>
+
+              {passwordError && (
+                <div className="p-3 rounded-xl bg-red-50 text-red-700 dark:bg-red-950/50 dark:text-red-300 text-xs font-medium border border-red-200 dark:border-red-900">
+                  {passwordError}
+                </div>
+              )}
+
+              {passwordSuccess && (
+                <div className="p-3 rounded-xl bg-emerald-50 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-300 text-xs font-semibold border border-emerald-200 dark:border-emerald-900 flex items-center gap-2">
+                  <CheckCircle size={16} />
+                  <span>{passwordSuccess}</span>
+                </div>
+              )}
+
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label htmlFor="admin-nova-senha" className="block text-xs font-semibold text-text-primary">
+                    Nova Senha <span className="text-red-500">*</span>
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleGeneratePassword}
+                      className="inline-flex items-center gap-1 text-[11px] font-bold text-sky-600 hover:text-sky-700 dark:text-sky-400 cursor-pointer"
+                    >
+                      <RefreshCw size={12} />
+                      Gerar senha segura
+                    </button>
+                    {newUserPassword && (
+                      <button
+                        type="button"
+                        onClick={handleCopyGeneratedPassword}
+                        className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-600 hover:text-emerald-700 dark:text-emerald-400 cursor-pointer"
+                      >
+                        <Copy size={12} />
+                        {copiedSenha ? 'Copiada!' : 'Copiar'}
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <div className="relative">
+                  <input
+                    id="admin-nova-senha"
+                    type={showNewPassword ? 'text' : 'password'}
+                    required
+                    minLength={6}
+                    placeholder="Mínimo de 6 caracteres"
+                    value={newUserPassword}
+                    onChange={(e) => setNewUserPassword(e.target.value)}
+                    className="w-full px-3.5 py-2.5 pr-10 border border-border rounded-xl focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none bg-bg-primary text-text-primary text-sm"
+                  />
+                  <button
+                    type="button"
+                    aria-label="Mostrar ou ocultar nova senha"
+                    onClick={() => setShowNewPassword((v) => !v)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-text-secondary hover:text-text-primary cursor-pointer"
+                  >
+                    {showNewPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label htmlFor="admin-confirmar-senha" className="block text-xs font-semibold text-text-primary mb-1">
+                  Confirmar Nova Senha <span className="text-red-500">*</span>
+                </label>
+                <input
+                  id="admin-confirmar-senha"
+                  type={showNewPassword ? 'text' : 'password'}
+                  required
+                  minLength={6}
+                  placeholder="Repita a nova senha"
+                  value={confirmUserPassword}
+                  onChange={(e) => setConfirmUserPassword(e.target.value)}
+                  className="w-full px-3.5 py-2.5 border border-border rounded-xl focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none bg-bg-primary text-text-primary text-sm"
+                />
+              </div>
+
+              <label className="flex items-start gap-2.5 p-3 rounded-xl border border-border bg-bg-secondary/30 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={forcarTrocaSenha}
+                  onChange={(e) => setForcarTrocaSenha(e.target.checked)}
+                  className="w-4 h-4 mt-0.5 rounded border-border text-brand-500 focus:ring-brand-500/20"
+                />
+                <span className="text-xs text-text-secondary leading-relaxed">
+                  <strong className="text-text-primary block">Exigir troca no próximo login</strong>
+                  Solicita que o usuário crie uma nova senha pessoal assim que entrar no sistema.
+                </span>
+              </label>
+
+              <div className="pt-2 flex gap-3">
+                <button
+                  type="button"
+                  onClick={() => setPasswordModalOpen(false)}
+                  disabled={resetUserPassword.isPending}
+                  className="flex-1 px-4 py-2.5 rounded-xl border border-border text-text-secondary text-sm font-medium hover:bg-bg-secondary transition-colors cursor-pointer"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={resetUserPassword.isPending || Boolean(passwordSuccess)}
+                  className="flex-1 px-4 py-2.5 rounded-xl bg-brand-500 hover:bg-brand-600 text-white text-sm font-semibold transition-colors disabled:opacity-50 flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <KeyRound size={15} />
+                  <span>{resetUserPassword.isPending ? 'Salvando...' : 'Salvar Nova Senha'}</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

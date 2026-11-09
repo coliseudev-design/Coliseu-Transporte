@@ -16,6 +16,8 @@ interface Props {
   onClose: () => void
   /** Abre o menu no mobile/tablet */
   onOpenMobile?: () => void
+  /** Abre o modal para o usuário logado alterar a própria senha */
+  onOpenAlterarSenha?: () => void
 }
 
 interface MenuItemDef {
@@ -106,7 +108,7 @@ const GRUPOS: MenuGroup[] = [
   }
 ]
 
-export default function Sidebar({ onClose, onOpenMobile }: Props) {
+export default function Sidebar({ onClose, onOpenMobile, onOpenAlterarSenha }: Props) {
   const user = useAuthStore((s) => s.user)
   const logout = useAuthStore((s) => s.logout)
   const [abertos, setAbertos] = useState<Record<string, boolean>>({
@@ -129,6 +131,7 @@ export default function Sidebar({ onClose, onOpenMobile }: Props) {
   const isUnrestricted =
     user?.tenant_id === MASTER_TENANT_ID ||
     String(user?.role || '').toLowerCase() === 'master' ||
+    String(user?.role || '').toLowerCase() === 'admin' ||
     String(user?.grupo_nome || '').trim().toLowerCase() === 'master'
 
   const pm = user?.permissoes_menus || null
@@ -339,6 +342,16 @@ export default function Sidebar({ onClose, onOpenMobile }: Props) {
               </p>
               <p className="text-[10px] text-slate-400 truncate">{user?.email}</p>
             </div>
+            {onOpenAlterarSenha && (
+              <button
+                onClick={onOpenAlterarSenha}
+                title="Alterar minha senha"
+                aria-label="Alterar minha senha"
+                className="p-2 rounded-xl text-slate-400 hover:bg-amber-50 hover:text-amber-600 dark:hover:bg-amber-950/50 dark:hover:text-amber-400 transition-colors shrink-0 cursor-pointer"
+              >
+                <KeyRound className="w-4 h-4" />
+              </button>
+            )}
             <button
               onClick={async () => {
                 await logout()

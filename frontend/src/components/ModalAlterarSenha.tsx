@@ -125,13 +125,13 @@ export default function ModalAlterarSenha({
         {/* CORPO DO MODAL */}
         <form onSubmit={handleSubmit} className="p-6 space-y-4 text-left">
           
-          {/* BANNER SE FORÇADO POR SENHA PADRÃO 123456 */}
+          {/* BANNER SE FORÇADO POR SENHA PROVISÓRIA OU PADRÃO */}
           {isForced && (
             <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-3.5 flex items-start gap-3 text-amber-200 text-xs leading-relaxed">
               <ShieldAlert size={20} className="text-amber-400 shrink-0 mt-0.5" />
               <div>
                 <span className="font-bold block text-amber-300 mb-0.5">Segurança da Conta</span>
-                Você entrou utilizando a senha padrão <strong className="font-mono bg-amber-950/60 px-1 py-0.5 rounded text-amber-300">123456</strong>. É necessário definir uma nova senha segura para prosseguir.
+                Você entrou com uma senha provisória definida pelo administrador. Defina uma nova senha pessoal segura para continuar.
               </div>
             </div>
           )}

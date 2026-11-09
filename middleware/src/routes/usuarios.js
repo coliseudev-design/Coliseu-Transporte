@@ -6,10 +6,20 @@ const bcrypt = require('bcryptjs');
 const db = require('../db/postgres');
 const config = require('../config/env');
 const logger = require('../config/logger');
-const { requireAdmin, invalidateUserAuthCache, isValidUuid } = require('../middleware/auth');
+const { MASTER_TENANT_ID, requireAdmin, invalidateUserAuthCache, isValidUuid } = require('../middleware/auth');
 
-// Todas as rotas de gestão de usuários exigem perfil Administrador
+// Todas as rotas de gestão de usuários exigem perfil Administrador (Master global ou Master/Admin da própria empresa)
 router.use(requireAdmin);
+
+let usuariosSchemaReady = false;
+async function ensureUsuariosSchema() {
+    if (usuariosSchemaReady) return;
+    await db.query(`
+        ALTER TABLE dash_usuarios
+        ADD COLUMN IF NOT EXISTS precisa_alterar_senha BOOLEAN NOT NULL DEFAULT false
+    `);
+    usuariosSchemaReady = true;
+}
 
 /**
  * GET /api/usuarios
@@ -17,11 +27,12 @@ router.use(requireAdmin);
  */
 router.get('/', async (req, res) => {
     try {
+        await ensureUsuariosSchema();
         const tenantId = req.tenant.id;
         const { ensureGruposTableAndSeeds } = require('./gruposAcesso');
         await ensureGruposTableAndSeeds(tenantId);
 
-        if (tenantId === '00000000-0000-0000-0000-000000000000') {
+        if (tenantId === MASTER_TENANT_ID) {
             const { rows: tenantsRows } = await db.query('SELECT DISTINCT tenant_id FROM dash_usuarios');
             for (const row of tenantsRows) {
                 if (row.tenant_id && row.tenant_id !== tenantId) {
@@ -32,6 +43,7 @@ router.get('/', async (req, res) => {
 
         let query = `
             SELECT u.id, u.tenant_id, u.email, u.nome, u.role, u.ativo, u.created_at, u.permissions, u.layout_version, u.filial_acesso, u.grupo_id,
+                   COALESCE(u.precisa_alterar_senha, false) AS precisa_alterar_senha,
                    g.nome AS grupo_nome, g.permissoes_menus, g.permissoes_acoes,
                    em.empresa_nome
             FROM dash_usuarios u
@@ -48,7 +60,7 @@ router.get('/', async (req, res) => {
         `;
         let params = [];
         
-        if (tenantId !== '00000000-0000-0000-0000-000000000000') {
+        if (tenantId !== MASTER_TENANT_ID) {
             query += ` WHERE u.tenant_id = $1`;
             params.push(tenantId);
         }
@@ -426,6 +438,90 @@ router.put('/:id/grupo', async (req, res) => {
     } catch (err) {
         logger.error('[Usuarios] Erro ao alterar grupo_id', err);
         res.status(500).json({ error: 'Erro interno ao alterar grupo de acesso.' });
+    }
+});
+
+/**
+ * PUT /api/usuarios/:id/senha
+ * Redefine a senha de um usuário pelo Super Admin Master (qualquer empresa)
+ * ou pelo Master / Administrador da própria empresa (restrito ao seu tenant_id).
+ */
+router.put('/:id/senha', async (req, res) => {
+    try {
+        await ensureUsuariosSchema();
+        const targetId = parseInt(req.params.id, 10);
+        const { novaSenha, forcarTroca } = req.body || {};
+
+        if (!targetId || Number.isNaN(targetId)) {
+            return res.status(400).json({ error: 'ID de usuário inválido.' });
+        }
+
+        if (typeof novaSenha !== 'string' || novaSenha.trim().length < 6) {
+            return res.status(400).json({ error: 'A nova senha deve possuir no mínimo 6 caracteres.' });
+        }
+
+        const cleanSenha = novaSenha.trim();
+        if (cleanSenha.length > 128) {
+            return res.status(400).json({ error: 'A nova senha excede o tamanho máximo permitido (128 caracteres).' });
+        }
+
+        const isPlatformMaster = req.tenant.id === MASTER_TENANT_ID;
+        const targetSql = isPlatformMaster
+            ? `SELECT id, tenant_id, email, nome, role FROM dash_usuarios WHERE id = $1 LIMIT 1`
+            : `SELECT id, tenant_id, email, nome, role FROM dash_usuarios WHERE id = $1 AND tenant_id = $2 LIMIT 1`;
+        const targetParams = isPlatformMaster ? [targetId] : [targetId, req.tenant.id];
+
+        const targetRes = await db.query(targetSql, targetParams);
+        if (targetRes.rowCount === 0) {
+            return res.status(404).json({
+                error: 'Usuário não encontrado na sua empresa ou sem permissão para alterá-lo.'
+            });
+        }
+
+        const targetUser = targetRes.rows[0];
+
+        if (
+            !isPlatformMaster &&
+            String(targetUser.role || '').toLowerCase() === 'master' &&
+            String(targetUser.id) !== String(req.user.id)
+        ) {
+            return res.status(403).json({
+                error: 'Apenas o Super Admin Master da plataforma pode redefinir credenciais de contas Master globais.'
+            });
+        }
+
+        const salt = await bcrypt.genSalt(10);
+        const senhaHash = await bcrypt.hash(cleanSenha, salt);
+        const finalForcarTroca = cleanSenha === '123456' ? true : Boolean(forcarTroca);
+
+        const updateRes = await db.query(
+            `UPDATE dash_usuarios
+             SET senha_hash = $1,
+                 precisa_alterar_senha = $2
+             WHERE id = $3 AND tenant_id = $4
+             RETURNING id, tenant_id, email, nome, precisa_alterar_senha`,
+            [senhaHash, finalForcarTroca, targetUser.id, targetUser.tenant_id]
+        );
+
+        invalidateUserAuthCache(targetUser.id);
+        logger.info('[Usuarios] Senha redefinida via Gestão de Usuários', {
+            targetId: targetUser.id,
+            targetEmail: targetUser.email,
+            targetTenant: targetUser.tenant_id,
+            forcarTroca: finalForcarTroca,
+            byUserId: req.user?.id,
+            byEmail: req.user?.email,
+            byTenant: req.tenant?.id
+        });
+
+        return res.json({
+            success: true,
+            message: 'Senha redefinida com sucesso!',
+            user: updateRes.rows[0]
+        });
+    } catch (err) {
+        logger.error('[Usuarios] Erro ao redefinir senha', err);
+        return res.status(500).json({ error: 'Erro interno ao redefinir a senha do usuário.' });
     }
 });
 
