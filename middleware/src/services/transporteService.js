@@ -51,6 +51,23 @@ function normalizarRntrc8(valor) {
     : d.slice(-8);
 }
 
+/**
+ * Formata data/hora atual no padrão ISO-8601 exigido pela SEFAZ / Focus NFe (sem milissegundos e com offset da UF).
+ */
+function formatarDataHoraSefaz(uf = 'MS') {
+  const ufUpper = String(uf || 'MS').toUpperCase().trim();
+  const offsetHours =
+    ufUpper === 'AC'
+      ? -5
+      : ['MS', 'MT', 'AM', 'RO', 'RR'].includes(ufUpper)
+      ? -4
+      : -3;
+  const offsetStr = `${offsetHours < 0 ? '-' : '+'}${String(Math.abs(offsetHours)).padStart(2, '0')}:00`;
+  // Subtrai 30 segundos para evitar rejeição SEFAZ por micro-adiantamento de relógio entre servidores
+  const adjusted = new Date(Date.now() - 30 * 1000 + offsetHours * 3600 * 1000);
+  return `${adjusted.toISOString().slice(0, 19)}${offsetStr}`;
+}
+
 const KNOWN_ANTT_FISCAL_REGISTRY = {
   '03272053000150': {
     cnpj: '03272053000150',
@@ -628,14 +645,13 @@ class TransporteService {
    * Formata participante para as chaves esperadas pela Focus NFe v2:
    * sufixo: 'remetente' | 'destinatario' | 'expedidor' | 'recebedor' | 'tomador'
    */
-  static _mapearParticipanteFocus(part, sufixo, ambiente = 'homologacao') {
+  static _mapearParticipanteFocus(part, sufixo, ambiente = 'homologacao', fallbackFone = '') {
     const doc = digitsOnly(part.documento);
     const isCpf = doc.length === 11;
     const isHomolog = ambiente !== 'producao';
-    // Regra SEFAZ CT-e em homologação: razão social de participantes pode exigir literal de homologação ou aceita o nome real (Focus NFe ajusta automaticamente, mas enviamos limpo)
     const nomeFinal = isHomolog
       ? 'CTE EMITIDO EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL'
-      : part.razao_social;
+      : String(part.razao_social || 'PARTICIPANTE').slice(0, 60);
 
     const out = {};
     if (isCpf) {
@@ -644,9 +660,9 @@ class TransporteService {
       out[`cnpj_${sufixo}`] = doc;
     }
 
-    if (part.inscricao_estadual && part.inscricao_estadual.toUpperCase() !== 'ISENTO') {
+    if (!isCpf && part.inscricao_estadual && part.inscricao_estadual.toUpperCase() !== 'ISENTO') {
       out[`inscricao_estadual_${sufixo}`] = digitsOnly(part.inscricao_estadual);
-    } else if (part.inscricao_estadual && part.inscricao_estadual.toUpperCase() === 'ISENTO') {
+    } else if (!isCpf && part.inscricao_estadual && part.inscricao_estadual.toUpperCase() === 'ISENTO') {
       out[`inscricao_estadual_${sufixo}`] = 'ISENTO';
     }
 
@@ -654,32 +670,30 @@ class TransporteService {
     if (sufixo === 'remetente' || sufixo === 'tomador') {
       out[`nome_fantasia_${sufixo}`] = isHomolog
         ? nomeFinal
-        : part.nome_fantasia || part.razao_social;
+        : String(part.nome_fantasia || part.razao_social || nomeFinal).slice(0, 60);
     }
-    out[`logradouro_${sufixo}`] = part.logradouro || 'RUA PRINCIPAL';
-    out[`numero_${sufixo}`] = part.numero || 'SN';
+    out[`logradouro_${sufixo}`] = String(part.logradouro || 'RUA PRINCIPAL').slice(0, 60);
+    out[`numero_${sufixo}`] = String(part.numero || 'SN').slice(0, 60);
     if (part.complemento) {
-      out[`complemento_${sufixo}`] = part.complemento;
+      out[`complemento_${sufixo}`] = String(part.complemento).slice(0, 60);
     }
-    out[`bairro_${sufixo}`] = part.bairro || 'CENTRO';
-    out[`codigo_municipio_${sufixo}`] = part.codigo_municipio;
-    out[`municipio_${sufixo}`] = part.municipio;
+    out[`bairro_${sufixo}`] = String(part.bairro || 'CENTRO').slice(0, 60);
+    out[`codigo_municipio_${sufixo}`] = String(part.codigo_municipio || '');
+    out[`municipio_${sufixo}`] = String(part.municipio || '');
     out[`cep_${sufixo}`] = digitsOnly(part.cep) || '79004000';
-    out[`uf_${sufixo}`] = part.uf;
+    out[`uf_${sufixo}`] = String(part.uf || 'MS').toUpperCase();
     out[`codigo_pais_${sufixo}`] = '1058';
     out[`pais_${sufixo}`] = 'BRASIL';
 
-    if (part.telefone && part.telefone.length >= 8) {
-      out[`telefone_${sufixo}`] = part.telefone;
+    const foneFinal = digitsOnly(part.telefone || fallbackFone || '');
+    if (foneFinal.length >= 6) {
+      out[`telefone_${sufixo}`] = foneFinal.slice(0, 14);
     }
-    if (part.email) {
-      out[`email_${sufixo}`] = part.email;
+    if (part.email && String(part.email).includes('@')) {
+      out[`email_${sufixo}`] = String(part.email).trim().slice(0, 60);
     }
-    if (sufixo === 'destinatario') {
-      out.indicador_inscricao_estadual_destinatario = part.indicador_ie || '9';
-      if (part.suframa) {
-        out.suframa_destinatario = part.suframa;
-      }
+    if (sufixo === 'destinatario' && part.suframa) {
+      out.inscricao_suframa_destinatario = digitsOnly(part.suframa).slice(0, 9);
     }
     return out;
   }
@@ -831,13 +845,11 @@ class TransporteService {
 
     const aliquotaIcms = parseFloat(cte.aliquota_icms ?? emitente.aliquota_icms_padrao ?? 0);
     const valorIcms = parseFloat(cte.valor_icms || (baseCalculo * aliquotaIcms) / 100);
-    const aliquotaIbs = parseFloat(cte.aliquota_ibs || 0);
-    const aliquotaCbs = parseFloat(cte.aliquota_cbs || 0);
 
     const icmsFields = isSimples
       ? {
-          icms_situacao_tributaria: 'SN',
-          icms_simples_nacional: '1',
+          icms_situacao_tributaria: '90',
+          icms_indicador_simples_nacional: '1',
         }
       : {
           icms_situacao_tributaria: ['00', '20', '40', '41', '51', '60', '90'].includes(
@@ -850,11 +862,18 @@ class TransporteService {
           icms_valor: valorIcms.toFixed(2),
         };
 
-    if (Number(cte.aliquota_fcp || 0) > 0 || Number(cte.part_fcp_destino || 0) > 0) {
-      icmsFields.icms_uf_fim_base_calculo = baseCalculo.toFixed(2);
-      icmsFields.icms_uf_fim_aliquota_fcp = parseFloat(cte.aliquota_fcp || 0).toFixed(2);
-      icmsFields.icms_uf_fim_aliquota_interna = parseFloat(cte.part_fcp_destino || 0).toFixed(2);
-      icmsFields.icms_uf_fim_aliquota_interestadual = aliquotaIcms.toFixed(2);
+    // DIFAL somente quando interestadual e tomador não contribuinte (ou explicitamente informado com FCP > 0)
+    if (
+      ibgeInicio.uf !== ibgeFim.uf &&
+      Number(cte.aliquota_fcp || 0) > 0
+    ) {
+      icmsFields.icms_base_calculo_uf_fim = baseCalculo.toFixed(2);
+      icmsFields.icms_percentual_fcp_uf_fim = parseFloat(cte.aliquota_fcp || 0).toFixed(2);
+      icmsFields.icms_aliquota_interna_uf_fim = parseFloat(cte.part_fcp_destino || 0).toFixed(2);
+      icmsFields.icms_aliquota_interestadual_uf_fim = aliquotaIcms.toFixed(2);
+      icmsFields.icms_valor_total_fcp_uf_fim = ((baseCalculo * parseFloat(cte.aliquota_fcp || 0)) / 100).toFixed(2);
+      icmsFields.icms_valor_partilha_uf_fim = '0.00';
+      icmsFields.icms_valor_partilha_uf_inicio = '0.00';
     }
 
     // NF-es vinculadas (tabela dash_cte_cargas + documentos_json do wizard)
@@ -869,9 +888,15 @@ class TransporteService {
         if (ch.length === 44) chavesNfeSet.add(ch);
       }
     }
-    const nfesPayload = Array.from(chavesNfeSet).map((chave_nfe) => ({ chave_nfe }));
+    const dataPrevistaLimpa = cte.data_prevista_entrega
+      ? String(cte.data_prevista_entrega).slice(0, 10)
+      : null;
+    const nfesPayload = Array.from(chavesNfeSet).map((chave_nfe) => ({
+      chave_nfe,
+      ...(dataPrevistaLimpa ? { data_prevista: dataPrevistaLimpa } : {}),
+    }));
 
-    // Quantidades e Peso Bruto
+    // Quantidades e Peso Bruto (Decimal[11.4] conforme schema Focus NFe v2)
     const pesoCargas =
       parseFloat(cte.peso_bruto || 0) ||
       cargas.reduce((acc, c) => acc + parseFloat(c.peso_nfe || c.peso_bruto || 0), 0) ||
@@ -894,12 +919,12 @@ class TransporteService {
             {
               codigo_unidade_medida: cte.unidade_medida || '01',
               tipo_medida: 'PESO BRUTO',
-              quantidade: pesoCargas.toFixed(3),
+              quantidade: pesoCargas.toFixed(4),
             },
             {
               codigo_unidade_medida: '03',
               tipo_medida: 'VOLUMES',
-              quantidade: volumesCargas.toFixed(3),
+              quantidade: volumesCargas.toFixed(4),
             },
           ];
 
@@ -908,39 +933,41 @@ class TransporteService {
       String(cte.modelo_cte || '').toLowerCase() === 'cteos' ||
       String(cte.modelo_cte || '') === '67';
 
+    const foneEmitenteFallback = digitsOnly(emitente.telefone) || '6734164605';
+    const retiraFlag = cte.retirar_mercadoria === true || cte.retirar_mercadoria === '0' ? '0' : '1';
+
     const payload = {
-      // Identificação
+      // Identificação (conforme ConhecimentoTransporteXML da Focus NFe v2)
+      cfop: digitsOnly(cte.cfop || emitente.cfop_padrao_cte || '5353') || '5353',
       natureza_operacao: (
         cte.natureza_operacao ||
         emitente.natureza_padrao_cte ||
         'PRESTACAO DE SERVICO DE TRANSPORTE'
       ).slice(0, 60),
-      cfop: digitsOnly(cte.cfop || emitente.cfop_padrao_cte || '5353') || '5353',
+      data_emissao: formatarDataHoraSefaz(emitente.uf || ibgeEnvio.uf),
       tipo_documento: finalidadeCte,
       modal: modalCodigo,
       tipo_servico: isCteOs ? (tipoServico === '0' ? '6' : tipoServico) : tipoServico,
-      finalidade_cte: finalidadeCte,
-      forma_emissao: '1',
-      data_emissao: new Date().toISOString(),
-      ...(cte.serie || emitente.serie_cte ? { serie: String(cte.serie || emitente.serie_cte) } : {}),
-      ...(cte.numero ? { numero: Number(cte.numero) } : {}),
+      ...(Number(cte.numero) > 0 && (cte.serie || emitente.serie_cte)
+        ? { serie: Number(cte.serie || emitente.serie_cte), numero: Number(cte.numero) }
+        : {}),
       ...(cte.modelo_cte === 'globalizado' ? { indicador_globalizado: '1' } : {}),
 
       // Emitente
       cnpj_emitente: digitsOnly(emitente.cnpj),
       inscricao_estadual_emitente: digitsOnly(emitente.inscricao_estadual),
-      nome_emitente: emitente.razao_social,
-      nome_fantasia_emitente: emitente.nome_fantasia || emitente.razao_social,
-      logradouro_emitente: emitente.logradouro || 'RUA PRINCIPAL',
-      numero_emitente: emitente.numero || 'SN',
-      ...(emitente.complemento ? { complemento_emitente: emitente.complemento } : {}),
-      bairro_emitente: emitente.bairro || 'CENTRO',
+      nome_emitente: String(emitente.razao_social || '').slice(0, 60),
+      nome_fantasia_emitente: String(emitente.nome_fantasia || emitente.razao_social || '').slice(0, 60),
+      logradouro_emitente: String(emitente.logradouro || 'RUA PRINCIPAL').slice(0, 60),
+      numero_emitente: String(emitente.numero || 'SN').slice(0, 60),
+      ...(emitente.complemento ? { complemento_emitente: String(emitente.complemento).slice(0, 60) } : {}),
+      bairro_emitente: String(emitente.bairro || 'CENTRO').slice(0, 60),
       codigo_municipio_emitente: emitente.codigo_municipio,
       municipio_emitente: emitente.municipio,
       cep_emitente: digitsOnly(emitente.cep) || '79004000',
       uf_emitente: emitente.uf,
-      ...(emitente.telefone ? { telefone_emitente: digitsOnly(emitente.telefone) } : {}),
-      regime_tributario_emitente: String(emitente.regime_tributario || '1'),
+      telefone_emitente: foneEmitenteFallback,
+      regime_tributario_emitente: String(emitente.regime_tributario || '3'),
 
       // Percurso
       uf_envio: ibgeEnvio.uf,
@@ -953,23 +980,39 @@ class TransporteService {
       municipio_fim: ibgeFim.nome,
       uf_fim: ibgeFim.uf,
 
-      // Retirada
-      retirar_mercadoria:
-        cte.retirar_mercadoria === false || cte.retirar_mercadoria === '0' ? '0' : '1',
-      ...(cte.retirada_descricao ? { detalhes_retirada: cte.retirada_descricao } : {}),
+      // Retirada (0 = Sim, 1 = Não)
+      retirar_mercadoria: retiraFlag,
+      ...(retiraFlag === '0' && cte.retirada_descricao
+        ? { detalhes_retirar: String(cte.retirada_descricao).slice(0, 160) }
+        : {}),
 
       // Participantes (CT-e Modelo 57)
       ...(!isCteOs
         ? {
             tomador: codigoTomador,
             indicador_inscricao_estadual_tomador:
-              codigoTomador === '0' ? remetente.indicador_ie || '9' : destinatario.indicador_ie || '9',
-            ...this._mapearParticipanteFocus(remetente, 'remetente', emitente.focus_ambiente),
-            ...this._mapearParticipanteFocus(destinatario, 'destinatario', emitente.focus_ambiente),
+              codigoTomador === '0' ? remetente.indicador_ie || '1' : destinatario.indicador_ie || '9',
+            ...this._mapearParticipanteFocus(
+              remetente,
+              'remetente',
+              emitente.focus_ambiente,
+              foneEmitenteFallback
+            ),
+            ...this._mapearParticipanteFocus(
+              destinatario,
+              'destinatario',
+              emitente.focus_ambiente,
+              foneEmitenteFallback
+            ),
           }
         : {
             // CT-e OS (Modelo 67)
-            ...this._mapearParticipanteFocus(destinatario, 'tomador', emitente.focus_ambiente),
+            ...this._mapearParticipanteFocus(
+              destinatario,
+              'tomador',
+              emitente.focus_ambiente,
+              foneEmitenteFallback
+            ),
             indicador_inscricao_estadual_tomador: destinatario.indicador_ie || '9',
           }),
 
@@ -978,36 +1021,21 @@ class TransporteService {
       valor_receber: parseFloat(cte.valor_receber || cte.valor_total || 0).toFixed(2),
       componentes_valor: componentesFrete,
 
-      // Tributos
+      // Tributos ICMS
       ...icmsFields,
-      ...(aliquotaIbs > 0
-        ? {
-            ibs_aliquota: aliquotaIbs.toFixed(4),
-            ibs_valor: ((baseCalculo * aliquotaIbs) / 100).toFixed(2),
-          }
-        : {}),
-      ...(aliquotaCbs > 0
-        ? {
-            cbs_aliquota: aliquotaCbs.toFixed(4),
-            cbs_valor: ((baseCalculo * aliquotaCbs) / 100).toFixed(2),
-          }
-        : {}),
 
       // Carga e Modal
       ...(!isCteOs
         ? {
             valor_total_carga: valorCargaFinal.toFixed(2),
-            produto_predominante: cte.produto_predominante || 'MERCADORIA EM GERAL',
+            produto_predominante: String(cte.produto_predominante || 'MERCADORIA EM GERAL').slice(0, 60),
             ...(cte.outras_caracteristicas_carga
-              ? { outras_caracteristicas_carga: cte.outras_caracteristicas_carga }
+              ? { outras_caracteristicas_carga: String(cte.outras_caracteristicas_carga).slice(0, 40) }
               : {}),
             quantidades: quantidadesPayload,
             ...(nfesPayload.length > 0 ? { nfes: nfesPayload } : {}),
             modal_rodoviario: {
-              rntrc: normalizarRntrc8(emitente.rntrc),
-              ...(cte.data_prevista_entrega
-                ? { data_prevista_entrega: String(cte.data_prevista_entrega).slice(0, 10) }
-                : {}),
+              rntrc: normalizarRntrc8(cte.rntrc || emitente.rntrc),
             },
           }
         : {
@@ -1019,25 +1047,8 @@ class TransporteService {
             }),
           }),
 
-      // Seguro da carga
-      ...(cte.seguro_nome
-        ? {
-            seguros_carga: [
-              {
-                responsavel_seguro: cte.seguro_responsavel || '4',
-                nome_seguradora: cte.seguro_nome,
-                ...(cte.seguro_apolice ? { numero_apolice: cte.seguro_apolice } : {}),
-                ...(cte.seguro_averbacao ? { numero_averbacao: cte.seguro_averbacao } : {}),
-              },
-            ],
-          }
-        : {}),
-
-      // Observações
-      ...(cte.observacoes ? { observacoes: cte.observacoes } : {}),
-
-      // Customizações avançadas em payload_focus
-      ...(parseJsonSafe(cte.payload_focus, {}) || {}),
+      // Observações gerais (campo oficial Focus NFe: observacao)
+      ...(cte.observacoes ? { observacao: String(cte.observacoes).slice(0, 2000) } : {}),
     };
 
     // Expedidor (se informado ou se tomador == '1')
@@ -1092,7 +1103,7 @@ class TransporteService {
       if (finalidadeCte === '1') {
         payload.chave_cte_complementado = digitsOnly(cte.chave_cte_referenciado);
       } else if (finalidadeCte === '3') {
-        payload.chave_cte_substituido = digitsOnly(cte.chave_cte_referenciado);
+        payload.chave_cte_original_sub = digitsOnly(cte.chave_cte_referenciado);
       }
     }
 
@@ -1109,9 +1120,20 @@ class TransporteService {
       [ref, JSON.stringify(payload), cteId]
     );
 
-    const resFocus = isCteOs
-      ? await client.emitirCteOs(ref, payload)
-      : await client.emitirCte(ref, payload);
+    let resFocus;
+    try {
+      resFocus = isCteOs
+        ? await client.emitirCteOs(ref, payload)
+        : await client.emitirCte(ref, payload);
+    } catch (emitErr) {
+      await db
+        .query(
+          `UPDATE dash_ctes SET status = 'REJEITADO', mensagem_sefaz = $1, updated_at = NOW() WHERE id = $2`,
+          [String(emitErr.message || 'Erro de validação Focus NFe').slice(0, 500), cteId]
+        )
+        .catch(() => {});
+      throw emitErr;
+    }
 
     const novoStatus = mapFocusStatusToDb(resFocus.status, 'PROCESSANDO');
 
@@ -1564,37 +1586,50 @@ class TransporteService {
           }))
       : [];
 
-    // 6. Seguros
+    // 6. Seguros (conforme MDFeXML: seguros_carga)
     const segurosRaw = parseJsonSafe(mdfe.seguros, []);
     const segurosPayload = Array.isArray(segurosRaw)
       ? segurosRaw
-          .filter((s) => s && (s.seguradora_nome || s.nome_seguradora || s.apolice || s.numero_apolice))
+          .filter(
+            (s) =>
+              s &&
+              (s.seguradora_nome ||
+                s.nome_seguradora ||
+                s.apolice ||
+                s.numero_apolice ||
+                s.numero_averbacao)
+          )
           .map((s) => {
-            const docResp = digitsOnly(s.responsavel_documento || emitente.cnpj);
+            const respSeg = String(s.responsavel || s.responsavel_tipo || s.responsavel_seguro || '1');
+            const docResp = digitsOnly(
+              s.cnpj_responsavel || s.responsavel_documento || emitente.cnpj
+            );
+            const avSingle = s.numero_averbacao ? String(s.numero_averbacao).trim() : '';
+            const avArr = Array.isArray(s.averbacoes) ? s.averbacoes.filter(Boolean).map(String) : [];
+            const averbFinal = avArr.length > 0 ? avArr : avSingle ? [avSingle] : [];
+
             return {
-              responsavel_seguro: s.responsavel_tipo || s.responsavel_seguro || '1',
-              ...(docResp.length === 11
-                ? { cpf_responsavel: docResp }
-                : { cnpj_responsavel: docResp || digitsOnly(emitente.cnpj) }),
-              nome_seguradora: s.seguradora_nome || s.nome_seguradora || 'SEGURADORA',
+              responsavel_seguro: respSeg,
+              ...(respSeg === '2'
+                ? docResp.length === 11
+                  ? { cpf_responsavel: docResp }
+                  : { cnpj_responsavel: docResp || digitsOnly(emitente.cnpj) }
+                : {}),
+              nome_seguradora: String(
+                s.seguradora_nome || s.nome_seguradora || 'SEGURADORA'
+              ).slice(0, 30),
               ...(s.seguradora_cnpj || s.cnpj_seguradora
                 ? { cnpj_seguradora: digitsOnly(s.seguradora_cnpj || s.cnpj_seguradora) }
                 : {}),
               ...(s.apolice || s.numero_apolice
-                ? { numero_apolice: s.apolice || s.numero_apolice }
+                ? { numero_apolice: String(s.apolice || s.numero_apolice).slice(0, 20) }
                 : {}),
-              ...(Array.isArray(s.averbacoes) && s.averbacoes.filter(Boolean).length > 0
-                ? {
-                    averbacoes: s.averbacoes
-                      .filter(Boolean)
-                      .map((av) => ({ numero_averbacao: String(av) })),
-                  }
-                : {}),
+              ...(averbFinal.length > 0 ? { numero_averbacao: averbFinal } : {}),
             };
           })
       : [];
 
-    // 7. Produto Predominante
+    // 7. Produto Predominante, Totais e Modal Rodoviário (conforme MDFeXML + TransporteRodoviarioXML)
     const prodPredRaw = parseJsonSafe(mdfe.produtos_predominantes, []);
     const prodPrincipal = Array.isArray(prodPredRaw) && prodPredRaw[0] ? prodPredRaw[0] : null;
     const rntrcFinal = normalizarRntrc8(mdfe.v_rntrc || emitente.rntrc);
@@ -1602,102 +1637,135 @@ class TransporteService {
     const placaTracao = String(mdfe.veiculo_placa || mdfe.v_placa || '')
       .replace(/[^a-zA-Z0-9]/g, '')
       .toUpperCase();
+    const renavamTracao = digitsOnly(mdfe.veiculo_renavam || mdfe.v_renavam || '');
+    const ncmProd = digitsOnly(prodPrincipal?.ncm || mdfe.produto_predominante_ncm || '');
+
+    const totalCtesVinculados = municipiosDescarregamento.reduce(
+      (acc, m) => acc + (Array.isArray(m.conhecimentos_transporte) ? m.conhecimentos_transporte.length : 0),
+      0
+    );
+    const totalNfesVinculadas = municipiosDescarregamento.reduce(
+      (acc, m) => acc + (Array.isArray(m.notas_fiscais) ? m.notas_fiscais.length : 0),
+      0
+    );
+
+    const contratantesRaw = parseJsonSafe(mdfe.contratantes, []);
+    const contratantesPayload = Array.isArray(contratantesRaw)
+      ? contratantesRaw
+          .filter((c) => c && digitsOnly(c.documento || c.cnpj || c.cpf).length >= 11)
+          .map((c) => {
+            const doc = digitsOnly(c.documento || c.cnpj || c.cpf);
+            return {
+              ...(c.nome ? { nome: String(c.nome).slice(0, 60) } : {}),
+              ...(doc.length === 11 ? { cpf: doc } : { cnpj: doc.slice(0, 14) }),
+            };
+          })
+      : [];
+
+    const docPropVeiculo = digitsOnly(mdfe.v_doc_prop || '');
+    const isVeiculoTerceiro = String(mdfe.v_tipo_proprietario) === '2' && docPropVeiculo.length >= 11;
 
     const payload = {
-      data_emissao: new Date().toISOString(),
-      tipo_emitente: String(mdfe.tipo_emitente || '1'),
+      emitente: String(mdfe.tipo_emitente || '1'),
       tipo_transporte: String(mdfe.tipo_transporte || '1'),
       modal: '1',
-      ...(mdfe.serie || emitente.serie_mdfe ? { serie: String(mdfe.serie || emitente.serie_mdfe) } : {}),
-      ...(mdfe.numero ? { numero: Number(mdfe.numero) } : {}),
+      data_emissao: formatarDataHoraSefaz(emitente.uf || ufInicio),
+      ...(Number(mdfe.numero) > 0 && (mdfe.serie || emitente.serie_mdfe)
+        ? { serie: Number(mdfe.serie || emitente.serie_mdfe), numero: Number(mdfe.numero) }
+        : {}),
       uf_inicio: ufInicio,
       uf_fim: ufFim,
 
-      // Dados completos do Emitente
-      cnpj_emitente: digitsOnly(emitente.cnpj),
-      inscricao_estadual_emitente: digitsOnly(emitente.inscricao_estadual),
-      razao_social_emitente: emitente.razao_social,
-      nome_fantasia_emitente: emitente.nome_fantasia || emitente.razao_social,
-      logradouro_emitente: emitente.logradouro || 'RUA PRINCIPAL',
-      numero_emitente: emitente.numero || 'SN',
-      ...(emitente.complemento ? { complemento_emitente: emitente.complemento } : {}),
-      bairro_emitente: emitente.bairro || 'CENTRO',
-      codigo_municipio_emitente: emitente.codigo_municipio,
-      municipio_emitente: emitente.municipio,
-      uf_emitente: emitente.uf,
-      cep_emitente: digitsOnly(emitente.cep) || '79004000',
-
       // Municípios e Percurso
       municipios_carregamento: municipiosCarregamento,
-      ...(percurso.length > 0 ? { percurso } : {}),
+      ...(percurso.length > 0 ? { percursos: percurso } : {}),
+
+      // Dados completos do Emitente (nome_emitente conforme MDFeXML)
+      cnpj_emitente: digitsOnly(emitente.cnpj),
+      inscricao_estadual_emitente: digitsOnly(emitente.inscricao_estadual),
+      nome_emitente: String(emitente.razao_social || '').slice(0, 60),
+      nome_fantasia_emitente: String(emitente.nome_fantasia || emitente.razao_social || '').slice(0, 60),
+      logradouro_emitente: String(emitente.logradouro || 'RUA PRINCIPAL').slice(0, 60),
+      numero_emitente: String(emitente.numero || 'SN').slice(0, 60),
+      ...(emitente.complemento ? { complemento_emitente: String(emitente.complemento).slice(0, 60) } : {}),
+      bairro_emitente: String(emitente.bairro || 'CENTRO').slice(0, 60),
+      codigo_municipio_emitente: emitente.codigo_municipio,
+      municipio_emitente: emitente.municipio,
+      cep_emitente: digitsOnly(emitente.cep) || '79004000',
+      uf_emitente: emitente.uf,
+      ...(emitente.telefone ? { telefone_emitente: digitsOnly(emitente.telefone).slice(0, 14) } : {}),
+
       municipios_descarregamento: municipiosDescarregamento,
 
-      // Modal Rodoviário e Veículo de Tração
-      rntrc: rntrcFinal,
-      ...(mdfe.ciot_codigo
+      ...(segurosPayload.length > 0 ? { seguros_carga: segurosPayload } : {}),
+
+      // Produto Predominante (campos raiz conforme MDFeXML)
+      tipo_carga: prodPrincipal?.tipo_carga || mdfe.tipo_carga || '05',
+      descricao_produto: String(
+        prodPrincipal?.descricao || mdfe.produto_predominante_nome || 'MERCADORIAS EM GERAL'
+      ).slice(0, 120),
+      ...(ncmProd.length === 8 ? { codigo_ncm_produto: ncmProd } : {}),
+      ...(prodPrincipal?.lotacao
         ? {
-            ciot: [
-              {
-                ciot: digitsOnly(mdfe.ciot_codigo),
-                cnpj_responsavel: digitsOnly(emitente.cnpj),
-              },
-            ],
+            cep_carregamento: digitsOnly(emitente.cep) || '79841270',
+            cep_descarregamento: digitsOnly(mdfe.cep_descarregamento || emitente.cep) || '79004000',
           }
         : {}),
-      veiculo_tracao: {
-        placa: placaTracao,
-        ...(mdfe.veiculo_renavam || mdfe.v_renavam
-          ? { renavam: digitsOnly(mdfe.veiculo_renavam || mdfe.v_renavam) }
-          : {}),
-        tara: Number(mdfe.veiculo_tara_kg || mdfe.v_tara_kg || 5000),
-        capacidade_kg: Number(mdfe.veiculo_capacidade_kg || mdfe.v_capacidade_kg || 15000),
-        capacidade_m3: Number(mdfe.veiculo_capacidade_m3 || mdfe.v_capacidade_m3 || 50),
-        tipo_rodado: mdfe.veiculo_tipo_rodado || mdfe.v_tipo_rodado || '01',
-        tipo_carroceria: mdfe.veiculo_tipo_carroceria || mdfe.v_tipo_carroceria || '02',
-        uf: (mdfe.veiculo_uf || mdfe.v_uf || emitente.uf || ufInicio).toUpperCase(),
-        uf_licenciamento: (mdfe.veiculo_uf || mdfe.v_uf || emitente.uf || ufInicio).toUpperCase(),
-        condutor: condutoresList,
-        condutores: condutoresList,
-        ...(mdfe.v_tipo_proprietario === '2' && mdfe.v_doc_prop
-          ? {
-              proprietario: {
-                ...(digitsOnly(mdfe.v_doc_prop).length === 11
-                  ? { cpf: digitsOnly(mdfe.v_doc_prop) }
-                  : { cnpj: digitsOnly(mdfe.v_doc_prop) }),
-                razao_social: mdfe.v_nome_prop || 'PROPRIETARIO TERCEIRO',
-                rntrc: normalizarRntrc8(mdfe.v_rntrc || rntrcFinal),
-                uf: (mdfe.v_uf_prop || ufInicio).toUpperCase(),
-                tipo_proprietario: '0',
-              },
-            }
-          : {}),
-      },
-      ...(reboquesPayload.length > 0 ? { veiculos_reboque: reboquesPayload } : {}),
-      ...(segurosPayload.length > 0 ? { seguros: segurosPayload } : {}),
 
-      // Produto Predominante
-      produto_predominante: {
-        tipo_carga: prodPrincipal?.tipo_carga || mdfe.tipo_carga || '05',
-        produto_predominante:
-          prodPrincipal?.descricao || mdfe.produto_predominante_nome || 'MERCADORIAS EM GERAL',
-        ...(prodPrincipal?.ncm || mdfe.produto_predominante_ncm
-          ? { ncm: digitsOnly(prodPrincipal?.ncm || mdfe.produto_predominante_ncm) }
-          : {}),
-        cep_carregamento:
-          digitsOnly(prodPrincipal?.cep_carregamento || mdfe.cep_carregamento || emitente.cep) ||
-          '79004000',
-        cep_descarregamento:
-          digitsOnly(prodPrincipal?.cep_descarregamento || mdfe.cep_descarregamento || emitente.cep) ||
-          '79004000',
-      },
-
+      ...(totalCtesVinculados > 0 ? { quantidade_total_cte: totalCtesVinculados } : {}),
+      ...(totalNfesVinculadas > 0 ? { quantidade_total_nfe: totalNfesVinculadas } : {}),
       valor_total_carga: parseFloat(mdfe.valor_carga || 100).toFixed(2),
       codigo_unidade_medida_peso_bruto: '01',
-      peso_bruto: parseFloat(mdfe.peso_bruto || 100).toFixed(3),
+      peso_bruto: parseFloat(mdfe.peso_bruto || 100).toFixed(4),
+
+      // Modal Rodoviário (objeto modal_rodoviario conforme mdfe/TransporteRodoviarioXML)
+      modal_rodoviario: {
+        registro_nacional_transporte: rntrcFinal,
+        ...(mdfe.ciot_codigo
+          ? {
+              ciot: [
+                {
+                  ciot: digitsOnly(mdfe.ciot_codigo),
+                  cnpj_responsavel: digitsOnly(emitente.cnpj),
+                },
+              ],
+            }
+          : {}),
+        ...(contratantesPayload.length > 0 ? { contratantes: contratantesPayload } : {}),
+        placa_veiculo: placaTracao,
+        ...(renavamTracao.length >= 9 ? { renavam_veiculo: renavamTracao.slice(0, 11) } : {}),
+        tara_veiculo: Math.max(1, Math.round(Number(mdfe.veiculo_tara_kg || mdfe.v_tara_kg || 1000))),
+        capacidade_kg_veiculo: Math.max(
+          1,
+          Math.round(Number(mdfe.veiculo_capacidade_kg || mdfe.v_capacidade_kg || 2000))
+        ),
+        ...(Number(mdfe.veiculo_capacidade_m3 || mdfe.v_capacidade_m3) > 0
+          ? { capacidade_m3_veiculo: Math.round(Number(mdfe.veiculo_capacidade_m3 || mdfe.v_capacidade_m3)) }
+          : {}),
+        ...(isVeiculoTerceiro
+          ? {
+              ...(docPropVeiculo.length === 11
+                ? { cpf_proprietario_veiculo: docPropVeiculo }
+                : { cnpj_proprietario_veiculo: docPropVeiculo.slice(0, 14) }),
+              rntrc_proprietario_veiculo: normalizarRntrc8(mdfe.v_rntrc || rntrcFinal),
+              razao_social_proprietario_veiculo: String(
+                mdfe.v_nome_prop || 'PROPRIETARIO TERCEIRO'
+              ).slice(0, 60),
+              inscricao_estadual_proprietario_veiculo: 'ISENTO',
+              uf_proprietario_veiculo: (mdfe.v_uf_prop || ufInicio).toUpperCase(),
+              tipo_proprietario_veiculo: '0',
+            }
+          : {}),
+        condutores: condutoresList,
+        tipo_rodado_veiculo: mdfe.veiculo_tipo_rodado || mdfe.v_tipo_rodado || '01',
+        tipo_carroceria_veiculo: mdfe.veiculo_tipo_carroceria || mdfe.v_tipo_carroceria || '02',
+        uf_licenciamento_veiculo: (mdfe.veiculo_uf || mdfe.v_uf || emitente.uf || ufInicio).toUpperCase(),
+        ...(reboquesPayload.length > 0 ? { veiculos_reboque: reboquesPayload } : {}),
+      },
+
       ...(mdfe.informacao_adicional
-        ? { informacoes_complementares: mdfe.informacao_adicional }
+        ? { informacao_complementar: String(mdfe.informacao_adicional).slice(0, 5000) }
         : {}),
-      ...(parseJsonSafe(mdfe.payload_focus, {}) || {}),
     };
 
     const ref = mdfe.ref || this.gerarRef('MDFE', tenantId, mdfe.id);
@@ -1707,7 +1775,18 @@ class TransporteService {
       [ref, JSON.stringify(payload), mdfeId]
     );
 
-    const resFocus = await client.emitirMdfe(ref, payload);
+    let resFocus;
+    try {
+      resFocus = await client.emitirMdfe(ref, payload);
+    } catch (emitErr) {
+      await db
+        .query(
+          `UPDATE dash_mdfes SET status = 'REJEITADO', mensagem_sefaz = $1, updated_at = NOW() WHERE id = $2`,
+          [String(emitErr.message || 'Erro de validação Focus NFe').slice(0, 500), mdfeId]
+        )
+        .catch(() => {});
+      throw emitErr;
+    }
     const novoStatus = mapFocusStatusToDb(resFocus.status, 'PROCESSANDO');
 
     await db.query(
