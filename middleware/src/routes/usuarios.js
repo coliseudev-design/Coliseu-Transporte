@@ -21,11 +21,30 @@ router.get('/', async (req, res) => {
         const { ensureGruposTableAndSeeds } = require('./gruposAcesso');
         await ensureGruposTableAndSeeds(tenantId);
 
+        if (tenantId === '00000000-0000-0000-0000-000000000000') {
+            const { rows: tenantsRows } = await db.query('SELECT DISTINCT tenant_id FROM dash_usuarios');
+            for (const row of tenantsRows) {
+                if (row.tenant_id && row.tenant_id !== tenantId) {
+                    await ensureGruposTableAndSeeds(row.tenant_id);
+                }
+            }
+        }
+
         let query = `
             SELECT u.id, u.tenant_id, u.email, u.nome, u.role, u.ativo, u.created_at, u.permissions, u.layout_version, u.filial_acesso, u.grupo_id,
-                   g.nome AS grupo_nome, g.permissoes_menus, g.permissoes_acoes
+                   g.nome AS grupo_nome, g.permissoes_menus, g.permissoes_acoes,
+                   em.empresa_nome
             FROM dash_usuarios u
             LEFT JOIN dash_grupos_acesso g ON g.id = u.grupo_id AND g.tenant_id = u.tenant_id
+            LEFT JOIN LATERAL (
+                SELECT COALESCE(NULLIF(TRIM(e.nome_fantasia), ''), NULLIF(TRIM(e.razao_social), '')) AS empresa_nome
+                FROM dash_emitentes e
+                WHERE e.tenant_id = u.tenant_id
+                  AND e.ativo = true
+                  AND UPPER(COALESCE(e.razao_social, '')) <> 'YMANARU'
+                ORDER BY e.id ASC
+                LIMIT 1
+            ) em ON true
         `;
         let params = [];
         
@@ -122,9 +141,9 @@ router.post('/', async (req, res) => {
             return res.status(503).json({ error: 'Servidor de licenças indisponível.' });
         }
 
-        // Valida se o email já existe
-        const checkQuery = `SELECT id FROM dash_usuarios WHERE email = $1`;
-        const checkResult = await db.query(checkQuery, [email]);
+        // Valida se o email já existe (case-insensitive)
+        const checkQuery = `SELECT id FROM dash_usuarios WHERE LOWER(TRIM(email)) = LOWER(TRIM($1))`;
+        const checkResult = await db.query(checkQuery, [normalizedEmail]);
         
         if (checkResult.rowCount > 0) {
             return res.status(409).json({ error: 'Este email já está em uso' });
@@ -141,8 +160,11 @@ router.post('/', async (req, res) => {
             VALUES ($1, $2, $3, $5, true, $4, NULL, 'v1.0', 'todas')
             RETURNING id, tenant_id, email, nome, role, ativo, created_at, permissions, layout_version, filial_acesso
         `;
-        const result = await db.query(insertQuery, [companyKey, email, nome, senhaHash, initialRole]);
+        const result = await db.query(insertQuery, [companyKey, normalizedEmail, String(nome).trim(), senhaHash, initialRole]);
         const user = result.rows[0];
+
+        const { ensureGruposTableAndSeeds } = require('./gruposAcesso');
+        await ensureGruposTableAndSeeds(companyKey);
 
         logger.info('[Usuarios] Novo usuário criado via painel', { email: user.email, by: req.user.email });
 
@@ -327,29 +349,65 @@ router.put('/:id/filial-acesso', async (req, res) => {
 router.put('/:id/grupo', async (req, res) => {
     try {
         const { grupo_id } = req.body;
-        const targetId = req.params.id;
+        const targetId = parseInt(req.params.id, 10);
 
-        const grupoIdNum = grupo_id ? parseInt(grupo_id, 10) : null;
-
-        let query = `UPDATE dash_usuarios SET grupo_id = $1 WHERE id = $2`;
-        let params = [grupoIdNum, targetId];
-
-        if (req.tenant.id !== '00000000-0000-0000-0000-000000000000') {
-            query += ` AND tenant_id = $3`;
-            params.push(req.tenant.id);
+        if (!targetId || Number.isNaN(targetId)) {
+            return res.status(400).json({ error: 'ID de usuário inválido.' });
         }
 
-        query += ` RETURNING id, grupo_id`;
+        const isMasterCaller = req.tenant.id === '00000000-0000-0000-0000-000000000000';
+        const userCheckSql = isMasterCaller
+            ? `SELECT id, tenant_id, email, role FROM dash_usuarios WHERE id = $1 LIMIT 1`
+            : `SELECT id, tenant_id, email, role FROM dash_usuarios WHERE id = $1 AND tenant_id = $2 LIMIT 1`;
+        const userCheckParams = isMasterCaller ? [targetId] : [targetId, req.tenant.id];
+        const userCheckRes = await db.query(userCheckSql, userCheckParams);
 
-        const result = await db.query(query, params);
-
-        if (result.rowCount === 0) {
+        if (userCheckRes.rowCount === 0) {
             return res.status(404).json({ error: 'Usuário não encontrado ou sem permissão.' });
         }
 
+        const targetUser = userCheckRes.rows[0];
+        const { resolveGroupForTenant } = require('./gruposAcesso');
+
+        let finalGroupId = null;
+        let finalGroupNome = null;
+        let finalRole = targetUser.role;
+
+        if (grupo_id) {
+            const resolved = await resolveGroupForTenant(targetUser.tenant_id, grupo_id);
+            if (!resolved) {
+                return res.status(404).json({ error: 'Grupo de acesso informado não foi encontrado.' });
+            }
+            finalGroupId = resolved.id;
+            finalGroupNome = resolved.nome;
+
+            const emailLower = String(targetUser.email || '').toLowerCase();
+            const isStaff = emailLower.endsWith('@coliseusistemas.com.br') || emailLower.endsWith('@silenus.com.br');
+            if (String(targetUser.role || '').toLowerCase() !== 'master' && !isStaff) {
+                finalRole = String(resolved.nome || '').trim().toLowerCase() === 'master' ? 'admin' : 'viewer';
+            }
+        }
+
+        const result = await db.query(
+            `UPDATE dash_usuarios
+             SET grupo_id = $1, role = $2
+             WHERE id = $3 AND tenant_id = $4
+             RETURNING id, tenant_id, grupo_id, role`,
+            [finalGroupId, finalRole, targetId, targetUser.tenant_id]
+        );
+
         invalidateUserAuthCache(targetId);
-        logger.info('[Usuarios] Grupo de acesso alterado', { targetId, grupoIdNum, by: req.user.email });
-        res.json({ message: 'Grupo de acesso do usuário atualizado com sucesso', user: result.rows[0] });
+        logger.info('[Usuarios] Grupo de acesso alterado', {
+            targetId,
+            tenantId: targetUser.tenant_id,
+            grupoId: finalGroupId,
+            grupoNome: finalGroupNome,
+            by: req.user.email
+        });
+        res.json({
+            message: 'Grupo de acesso do usuário atualizado com sucesso',
+            user: { ...result.rows[0], grupo_nome: finalGroupNome }
+        });
     } catch (err) {
         logger.error('[Usuarios] Erro ao alterar grupo_id', err);
         res.status(500).json({ error: 'Erro interno ao alterar grupo de acesso.' });

@@ -19,12 +19,22 @@ router.post('/login', async (req, res) => {
             return res.status(400).json({ error: 'Email e senha são obrigatórios', code: 'MISSING_CREDENTIALS' });
         }
 
-        // Buscar usuário localmente junto com os dados do seu grupo de acesso
+        // Buscar usuário localmente junto com os dados do seu grupo de acesso e empresa emitente
         const query = `
             SELECT u.id, u.tenant_id, u.email, u.nome, u.role, u.ativo, u.senha_hash, u.permissions, u.layout_version, u.grupo_id,
-                   g.nome AS grupo_nome, g.permissoes_menus, g.permissoes_acoes
+                   g.nome AS grupo_nome, g.permissoes_menus, g.permissoes_acoes,
+                   em.empresa_nome
             FROM dash_usuarios u
             LEFT JOIN dash_grupos_acesso g ON g.id = u.grupo_id AND g.tenant_id = u.tenant_id
+            LEFT JOIN LATERAL (
+                SELECT COALESCE(NULLIF(TRIM(e.nome_fantasia), ''), NULLIF(TRIM(e.razao_social), '')) AS empresa_nome
+                FROM dash_emitentes e
+                WHERE e.tenant_id = u.tenant_id
+                  AND e.ativo = true
+                  AND UPPER(COALESCE(e.razao_social, '')) <> 'YMANARU'
+                ORDER BY e.id ASC
+                LIMIT 1
+            ) em ON true
             WHERE LOWER(TRIM(u.email)) = LOWER(TRIM($1))
         `;
         const result = await db.query(query, [email]);
@@ -77,6 +87,7 @@ router.post('/login', async (req, res) => {
                 layout_version: user.layout_version,
                 grupo_id: user.grupo_id,
                 grupo_nome: user.grupo_nome,
+                empresa_nome: user.empresa_nome || (user.tenant_id === '00000000-0000-0000-0000-000000000000' ? 'Coliseu Sistemas (Master)' : null),
                 permissoes_menus: user.permissoes_menus,
                 permissoes_acoes: user.permissoes_acoes,
                 precisa_alterar_senha: isDefaultPassword
@@ -109,9 +120,19 @@ router.get('/me', async (req, res) => {
 
         const query = `
             SELECT u.id, u.tenant_id, u.email, u.nome, u.role, u.ativo, u.permissions, u.layout_version, u.grupo_id,
-                   g.nome AS grupo_nome, g.permissoes_menus, g.permissoes_acoes
+                   g.nome AS grupo_nome, g.permissoes_menus, g.permissoes_acoes,
+                   em.empresa_nome
             FROM dash_usuarios u
             LEFT JOIN dash_grupos_acesso g ON g.id = u.grupo_id AND g.tenant_id = u.tenant_id
+            LEFT JOIN LATERAL (
+                SELECT COALESCE(NULLIF(TRIM(e.nome_fantasia), ''), NULLIF(TRIM(e.razao_social), '')) AS empresa_nome
+                FROM dash_emitentes e
+                WHERE e.tenant_id = u.tenant_id
+                  AND e.ativo = true
+                  AND UPPER(COALESCE(e.razao_social, '')) <> 'YMANARU'
+                ORDER BY e.id ASC
+                LIMIT 1
+            ) em ON true
             WHERE u.id = $1
         `;
         const result = await db.query(query, [decoded.sub]);
@@ -318,6 +339,9 @@ router.post('/register', async (req, res) => {
         `;
         const result = await db.query(insertQuery, [cleanCompanyKey, cleanEmail, cleanNome, senhaHash, initialRole]);
         const user = result.rows[0];
+
+        const { ensureGruposTableAndSeeds } = require('./gruposAcesso');
+        await ensureGruposTableAndSeeds(cleanCompanyKey);
 
         logger.info('[Auth] Novo usuário cadastrado', { email: user.email, tenant: user.tenant_id, role: user.role });
 

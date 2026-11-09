@@ -1,5 +1,8 @@
 import { useState, useEffect } from 'react'
-import { X, Shield, Check, Lock, ChevronDown, ChevronUp, Layers, Users, Wallet, Trophy, Settings, AlertCircle, Ban, Eye, FileText, Megaphone, BarChart3 } from 'lucide-react'
+import {
+  X, Shield, Check, Lock, ChevronDown, ChevronUp, Layers, Users, Settings,
+  AlertCircle, Ban, FileStack, BadgeCheck, BarChart3, LayoutDashboard
+} from 'lucide-react'
 import api from '../../services/api'
 import clsx from 'clsx'
 
@@ -19,95 +22,135 @@ interface ModalCadastroGrupoAcessoProps {
   onSaved: () => void
 }
 
-const DEFAULT_MENUS = {
+export const DEFAULT_MENUS = {
+  operacao: {
+    label: 'Operação Logística',
+    icon: LayoutDashboard,
+    submenus: {
+      cockpit: 'Cockpit de Transporte (Painel Geral)',
+      cargas: 'Central de Cargas (NF-e / XML / MDe)',
+      roteiro: 'Roteiro de Entrega & Paradas'
+    }
+  },
+  documentos: {
+    label: 'Documentos Fiscais (SEFAZ)',
+    icon: FileStack,
+    submenus: {
+      emitir_cte: 'Emitir CT-e / CT-e OS',
+      emitir_mdfe: 'Emitir MDF-e (Manifesto Eletrônico)',
+      documentos_emitidos: 'Documentos Emitidos (XML, DACTE, DAMDFE)'
+    }
+  },
+  ciot: {
+    label: 'CIOT & ANTT',
+    icon: BadgeCheck,
+    submenus: {
+      consultar_ciot: 'Consultar, Gerar e Encerrar CIOT'
+    }
+  },
   cadastros: {
-    label: 'Cadastros Base',
+    label: 'Cadastros de Transporte',
     icon: Users,
     submenus: {
-      clientes: 'Cadastro & Lista de Clientes',
-      produtos: 'Catálogo Comercial & Produtos',
-      fornecedores: 'Cadastro de Fornecedores',
-      filiais: 'Gestão de Filiais / Departamentos'
+      clientes: 'Clientes (ERP Coliseu)',
+      regioes: 'Regiões & Cidades (IBGE)',
+      frota: 'Frota de Veículos & Condutores',
+      partes: 'Partes do Transporte (Remetente / Destinatário)'
     }
   },
-  consultas: {
-    label: 'Consultas & Relatórios',
-    icon: FileText,
-    submenus: {
-      clientes: 'Consulta Rápida de Clientes',
-      titulos: 'Consulta de Títulos / Extrato',
-      produtos: 'Consulta de Tabela de Preços',
-      estoque: 'Controle & Consulta de Estoque'
-    }
-  },
-  crm: {
-    label: 'CRM & Vendas',
-    icon: Trophy,
-    submenus: {
-      kanban: 'Kanban de Oportunidades / Vendas',
-      contratos: 'Gestão de Contratos de Clientes',
-      pedidos: 'Pedidos Faturados & Emissão'
-    }
-  },
-  cobranca: {
-    label: 'Cobrança Operacional',
-    icon: Layers,
-    submenus: {
-      kanban: 'Kanban Operacional de Cobrança',
-      regua: 'Configuração de Régua de Cobrança'
-    }
-  },
-  financeiro: {
-    label: 'Financeiro & Tesouraria',
-    icon: Wallet,
-    submenus: {
-      titulos: 'Guia de Títulos & Lançamentos',
-      fluxo_caixa: 'Fluxo de Caixa & Tesouraria',
-      banco_asaas: 'Extrato Bancário & Banco Asaas',
-      emissao_lote: 'Emissão em Lote de Boletos',
-      conciliacao: 'Conciliação Bancária Automática'
-    }
-  },
-  gerencia: {
-    label: 'Gerência & Inteligência BI',
+  relatorios: {
+    label: 'Relatórios & Indicadores',
     icon: BarChart3,
     submenus: {
-      gerencia_financeira: 'Gestão Financeira & Análise Executiva',
-      visao_estrategica: 'Visão Estratégica & BI (V3)',
-      dashboard_bi: 'Dashboards & Indicadores Executivos',
-      estatisticas: 'Estatísticas & Performance Comercial',
-      comissoes: 'Relatório de Comissões',
-      ranking: 'Ranking Comercial & Desempenho'
-    }
-  },
-  marketing: {
-    label: 'Marketing & Comunicação',
-    icon: Megaphone,
-    submenus: {
-      marketing_massa: 'Disparador & Marketing em Massa (WhatsApp)',
-      acervos: 'Acervos & Materiais de Apoio'
+      desempenho: 'Desempenho Fiscal & Fretes'
     }
   },
   configuracoes: {
     label: 'Configurações & Segurança',
     icon: Settings,
     submenus: {
-      usuarios: 'Gestão de Usuários do Sistema',
-      grupos: 'Gestão de Perfis & Grupos de Acesso',
-      integracoes: 'Chaves de API & Webhooks Asaas'
+      dados_empresa: 'Dados da Empresa & Credenciais Focus NFe',
+      regras_fiscais: 'Regras Fiscais de ICMS por UF',
+      campos_dinamicos: 'Campos Dinâmicos Personalizados',
+      certificados: 'Certificados Digitais A1 (.pfx)',
+      usuarios: 'Usuários & Perfis de Acesso (RBAC)'
     }
   }
 }
 
-const DEFAULT_ACOES = [
-  { key: 'permitir_ver_ficha_cliente', label: 'Permitir Visualizar Ficha / Perfil 360 do Cliente', desc: 'Se desativado, o usuário não consegue abrir os detalhes do cliente.' },
-  { key: 'permitir_ver_titulos_cliente', label: 'Permitir Visualizar Títulos do Cliente', desc: 'Se desativado, oculta os títulos e valores em aberto na ficha do cliente.' },
-  { key: 'permitir_cancelar_titulos', label: 'Permitir Cancelar / Estornar Títulos', desc: 'Se desativado, o botão de cancelar títulos em aberto fica bloqueado.' },
-  { key: 'permitir_eliminar_titulos', label: 'Permitir Eliminar Títulos (Exclusão Definitiva)', desc: 'Se desativado, oculta/bloqueia o botão de eliminar lançamentos de títulos no sistema.' },
-  { key: 'permitir_cancelar_boletos', label: 'Permitir Cancelar Boletos no Banco Asaas', desc: 'Se desativado, o usuário não consegue cancelar boletos bancários já registrados.' },
-  { key: 'permitir_liquidar_titulos', label: 'Permitir Liquidar / Quitar Títulos (F9)', desc: 'Se desativado, o usuário não pode realizar baixas manuais na tesouraria.' },
-  { key: 'ocultar_totais_financeiro', label: 'Ocultar Valor Total Acumulado na Guia Títulos', desc: 'Se ativado, oculta o badge/botão com o valor Total Geral (ex: R$ 77.890,49) na guia Títulos.' }
+export const DEFAULT_ACOES = [
+  {
+    key: 'permitir_emitir_cte',
+    label: 'Permitir Emitir e Transmitir CT-e na SEFAZ',
+    desc: 'Autoriza o faturista/operador a gerar e transmitir Conhecimentos de Transporte Eletrônicos.'
+  },
+  {
+    key: 'permitir_emitir_mdfe',
+    label: 'Permitir Emitir e Encerrar MDF-e na SEFAZ',
+    desc: 'Autoriza a emissão e o encerramento de Manifestos Eletrônicos de Documentos Fiscais.'
+  },
+  {
+    key: 'permitir_cancelar_documentos',
+    label: 'Permitir Cancelar Documentos Fiscais e Emitir CC-e',
+    desc: 'Se bloqueado, impede o cancelamento de CT-e/MDF-e autorizados e cartas de correção na SEFAZ.'
+  },
+  {
+    key: 'permitir_gerenciar_ciot',
+    label: 'Permitir Cadastrar e Encerrar Contratos CIOT',
+    desc: 'Controla o registro e encerramento de operações de transporte junto à ANTT.'
+  },
+  {
+    key: 'permitir_gerenciar_certificados',
+    label: 'Permitir Gerenciar Certificados A1 e Credenciais Focus NFe',
+    desc: 'Se bloqueado, protege o upload de certificados digitais e a troca de ambiente Homologação/Produção.'
+  },
+  {
+    key: 'permitir_gerenciar_usuarios',
+    label: 'Permitir Gerenciar Usuários e Grupos de Acesso',
+    desc: 'Restringe a criação/inativação de contas e alteração de permissões RBAC.'
+  },
+  {
+    key: 'permitir_ver_ficha_cliente',
+    label: 'Permitir Visualizar Ficha Completa de Clientes',
+    desc: 'Se desativado, restringe a abertura de detalhes cadastrais na tela de Clientes.'
+  },
+  {
+    key: 'permitir_ver_titulos_cliente',
+    label: 'Permitir Visualizar Dados Financeiros do Cliente',
+    desc: 'Se desativado, oculta informações financeiras e títulos na ficha do cliente.'
+  }
 ]
+
+function buildDefaultMenusState(source?: Record<string, any>) {
+  const result: Record<string, { acesso: boolean; submenus: Record<string, boolean> }> = {}
+  const hasTransportKeys = Boolean(source && ('operacao' in source || 'documentos' in source))
+
+  Object.keys(DEFAULT_MENUS).forEach((modKey) => {
+    const modConf = (DEFAULT_MENUS as any)[modKey]
+    const existingCat = hasTransportKeys ? source?.[modKey] : undefined
+    const subObj: Record<string, boolean> = {}
+
+    Object.keys(modConf.submenus).forEach((subKey) => {
+      subObj[subKey] = existingCat?.submenus?.[subKey] ?? (existingCat?.acesso ?? true)
+    })
+
+    const hasAnySub = Object.values(subObj).some(Boolean)
+    result[modKey] = {
+      acesso: existingCat ? Boolean(existingCat.acesso && hasAnySub) : true,
+      submenus: subObj
+    }
+  })
+
+  return result
+}
+
+function buildDefaultAcoesState(source?: Record<string, boolean>) {
+  const result: Record<string, boolean> = {}
+  DEFAULT_ACOES.forEach((ac) => {
+    result[ac.key] = source?.[ac.key] ?? true
+  })
+  return result
+}
 
 export default function ModalCadastroGrupoAcesso({
   isOpen,
@@ -122,9 +165,9 @@ export default function ModalCadastroGrupoAcesso({
   const [permissoesAcoes, setPermissoesAcoes] = useState<any>({})
   const [saving, setSaving] = useState(false)
   const [expandedCategories, setExpandedCategories] = useState<Record<string, boolean>>({
-    cadastros: true,
-    financeiro: true,
-    crm: true
+    operacao: true,
+    documentos: true,
+    cadastros: true
   })
 
   useEffect(() => {
@@ -132,28 +175,13 @@ export default function ModalCadastroGrupoAcesso({
       if (grupo) {
         setNome(grupo.nome)
         setDescricao(grupo.descricao || '')
-        setPermissoesMenus(grupo.permissoes_menus || {})
-        setPermissoesAcoes(grupo.permissoes_acoes || {})
+        setPermissoesMenus(buildDefaultMenusState(grupo.permissoes_menus))
+        setPermissoesAcoes(buildDefaultAcoesState(grupo.permissoes_acoes))
       } else {
         setNome('')
         setDescricao('')
-        // Preenche com padrão Master
-        const initialMenus: any = {}
-        Object.keys(DEFAULT_MENUS).forEach(modKey => {
-          const modConf = (DEFAULT_MENUS as any)[modKey]
-          const subObj: any = {}
-          Object.keys(modConf.submenus).forEach(subKey => {
-            subObj[subKey] = true
-          })
-          initialMenus[modKey] = { acesso: true, submenus: subObj }
-        })
-        setPermissoesMenus(initialMenus)
-
-        const initialAcoes: any = {}
-        DEFAULT_ACOES.forEach(ac => {
-          initialAcoes[ac.key] = true
-        })
-        setPermissoesAcoes(initialAcoes)
+        setPermissoesMenus(buildDefaultMenusState())
+        setPermissoesAcoes(buildDefaultAcoesState())
       }
     }
   }, [isOpen, grupo])
@@ -165,9 +193,9 @@ export default function ModalCadastroGrupoAcesso({
     const newAcesso = !current.acesso
     const categoryDef = (DEFAULT_MENUS as any)[categoryKey]
 
-    const newSubmenus: any = {}
+    const newSubmenus: Record<string, boolean> = {}
     if (categoryDef && categoryDef.submenus) {
-      Object.keys(categoryDef.submenus).forEach(subKey => {
+      Object.keys(categoryDef.submenus).forEach((subKey) => {
         newSubmenus[subKey] = newAcesso
       })
     }
@@ -191,8 +219,7 @@ export default function ModalCadastroGrupoAcesso({
       [submenuKey]: newSubVal
     }
 
-    // Se pelo menos 1 submenu estiver ativo, a categoria fica ativa
-    const hasAnySub = Object.values(updatedSubmenus).some(v => Boolean(v))
+    const hasAnySub = Object.values(updatedSubmenus).some((v) => Boolean(v))
 
     setPermissoesMenus({
       ...permissoesMenus,
@@ -244,18 +271,19 @@ export default function ModalCadastroGrupoAcesso({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4 animate-fade-in">
       <div className="bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh] text-slate-100">
-        
         {/* HEADER */}
-        <div className="px-5 py-4 border-b border-slate-800 bg-gradient-to-r from-indigo-900 via-slate-900 to-slate-900 flex items-center justify-between">
+        <div className="px-5 py-4 border-b border-slate-800 bg-gradient-to-r from-sky-950 via-slate-900 to-slate-900 flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg bg-indigo-600/30 border border-indigo-500/40 flex items-center justify-center text-indigo-400">
+            <div className="w-8 h-8 rounded-lg bg-sky-600/25 border border-sky-500/40 flex items-center justify-center text-sky-400">
               <Shield size={18} />
             </div>
             <div>
               <h3 className="text-sm font-extrabold text-white uppercase tracking-wider">
                 {grupo ? `Editar Perfil: ${grupo.nome}` : 'Novo Grupo de Acesso / Perfil'}
               </h3>
-              <p className="text-[11px] text-slate-400">Organize permissões por menus principais, submenus e ações restritas</p>
+              <p className="text-[11px] text-slate-400">
+                Permissões de menus e travas operacionais do Coliseu Transporte
+              </p>
             </div>
           </div>
           <button onClick={onClose} className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 cursor-pointer">
@@ -270,9 +298,10 @@ export default function ModalCadastroGrupoAcesso({
             <input
               type="text"
               value={nome}
-              onChange={e => setNome(e.target.value)}
-              placeholder="Ex: Comercial, Operador Financeiro..."
-              className="w-full px-3 py-1.5 bg-slate-900 border border-slate-700 rounded-xl text-xs text-white focus:outline-none focus:border-indigo-500"
+              onChange={(e) => setNome(e.target.value)}
+              placeholder="Ex: Fiscal / Emissão, Expedição, Motorista..."
+              disabled={grupo?.nome?.trim().toLowerCase() === 'master'}
+              className="w-full px-3 py-1.5 bg-slate-900 border border-slate-700 rounded-xl text-xs text-white focus:outline-none focus:border-sky-500 disabled:opacity-60"
               required
             />
           </div>
@@ -281,9 +310,9 @@ export default function ModalCadastroGrupoAcesso({
             <input
               type="text"
               value={descricao}
-              onChange={e => setDescricao(e.target.value)}
-              placeholder="Ex: Acesso a vendas e clientes sem permissão para cancelar títulos..."
-              className="w-full px-3 py-1.5 bg-slate-900 border border-slate-700 rounded-xl text-xs text-white focus:outline-none focus:border-indigo-500"
+              onChange={(e) => setDescricao(e.target.value)}
+              placeholder="Ex: Emissão de CT-e e MDF-e sem acesso a certificados..."
+              className="w-full px-3 py-1.5 bg-slate-900 border border-slate-700 rounded-xl text-xs text-white focus:outline-none focus:border-sky-500"
             />
           </div>
         </div>
@@ -296,7 +325,7 @@ export default function ModalCadastroGrupoAcesso({
             className={clsx(
               'px-4 py-2 text-xs font-bold border-b-2 transition-all cursor-pointer flex items-center gap-1.5',
               activeTab === 'menus'
-                ? 'border-indigo-500 text-indigo-400 bg-slate-900/60 rounded-t-lg'
+                ? 'border-sky-500 text-sky-400 bg-slate-900/60 rounded-t-lg'
                 : 'border-transparent text-slate-400 hover:text-slate-200'
             )}
           >
@@ -308,21 +337,19 @@ export default function ModalCadastroGrupoAcesso({
             className={clsx(
               'px-4 py-2 text-xs font-bold border-b-2 transition-all cursor-pointer flex items-center gap-1.5',
               activeTab === 'acoes'
-                ? 'border-indigo-500 text-indigo-400 bg-slate-900/60 rounded-t-lg'
+                ? 'border-sky-500 text-sky-400 bg-slate-900/60 rounded-t-lg'
                 : 'border-transparent text-slate-400 hover:text-slate-200'
             )}
           >
-            <Lock size={14} /> Restrições de Ações Gerais (Travas Operacionais)
+            <Lock size={14} /> Travas Fiscais & Operacionais
           </button>
         </div>
 
         {/* CORPO DA SELEÇÃO DE PERMISSÕES */}
         <div className="flex-1 overflow-y-auto p-4 space-y-3 text-xs">
-          
-          {/* ABA 1: PERMISSÕES DE MENUS */}
           {activeTab === 'menus' && (
             <div className="space-y-3">
-              {Object.keys(DEFAULT_MENUS).map(categoryKey => {
+              {Object.keys(DEFAULT_MENUS).map((categoryKey) => {
                 const categoryDef = (DEFAULT_MENUS as any)[categoryKey]
                 const Icon = categoryDef.icon
                 const isExpanded = expandedCategories[categoryKey] ?? true
@@ -331,18 +358,18 @@ export default function ModalCadastroGrupoAcesso({
 
                 return (
                   <div key={categoryKey} className="bg-slate-950/70 border border-slate-800 rounded-xl overflow-hidden">
-                    
-                    {/* TOPO DA CATEGORIA / MENU PRINCIPAL */}
                     <div className="px-3.5 py-2.5 bg-slate-800/80 flex items-center justify-between">
                       <div className="flex items-center gap-2">
                         <input
                           type="checkbox"
                           checked={isCategoryActive}
                           onChange={() => toggleCategoryAccess(categoryKey)}
-                          className="w-4 h-4 rounded text-indigo-600 focus:ring-0 cursor-pointer accent-indigo-600"
+                          className="w-4 h-4 rounded text-sky-600 focus:ring-0 cursor-pointer accent-sky-600"
                         />
-                        <Icon size={15} className="text-indigo-400" />
-                        <span className="font-extrabold text-white text-xs uppercase tracking-wider">{categoryDef.label}</span>
+                        <Icon size={15} className="text-sky-400" />
+                        <span className="font-extrabold text-white text-xs uppercase tracking-wider">
+                          {categoryDef.label}
+                        </span>
                       </div>
 
                       <button
@@ -354,10 +381,9 @@ export default function ModalCadastroGrupoAcesso({
                       </button>
                     </div>
 
-                    {/* LISTA DE SUBMENUS */}
                     {isExpanded && (
                       <div className="p-3 grid grid-cols-1 sm:grid-cols-2 gap-2 bg-slate-900/40">
-                        {Object.keys(categoryDef.submenus).map(subKey => {
+                        {Object.keys(categoryDef.submenus).map((subKey) => {
                           const subLabel = categoryDef.submenus[subKey]
                           const isSubActive = Boolean(categoryState.submenus?.[subKey])
 
@@ -367,7 +393,7 @@ export default function ModalCadastroGrupoAcesso({
                               className={clsx(
                                 'flex items-center gap-2 p-2 rounded-lg border transition-all cursor-pointer',
                                 isSubActive
-                                  ? 'bg-indigo-950/40 border-indigo-800/60 text-slate-200'
+                                  ? 'bg-sky-950/40 border-sky-800/60 text-slate-200'
                                   : 'bg-slate-950/40 border-slate-800/60 text-slate-500 opacity-70 hover:opacity-100'
                               )}
                             >
@@ -375,7 +401,7 @@ export default function ModalCadastroGrupoAcesso({
                                 type="checkbox"
                                 checked={isSubActive}
                                 onChange={() => toggleSubmenuAccess(categoryKey, subKey)}
-                                className="w-3.5 h-3.5 rounded text-indigo-600 focus:ring-0 accent-indigo-600"
+                                className="w-3.5 h-3.5 rounded text-sky-600 focus:ring-0 accent-sky-600"
                               />
                               <span className="font-medium text-[11px] select-none">{subLabel}</span>
                             </label>
@@ -389,15 +415,16 @@ export default function ModalCadastroGrupoAcesso({
             </div>
           )}
 
-          {/* ABA 2: RESTRIÇÕES DE AÇÕES GERAIS */}
           {activeTab === 'acoes' && (
             <div className="space-y-2.5">
               <div className="p-3 bg-amber-950/40 border border-amber-800/60 rounded-xl text-amber-300 text-[11px] flex items-center gap-2 mb-3">
                 <AlertCircle size={16} className="shrink-0 text-amber-400" />
-                <span>Defina o nível de controle operacional. Desativar uma permissão aplicará uma trava imediata nas telas da aplicação.</span>
+                <span>
+                  Defina o nível de autoridade fiscal e operacional deste perfil. Desativar uma opção bloqueia imediatamente a ação.
+                </span>
               </div>
 
-              {DEFAULT_ACOES.map(ac => {
+              {DEFAULT_ACOES.map((ac) => {
                 const isAllowed = permissoesAcoes[ac.key] ?? true
 
                 return (
@@ -413,7 +440,11 @@ export default function ModalCadastroGrupoAcesso({
                   >
                     <div className="space-y-0.5 max-w-md">
                       <div className="font-extrabold text-xs flex items-center gap-2">
-                        {isAllowed ? <Check size={14} className="text-emerald-400" /> : <Ban size={14} className="text-rose-400" />}
+                        {isAllowed ? (
+                          <Check size={14} className="text-emerald-400" />
+                        ) : (
+                          <Ban size={14} className="text-rose-400" />
+                        )}
                         {ac.label}
                       </div>
                       <p className="text-[10px] text-slate-400">{ac.desc}</p>
@@ -436,7 +467,6 @@ export default function ModalCadastroGrupoAcesso({
               })}
             </div>
           )}
-
         </div>
 
         {/* FOOTER */}
@@ -452,13 +482,12 @@ export default function ModalCadastroGrupoAcesso({
             type="button"
             onClick={handleSave}
             disabled={saving}
-            className="px-5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-extrabold shadow-md flex items-center gap-1.5 transition-all cursor-pointer text-xs"
+            className="px-5 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-xl font-extrabold shadow-md flex items-center gap-1.5 transition-all cursor-pointer text-xs disabled:opacity-60"
           >
             {saving ? <Shield size={14} className="animate-spin" /> : <Check size={14} />}
             {saving ? 'Salvando...' : 'Salvar Grupo de Acesso'}
           </button>
         </div>
-
       </div>
     </div>
   )

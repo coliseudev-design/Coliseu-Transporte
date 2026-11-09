@@ -12,6 +12,7 @@ export interface User {
   layout_version?: string
   grupo_id?: number | null
   grupo_nome?: string
+  empresa_nome?: string | null
   permissoes_menus?: Record<string, { acesso?: boolean; submenus?: Record<string, boolean> }> | null
   permissoes_acoes?: Record<string, boolean> | null
   precisa_alterar_senha?: boolean
