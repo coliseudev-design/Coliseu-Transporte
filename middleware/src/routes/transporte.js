@@ -43,7 +43,11 @@ async function ensureTransporteColumns() {
               ADD COLUMN IF NOT EXISTS natureza_padrao_cte VARCHAR(255) DEFAULT 'PRESTACAO DE SERVICO DE TRANSPORTE',
               ADD COLUMN IF NOT EXISTS aliquota_icms_padrao NUMERIC(7,4) DEFAULT 12.00,
               ADD COLUMN IF NOT EXISTS complemento VARCHAR(120),
-              ADD COLUMN IF NOT EXISTS email VARCHAR(255);
+              ADD COLUMN IF NOT EXISTS email VARCHAR(255),
+              ADD COLUMN IF NOT EXISTS logo_base64 TEXT,
+              ADD COLUMN IF NOT EXISTS logo_mime VARCHAR(40) DEFAULT 'image/png',
+              ADD COLUMN IF NOT EXISTS logo_atualizada_em TIMESTAMPTZ,
+              ADD COLUMN IF NOT EXISTS logo_focus_sincronizada BOOLEAN DEFAULT FALSE;
 
             ALTER TABLE dash_certificados
               ADD COLUMN IF NOT EXISTS focus_sincronizado BOOLEAN DEFAULT FALSE,
@@ -1667,6 +1671,10 @@ router.get('/emitentes', async (req, res) => {
                 token_producao_preview: plainProd ? `${plainProd.slice(0, 4)}••••` : null,
                 cnpj_valido: TransporteService.validarCnpjReal(r.cnpj),
                 software_house_disponivel: masterCfg.temMasterToken,
+                tem_logo: Boolean(r.logo_base64),
+                logo_data_uri: r.logo_base64
+                    ? `data:${r.logo_mime || 'image/png'};base64,${r.logo_base64}`
+                    : null,
                 regime_tributario: r.regime_tributario || cfg.focus_regime_tributario || '1',
                 serie_cte: r.serie_cte || cfg.focus_serie_cte || '1',
                 serie_mdfe: r.serie_mdfe || cfg.focus_serie_mdfe || '1',
@@ -2046,6 +2054,34 @@ router.post('/emitentes', async (req, res) => {
             ]
         ).catch(() => {});
 
+        if (b.logo_base64 && typeof b.logo_base64 === 'string' && b.logo_base64.trim().length > 32) {
+            const normLogo = TransporteService.normalizarLogoBase64(b.logo_base64);
+            const logoRes = await db.query(
+                `UPDATE dash_emitentes
+                 SET logo_base64 = $1,
+                     logo_mime = $2,
+                     logo_atualizada_em = NOW(),
+                     updated_at = NOW()
+                 WHERE id = $3 AND tenant_id = $4
+                 RETURNING *`,
+                [normLogo.rawBase64, normLogo.mime, saved.id, tenantId]
+            );
+            if (logoRes.rows[0]) saved = logoRes.rows[0];
+        } else if (b.remover_logo === true) {
+            const logoRes = await db.query(
+                `UPDATE dash_emitentes
+                 SET logo_base64 = NULL,
+                     logo_mime = NULL,
+                     logo_atualizada_em = NOW(),
+                     logo_focus_sincronizada = FALSE,
+                     updated_at = NOW()
+                 WHERE id = $1 AND tenant_id = $2
+                 RETURNING *`,
+                [saved.id, tenantId]
+            );
+            if (logoRes.rows[0]) saved = logoRes.rows[0];
+        }
+
         const plainHomologSaved = String(decryptSecret(saved.focus_token_homologacao) || '').trim();
         const plainProdSaved = String(decryptSecret(saved.focus_token_producao) || '').trim();
 
@@ -2058,12 +2094,112 @@ router.post('/emitentes', async (req, res) => {
             tem_token_producao: Boolean(plainProdSaved),
             token_homologacao_preview: plainHomologSaved ? `${plainHomologSaved.slice(0, 4)}••••` : null,
             token_producao_preview: plainProdSaved ? `${plainProdSaved.slice(0, 4)}••••` : null,
+            tem_logo: Boolean(saved.logo_base64),
+            logo_data_uri: saved.logo_base64
+                ? `data:${saved.logo_mime || 'image/png'};base64,${saved.logo_base64}`
+                : null,
             cnpj_valido: true,
         };
 
         return res.json({ success: true, data: maskedSaved });
     } catch (err) {
         return res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * Envia / atualiza a logomarca da empresa e sincroniza automaticamente com a Focus NFe (/v2/empresas -> arquivo_logo_base64)
+ * para impressão oficial no cabeçalho do DACTE (CT-e), DAMDFE (MDF-e) e DANFE (NF-e).
+ */
+router.post('/emitentes/:id/logo', async (req, res) => {
+    const tenantId = req.tenant.id;
+    const emitenteId = parseInt(req.params.id, 10);
+    if (!emitenteId) {
+        return res.status(400).json({ error: 'Salve os Dados da Empresa primeiro antes de enviar a logomarca.' });
+    }
+
+    try {
+        const { logo_base64 } = req.body || {};
+        const norm = TransporteService.normalizarLogoBase64(logo_base64);
+
+        const upd = await db.query(
+            `UPDATE dash_emitentes
+             SET logo_base64 = $1,
+                 logo_mime = $2,
+                 logo_atualizada_em = NOW(),
+                 logo_focus_sincronizada = FALSE,
+                 updated_at = NOW()
+             WHERE id = $3 AND tenant_id = $4
+             RETURNING id`,
+            [norm.rawBase64, norm.mime, emitenteId, tenantId]
+        );
+        if (upd.rowCount === 0) {
+            return res.status(404).json({ error: 'Empresa emitente não encontrada para este tenant.' });
+        }
+
+        const syncRes = await TransporteService.sincronizarLogoFocus(tenantId, emitenteId, {
+            deleteLogo: false,
+        });
+
+        return res.json({
+            success: true,
+            ...syncRes,
+            tem_logo: true,
+            logo_mime: norm.mime,
+            logo_bytes: norm.bytes,
+            logo_data_uri: `data:${norm.mime};base64,${norm.rawBase64}`,
+        });
+    } catch (err) {
+        return res.status(400).json({ error: err.message });
+    }
+});
+
+/**
+ * Remove a logomarca da empresa no banco e na Focus NFe (/v2/empresas -> delete_logo: true).
+ */
+router.delete('/emitentes/:id/logo', async (req, res) => {
+    const tenantId = req.tenant.id;
+    const emitenteId = parseInt(req.params.id, 10);
+    if (!emitenteId) {
+        return res.status(400).json({ error: 'ID do emitente inválido.' });
+    }
+
+    try {
+        const upd = await db.query(
+            `UPDATE dash_emitentes
+             SET logo_base64 = NULL,
+                 logo_mime = NULL,
+                 logo_atualizada_em = NOW(),
+                 logo_focus_sincronizada = FALSE,
+                 updated_at = NOW()
+             WHERE id = $1 AND tenant_id = $2
+             RETURNING id`,
+            [emitenteId, tenantId]
+        );
+        if (upd.rowCount === 0) {
+            return res.status(404).json({ error: 'Empresa emitente não encontrada para este tenant.' });
+        }
+
+        let syncRes = {
+            focus_sincronizado: false,
+            mensagem: 'Logomarca removida com sucesso.',
+        };
+        try {
+            syncRes = await TransporteService.sincronizarLogoFocus(tenantId, emitenteId, {
+                deleteLogo: true,
+            });
+        } catch (focusErr) {
+            logger.warn('[Transporte Logo] Logo removida localmente, aviso Focus NFe:', focusErr.message);
+        }
+
+        return res.json({
+            success: true,
+            ...syncRes,
+            tem_logo: false,
+            logo_data_uri: null,
+        });
+    } catch (err) {
+        return res.status(400).json({ error: err.message });
     }
 });
 

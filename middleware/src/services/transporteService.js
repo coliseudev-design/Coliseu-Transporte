@@ -3644,9 +3644,61 @@ class TransporteService {
   }
 
   /**
+   * Valida e normaliza a logomarca em Base64 (aceita Data URI ou Base64 puro, PNG ou JPEG).
+   * Retorna o Base64 puro sem cabeçalho data:image/... exigido pelo campo arquivo_logo_base64 da Focus NFe.
+   */
+  static normalizarLogoBase64(logoInput) {
+    const str = String(logoInput || '').trim();
+    if (!str) {
+      throw new Error('Nenhum arquivo de logomarca foi enviado.');
+    }
+
+    let declaredMime = null;
+    let rawBase64 = str;
+    const dataUriMatch = str.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,([\s\S]+)$/i);
+    if (dataUriMatch) {
+      declaredMime = dataUriMatch[1].toLowerCase();
+      rawBase64 = dataUriMatch[2];
+    }
+    rawBase64 = rawBase64.replace(/\s+/g, '');
+
+    if (!rawBase64 || rawBase64.length < 32) {
+      throw new Error('Arquivo de logomarca vazio ou inválido.');
+    }
+
+    const buf = Buffer.from(rawBase64, 'base64');
+    if (!buf || buf.length < 16) {
+      throw new Error('Não foi possível decodificar a imagem enviada.');
+    }
+    if (buf.length > 1536 * 1024) {
+      throw new Error('A logomarca excede o limite máximo de 1,5 MB. Envie uma imagem PNG ou JPG otimizada.');
+    }
+
+    const isPng =
+      buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47;
+    const isJpeg =
+      buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
+
+    if (!isPng && !isJpeg) {
+      throw new Error('Formato de imagem não suportado pela SEFAZ/Focus NFe. Utilize PNG ou JPG/JPEG.');
+    }
+
+    const mime = isPng ? 'image/png' : isJpeg ? 'image/jpeg' : declaredMime || 'image/png';
+    return {
+      rawBase64: buf.toString('base64'),
+      mime,
+      bytes: buf.length,
+    };
+  }
+
+  /**
    * Monta o payload oficial de cadastro/atualização de empresa em /v2/empresas da Focus NFe v2.
    */
-  static montarPayloadEmpresaFocus(emitente, certDecifrado = null, { isNew = false } = {}) {
+  static montarPayloadEmpresaFocus(
+    emitente,
+    certDecifrado = null,
+    { isNew = false, deleteLogo = false } = {}
+  ) {
     const cnpj = digitsOnly(emitente?.cnpj);
     if (!validarCnpjReal(cnpj)) {
       throw new Error(
@@ -3739,6 +3791,20 @@ class TransporteService {
       payload.senha_certificado = certDecifrado.senha;
     }
 
+    if (deleteLogo) {
+      payload.delete_logo = true;
+    } else if (emitente?.logo_base64) {
+      try {
+        const { rawBase64 } = this.normalizarLogoBase64(emitente.logo_base64);
+        if (rawBase64) {
+          payload.arquivo_logo_base64 = rawBase64;
+          payload.delete_logo = false;
+        }
+      } catch (_) {
+        // Evita interromper provisionamento geral caso logo antiga esteja corrompida
+      }
+    }
+
     return payload;
   }
 
@@ -3750,7 +3816,7 @@ class TransporteService {
   static async provisionarEmpresaFocus(
     tenantId,
     emitenteId = null,
-    { registrarWebhooks = true, incluirCertificado = true } = {}
+    { registrarWebhooks = true, incluirCertificado = true, deleteLogo = false } = {}
   ) {
     const emitente = await this.getEmitente(tenantId, emitenteId);
     if (!emitente || !emitente.id) {
@@ -3784,6 +3850,7 @@ class TransporteService {
 
     const payload = this.montarPayloadEmpresaFocus(emitente, cert, {
       isNew: !existingFocus,
+      deleteLogo,
     });
 
     let resEmpresa;
@@ -3822,6 +3889,7 @@ class TransporteService {
 
     const certValidoAte = resEmpresa.certificado_valido_ate || null;
     const certValidoDe = resEmpresa.certificado_valido_de || null;
+    const logoSincronizada = !deleteLogo && Boolean(emitente.logo_base64);
 
     await db.query(
       `UPDATE dash_emitentes SET
@@ -3831,6 +3899,7 @@ class TransporteService {
           focus_token = COALESCE($4, focus_token),
           focus_ambiente = $5,
           certificado_valido_ate = COALESCE($6::timestamptz, certificado_valido_ate),
+          logo_focus_sincronizada = $9,
           focus_sincronizado_em = NOW(),
           focus_ultimo_erro = NULL,
           updated_at = NOW()
@@ -3844,6 +3913,7 @@ class TransporteService {
         certValidoAte,
         emitente.id,
         tenantId,
+        logoSincronizada,
       ]
     );
 
@@ -3902,10 +3972,107 @@ class TransporteService {
       tem_token_producao: Boolean(plainProd),
       certificado_enviado: Boolean(cert),
       certificado_valido_ate: certValidoAte,
+      logo_sincronizada: logoSincronizada,
       webhooks: hooksResult,
       mensagem: existingFocus
         ? `Empresa sincronizada com sucesso na Focus NFe (ID #${focusEmpresaId}).`
         : `Empresa cadastrada e habilitada com sucesso na Focus NFe (ID #${focusEmpresaId})!`,
+    };
+  }
+
+  /**
+   * Sincroniza exclusivamente a logomarca (arquivo_logo_base64 ou delete_logo) na empresa Focus NFe (/v2/empresas/{id}),
+   * para impressão automática no cabeçalho do DACTE (CT-e), DAMDFE (MDF-e) e DANFE (NF-e).
+   */
+  static async sincronizarLogoFocus(tenantId, emitenteId = null, { deleteLogo = false } = {}) {
+    const emitente = await this.getEmitente(tenantId, emitenteId);
+    if (!emitente || !emitente.id) {
+      throw new Error('Salve os Dados da Empresa antes de sincronizar a logomarca.');
+    }
+
+    const masterCfg = await this.getMasterFocusConfig();
+    if (!masterCfg.temMasterToken) {
+      return {
+        focus_sincronizado: false,
+        motivo: 'SEM_MASTER_TOKEN',
+        mensagem:
+          'Logomarca salva no sistema. Quando o Token Principal Focus NFe (Software House) estiver ativo, clique em Sincronizar na Focus NFe para enviá-la ao DACTE/DANFE.',
+      };
+    }
+
+    const reseller = FocusClient.forReseller(masterCfg.masterToken);
+
+    let existingFocus = null;
+    if (emitente.focus_empresa_id) {
+      try {
+        existingFocus = await reseller.consultarEmpresa(emitente.focus_empresa_id);
+      } catch (err) {
+        if (err.statusCode !== 404) throw err;
+      }
+    }
+    if (!existingFocus && validarCnpjReal(emitente.cnpj)) {
+      const encontradas = await reseller.listarEmpresas({ cnpj: emitente.cnpj });
+      existingFocus =
+        encontradas.find((e) => digitsOnly(e.cnpj) === digitsOnly(emitente.cnpj)) || null;
+    }
+
+    if (!existingFocus) {
+      if (deleteLogo) {
+        return {
+          focus_sincronizado: false,
+          motivo: 'EMPRESA_NAO_PROVISIONADA',
+          mensagem: 'Logomarca removida localmente.',
+        };
+      }
+      if (validarCnpjReal(emitente.cnpj) && emitente.inscricao_estadual) {
+        const prov = await this.provisionarEmpresaFocus(tenantId, emitente.id, {
+          registrarWebhooks: true,
+          incluirCertificado: true,
+          deleteLogo: false,
+        });
+        return {
+          focus_sincronizado: true,
+          focus_empresa_id: prov.focus_empresa_id,
+          acao: 'PROVISIONADA_COM_LOGO',
+          mensagem: `Logomarca salva e empresa sincronizada na Focus NFe (ID #${prov.focus_empresa_id})! Os próximos DACTEs/DAMDFEs/DANFEs já sairão com a logo.`,
+        };
+      }
+      return {
+        focus_sincronizado: false,
+        motivo: 'DADOS_FISCAIS_PENDENTES',
+        mensagem:
+          'Logomarca salva no sistema! Conclua o CNPJ/IE e clique em Provisionar na Focus NFe para ativá-la no DACTE.',
+      };
+    }
+
+    const logoPayload = deleteLogo
+      ? { delete_logo: true }
+      : {
+          arquivo_logo_base64: this.normalizarLogoBase64(emitente.logo_base64).rawBase64,
+          delete_logo: false,
+        };
+
+    const resEmpresa = await reseller.atualizarEmpresa(existingFocus.id, logoPayload);
+    const focusEmpresaId = String(resEmpresa?.id || existingFocus.id);
+
+    await db.query(
+      `UPDATE dash_emitentes SET
+          focus_empresa_id = COALESCE($1, focus_empresa_id),
+          logo_focus_sincronizada = $2,
+          focus_sincronizado_em = NOW(),
+          focus_ultimo_erro = NULL,
+          updated_at = NOW()
+       WHERE id = $3 AND tenant_id = $4`,
+      [focusEmpresaId, !deleteLogo, emitente.id, tenantId]
+    );
+
+    return {
+      focus_sincronizado: true,
+      focus_empresa_id: focusEmpresaId,
+      acao: deleteLogo ? 'LOGO_REMOVIDA_FOCUS' : 'LOGO_ATUALIZADA_FOCUS',
+      mensagem: deleteLogo
+        ? `Logomarca removida com sucesso do cadastro e da Focus NFe (Empresa ID #${focusEmpresaId}).`
+        : `Logomarca salva e sincronizada com sucesso na Focus NFe (Empresa ID #${focusEmpresaId})! Os próximos CT-es, MDF-es e NF-es emitidos já trarão a logo impressa no DACTE/DAMDFE/DANFE.`,
     };
   }
 

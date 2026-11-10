@@ -114,6 +114,7 @@ app.use(
         '/api/sync',
         '/api/configuracoes',
         '/api/transporte/certificados',
+        '/api/transporte/emitentes',
         '/api/transporte/cargas/importar-xml',
         '/api/templates',
         '/api/campanhas'

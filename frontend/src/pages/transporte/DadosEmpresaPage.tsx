@@ -1,11 +1,12 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import api from '../../services/api';
 import { useAuthStore } from '../../store/authStore';
 import {
   Building2, ShieldCheck, KeyRound, Save,
   CheckCircle2, MapPin, FileText, Wifi, Loader2, AlertTriangle,
-  Zap, Webhook, ChevronDown, ChevronUp, Lock, RefreshCw, Search
+  Zap, Webhook, ChevronDown, ChevronUp, Lock, RefreshCw, Search,
+  Upload, Trash2, Image as ImageIcon
 } from 'lucide-react';
 
 interface EmitenteForm {
@@ -62,9 +63,62 @@ function formatarCnpjMask(valor: string): string {
   return `${d.slice(0, 2)}.${d.slice(2, 5)}.${d.slice(5, 8)}/${d.slice(8, 12)}-${d.slice(12)}`;
 }
 
+async function converterLogoParaPngFiscal(file: File): Promise<{
+  dataUri: string;
+  width: number;
+  height: number;
+  kb: number;
+}> {
+  if (file.size > 10 * 1024 * 1024) {
+    throw new Error('O arquivo selecionado ultrapassa 10 MB. Escolha uma imagem menor.');
+  }
+
+  const fileDataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('Falha ao ler o arquivo de imagem.'));
+    reader.readAsDataURL(file);
+  });
+
+  const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const el = new window.Image();
+    el.onload = () => resolve(el);
+    el.onerror = () => reject(new Error('Formato de imagem inválido. Selecione PNG, JPG ou WEBP.'));
+    el.src = fileDataUrl;
+  });
+
+  const maxDim = 200; // Padrão recomendado pela Focus NFe (PNG até 200x200px) para DACTE/DANFE
+  const natW = img.naturalWidth || img.width || 200;
+  const natH = img.naturalHeight || img.height || 200;
+  const scale = natW > maxDim || natH > maxDim ? Math.min(maxDim / natW, maxDim / natH) : 1;
+  const targetW = Math.max(1, Math.round(natW * scale));
+  const targetH = Math.max(1, Math.round(natH * scale));
+
+  const canvas = document.createElement('canvas');
+  canvas.width = targetW;
+  canvas.height = targetH;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) {
+    throw new Error('Não foi possível inicializar o processador gráfico do navegador.');
+  }
+
+  // Achata transparência sobre fundo branco puro (evita fundo preto em motores PDF de DACTE/DANFE)
+  ctx.fillStyle = '#FFFFFF';
+  ctx.fillRect(0, 0, targetW, targetH);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(img, 0, 0, targetW, targetH);
+
+  const dataUri = canvas.toDataURL('image/png');
+  const rawLen = dataUri.split(',')[1]?.length || 0;
+  const kb = Math.max(1, Math.round((rawLen * 0.75) / 1024));
+  return { dataUri, width: targetW, height: targetH, kb };
+}
+
 export default function DadosEmpresaPage() {
   const qc = useQueryClient();
   const user = useAuthStore(s => s.user);
+  const logoInputRef = useRef<HTMLInputElement | null>(null);
 
   const [testingAmb, setTestingAmb] = useState<'homologacao' | 'producao' | null>(null);
   const [testResult, setTestResult] = useState<{ ok: boolean; msg: string } | null>(null);
@@ -75,6 +129,14 @@ export default function DadosEmpresaPage() {
   const [trocandoAmb, setTrocandoAmb] = useState(false);
   const [buscandoCep, setBuscandoCep] = useState(false);
   const [buscandoCnpj, setBuscandoCnpj] = useState(false);
+
+  // Estado da Logomarca Fiscal (DACTE / DAMDFE / DANFE)
+  const [logoPreviewUri, setLogoPreviewUri] = useState<string | null>(null);
+  const [logoPendingDataUri, setLogoPendingDataUri] = useState<string | null>(null);
+  const [logoMetaInfo, setLogoMetaInfo] = useState<string | null>(null);
+  const [salvandoLogo, setSalvandoLogo] = useState(false);
+  const [removendoLogo, setRemovendoLogo] = useState(false);
+  const [logoFeedback, setLogoFeedback] = useState<{ ok: boolean; msg: string } | null>(null);
 
   // Estado Super Admin Master (Software House Focus NFe)
   const [masterTokenInput, setMasterTokenInput] = useState('');
@@ -174,6 +236,12 @@ export default function DadosEmpresaPage() {
     }
   }, [emAtual?.id, emAtual?.cnpj, emAtual?.inscricao_estadual, emAtual?.rntrc, emAtual?.razao_social]);
 
+  useEffect(() => {
+    if (!logoPendingDataUri) {
+      setLogoPreviewUri(emAtual?.logo_data_uri || null);
+    }
+  }, [emAtual?.logo_data_uri, logoPendingDataUri]);
+
   const cnpjDigitos = String(form.cnpj || '').replace(/\D/g, '');
   const cnpjValido = validarCnpj14(cnpjDigitos);
   const softwareHouseAtiva = Boolean(meta?.software_house_disponivel || masterCfg?.tem_master_token);
@@ -183,6 +251,114 @@ export default function DadosEmpresaPage() {
     qc.invalidateQueries({ queryKey: ['emitentes'] });
     qc.invalidateQueries({ queryKey: ['emitentes-cargas'] });
     qc.invalidateQueries({ queryKey: ['emitentes-certificados'] });
+  };
+
+  const handleSelecionarLogo = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (e.target) e.target.value = '';
+    if (!file) return;
+
+    setLogoFeedback(null);
+    try {
+      const proc = await converterLogoParaPngFiscal(file);
+      setLogoPreviewUri(proc.dataUri);
+      setLogoPendingDataUri(proc.dataUri);
+      setLogoMetaInfo(`PNG otimizado · ${proc.width}×${proc.height}px · ${proc.kb} KB`);
+      setLogoFeedback({
+        ok: true,
+        msg: 'Pré-visualização pronta! Clique em "Salvar e Sincronizar Logo no DACTE/DANFE" para ativar nas próximas emissões.'
+      });
+    } catch (err: any) {
+      setLogoFeedback({
+        ok: false,
+        msg: err.message || 'Erro ao processar a imagem da logomarca.'
+      });
+    }
+  };
+
+  const handleSalvarLogoFocus = async () => {
+    const uriToSend = logoPendingDataUri || logoPreviewUri;
+    if (!uriToSend) return;
+
+    setSalvandoLogo(true);
+    setLogoFeedback(null);
+    setFeedbackBanner(null);
+
+    try {
+      let targetEmitenteId = form.id || emAtual?.id;
+      if (!targetEmitenteId) {
+        if (!cnpjValido) {
+          throw new Error('Preencha um CNPJ válido de 14 dígitos antes de salvar a logomarca.');
+        }
+        const saveRes = await api.post('/transporte/emitentes', {
+          ...form,
+          cnpj: cnpjDigitos
+        });
+        targetEmitenteId = saveRes.data?.data?.id;
+      }
+
+      const res = await api.post(`/transporte/emitentes/${targetEmitenteId}/logo`, {
+        logo_base64: uriToSend
+      });
+
+      setLogoPendingDataUri(null);
+      if (res.data?.logo_data_uri) {
+        setLogoPreviewUri(res.data.logo_data_uri);
+      }
+      invalidarConsultas();
+      setLogoFeedback({
+        ok: true,
+        msg:
+          res.data?.mensagem ||
+          'Logomarca salva e sincronizada com sucesso para impressão em DACTE, DAMDFE e DANFE!'
+      });
+    } catch (err: any) {
+      setLogoFeedback({
+        ok: false,
+        msg: err.response?.data?.error || err.message || 'Falha ao salvar e sincronizar a logomarca.'
+      });
+    } finally {
+      setSalvandoLogo(false);
+    }
+  };
+
+  const handleRemoverLogo = async () => {
+    setLogoFeedback(null);
+    const targetEmitenteId = form.id || emAtual?.id;
+
+    // Se era apenas pré-visualização ainda não salva, descarta localmente
+    if (logoPendingDataUri && !emAtual?.tem_logo) {
+      setLogoPendingDataUri(null);
+      setLogoPreviewUri(null);
+      setLogoMetaInfo(null);
+      return;
+    }
+
+    if (!targetEmitenteId) {
+      setLogoPendingDataUri(null);
+      setLogoPreviewUri(null);
+      return;
+    }
+
+    setRemovendoLogo(true);
+    try {
+      const res = await api.delete(`/transporte/emitentes/${targetEmitenteId}/logo`);
+      setLogoPendingDataUri(null);
+      setLogoPreviewUri(null);
+      setLogoMetaInfo(null);
+      invalidarConsultas();
+      setLogoFeedback({
+        ok: true,
+        msg: res.data?.mensagem || 'Logomarca removida com sucesso.'
+      });
+    } catch (err: any) {
+      setLogoFeedback({
+        ok: false,
+        msg: err.response?.data?.error || err.message || 'Erro ao remover logomarca.'
+      });
+    } finally {
+      setRemovendoLogo(false);
+    }
   };
 
   const salvarMasterMutation = useMutation({
@@ -231,17 +407,27 @@ export default function DadosEmpresaPage() {
   };
 
   const salvar = useMutation({
-    mutationFn: async (payload: EmitenteForm) =>
-      api.post('/transporte/emitentes', {
+    mutationFn: async (payload: EmitenteForm) => {
+      const saveRes = await api.post('/transporte/emitentes', {
         ...payload,
-        cnpj: String(payload.cnpj || '').replace(/\D/g, '')
-      }),
+        cnpj: String(payload.cnpj || '').replace(/\D/g, ''),
+        ...(logoPendingDataUri ? { logo_base64: logoPendingDataUri } : {})
+      });
+      const savedId = saveRes.data?.data?.id || payload.id;
+      if (logoPendingDataUri && savedId && softwareHouseAtiva) {
+        await api.post(`/transporte/emitentes/${savedId}/logo`, {
+          logo_base64: logoPendingDataUri
+        });
+      }
+      return saveRes;
+    },
     onSuccess: () => {
+      setLogoPendingDataUri(null);
       invalidarConsultas();
       setForm(prev => ({ ...prev, focus_token_homologacao: '', focus_token_producao: '' }));
       setFeedbackBanner({
         ok: true,
-        msg: 'Dados fiscais da transportadora e credenciais Focus NFe salvos com sucesso!'
+        msg: 'Dados fiscais da transportadora e configurações Focus NFe salvos com sucesso!'
       });
     },
     onError: (err: any) => {
@@ -288,19 +474,21 @@ export default function DadosEmpresaPage() {
 
     setProvisionando(true);
     try {
-      // 1. Persiste os dados fiscais atuais primeiro
+      // 1. Persiste os dados fiscais atuais primeiro (incluindo logo pendente, se houver)
       const saveRes = await api.post('/transporte/emitentes', {
         ...form,
-        cnpj: cnpjDigitos
+        cnpj: cnpjDigitos,
+        ...(logoPendingDataUri ? { logo_base64: logoPendingDataUri } : {})
       });
       const savedEmitenteId = saveRes.data?.data?.id || form.id;
 
-      // 2. Provisiona / sincroniza na conta Focus NFe (/v2/empresas + certificado A1 + /v2/hooks)
+      // 2. Provisiona / sincroniza na conta Focus NFe (/v2/empresas + logo + certificado A1 + /v2/hooks)
       const provRes = await api.post('/transporte/emitentes/provisionar-focus', {
         emitente_id: savedEmitenteId,
         registrar_webhooks: true,
         incluir_certificado: true
       });
+      setLogoPendingDataUri(null);
       invalidarConsultas();
       setFeedbackBanner({
         ok: true,
@@ -895,6 +1083,165 @@ export default function DadosEmpresaPage() {
               onChange={e => setForm({ ...form, nome_fantasia: e.target.value })}
               className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:ring-2 focus:ring-brand-500"
             />
+          </div>
+        </div>
+
+        {/* 2.1 Logomarca Fiscal da Empresa (Impressão Oficial em DACTE / DAMDFE / DANFE) */}
+        <div className="pt-5 border-t border-slate-100 dark:border-slate-700/60">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-4">
+            <div>
+              <h3 className="text-xs font-bold text-slate-700 dark:text-slate-200 uppercase tracking-wider flex items-center gap-2">
+                <ImageIcon className="w-4 h-4 text-brand-600" />
+                Logomarca da Empresa — Impressão no DACTE (CT-e), DAMDFE (MDF-e) e DANFE
+              </h3>
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                Enviada automaticamente à Focus NFe (<code>arquivo_logo_base64</code> · PNG otimizado até 200×200px) para sair impressa no quadro <strong>IDENTIFICAÇÃO DO EMITENTE</strong>.
+              </p>
+            </div>
+
+            <div>
+              {logoPendingDataUri ? (
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-bold bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300">
+                  Nova logo selecionada · Clique p/ sincronizar
+                </span>
+              ) : emAtual?.tem_logo && emAtual?.logo_focus_sincronizada ? (
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-bold bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300">
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  Ativa no DACTE / DANFE (Focus NFe)
+                </span>
+              ) : emAtual?.tem_logo ? (
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-bold bg-sky-100 text-sky-800 dark:bg-sky-950/60 dark:text-sky-300">
+                  Salva localmente · Pendente sinc. Focus
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400">
+                  Sem logomarca cadastrada
+                </span>
+              )}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-stretch">
+            {/* Pré-visualização Fiel do Quadro IDENTIFICAÇÃO DO EMITENTE (Padrão SEFAZ DACTE / DANFE) */}
+            <div className="lg:col-span-7 flex flex-col justify-between rounded-xl border-2 border-slate-900 bg-white text-slate-900 p-3.5 shadow-sm">
+              <div className="flex items-center gap-3.5 min-h-[116px]">
+                <button
+                  type="button"
+                  onClick={() => logoInputRef.current?.click()}
+                  title="Clique para selecionar a logomarca da empresa"
+                  className="w-28 h-28 shrink-0 rounded-lg border border-dashed border-slate-300 hover:border-brand-500 bg-white flex flex-col items-center justify-center overflow-hidden transition-colors cursor-pointer group"
+                >
+                  {logoPreviewUri ? (
+                    <img
+                      src={logoPreviewUri}
+                      alt="Logomarca da Empresa no DACTE/DANFE"
+                      className="max-w-full max-h-full object-contain p-1"
+                    />
+                  ) : (
+                    <div className="flex flex-col items-center text-center px-2 text-slate-400 group-hover:text-brand-600">
+                      <Upload className="w-5 h-5 mb-1" />
+                      <span className="text-[10px] font-semibold leading-tight">
+                        Clique p/ enviar Logo
+                      </span>
+                    </div>
+                  )}
+                </button>
+
+                <div className="flex-1 min-w-0 text-center px-1">
+                  <p className="text-[10px] font-bold tracking-wider uppercase text-slate-600">
+                    IDENTIFICAÇÃO DO EMITENTE
+                  </p>
+                  <p className="text-xs sm:text-sm font-bold uppercase text-slate-950 leading-snug mt-0.5 truncate">
+                    {form.razao_social || 'RAZÃO SOCIAL DA TRANSPORTADORA'}
+                  </p>
+                  <p className="text-[11px] font-mono font-semibold text-slate-800 mt-1">
+                    {form.cnpj || '00.000.000/0001-00'}
+                    {form.inscricao_estadual ? ` / ${form.inscricao_estadual}` : ''}
+                  </p>
+                  <p className="text-[10px] uppercase text-slate-700 mt-1 leading-tight line-clamp-2">
+                    {[form.logradouro, form.numero].filter(Boolean).join(', ') || 'ENDEREÇO FISCAL'}
+                    {form.bairro ? ` - ${form.bairro}` : ''}
+                  </p>
+                  <p className="text-[10px] text-slate-700 leading-tight mt-0.5">
+                    {form.municipio || 'Dourados'} - {form.uf || 'MS'}
+                    {form.cep ? ` - CEP: ${form.cep}` : ''}
+                  </p>
+                </div>
+              </div>
+              <div className="mt-2 pt-1.5 border-t border-slate-200 flex items-center justify-between text-[10px] text-slate-500">
+                <span>Simulação em escala do cabeçalho oficial do DACTE / DANFE</span>
+                {logoMetaInfo && <span className="font-mono font-semibold text-slate-600">{logoMetaInfo}</span>}
+              </div>
+            </div>
+
+            {/* Controles de Upload, Sincronização Focus NFe e Remoção */}
+            <div className="lg:col-span-5 rounded-xl bg-slate-50 dark:bg-slate-900/50 border border-slate-200/80 dark:border-slate-700/80 p-4 flex flex-col justify-between gap-3">
+              <input
+                ref={logoInputRef}
+                type="file"
+                accept="image/png,image/jpeg,image/webp,image/svg+xml"
+                onChange={handleSelecionarLogo}
+                className="hidden"
+              />
+
+              <div className="space-y-2">
+                <p className="text-xs font-semibold text-slate-800 dark:text-slate-100">
+                  Formatos aceitos: PNG, JPG ou WEBP
+                </p>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
+                  O sistema redimensiona e converte automaticamente para <strong>PNG de até 200×200 pixels</strong> sobre fundo branco (padrão exigido pela SEFAZ / Focus NFe). Após sincronizar, todos os <strong>novos</strong> CT-es, MDF-es e NF-es emitidos trarão a logomarca impressa.
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => logoInputRef.current?.click()}
+                  disabled={salvandoLogo || removendoLogo}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-100 text-xs font-semibold transition-colors cursor-pointer"
+                >
+                  <Upload className="w-3.5 h-3.5 text-brand-600" />
+                  {logoPreviewUri ? 'Trocar Imagem' : 'Selecionar Logo'}
+                </button>
+
+                {(logoPendingDataUri || (logoPreviewUri && !emAtual?.logo_focus_sincronizada)) && (
+                  <button
+                    type="button"
+                    onClick={handleSalvarLogoFocus}
+                    disabled={salvandoLogo || removendoLogo}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-sm disabled:opacity-50 transition-colors cursor-pointer"
+                  >
+                    {salvandoLogo ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+                    {salvandoLogo ? 'Sincronizando...' : 'Salvar e Sincronizar no DACTE'}
+                  </button>
+                )}
+
+                {logoPreviewUri && (
+                  <button
+                    type="button"
+                    onClick={handleRemoverLogo}
+                    disabled={salvandoLogo || removendoLogo}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-red-50 hover:bg-red-100 dark:bg-red-950/40 dark:hover:bg-red-950/70 border border-red-200 dark:border-red-800/60 text-red-700 dark:text-red-300 text-xs font-semibold disabled:opacity-50 transition-colors cursor-pointer"
+                  >
+                    {removendoLogo ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+                    Remover
+                  </button>
+                )}
+              </div>
+
+              {logoFeedback && (
+                <div className={`flex items-start gap-2 p-2.5 rounded-xl text-[11px] font-medium ${
+                  logoFeedback.ok
+                    ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-800 dark:text-emerald-200 border border-emerald-200 dark:border-emerald-800/60'
+                    : 'bg-red-50 dark:bg-red-950/40 text-red-800 dark:text-red-200 border border-red-200 dark:border-red-800/60'
+                }`}>
+                  {logoFeedback.ok
+                    ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
+                    : <AlertTriangle className="w-3.5 h-3.5 text-red-600 shrink-0 mt-0.5" />}
+                  <span>{logoFeedback.msg}</span>
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
