@@ -70,6 +70,31 @@ export default function MdfesPage() {
     }
   };
 
+  const handleBaixarArtefato = async (id: number, formato: 'pdf' | 'xml', fallbackUrl?: string) => {
+    try {
+      const res = await api.get(`/transporte/documentos/MDFE/${id}/download/${formato}`, {
+        params: { _t: Date.now() },
+        responseType: 'blob'
+      });
+      const mime = formato === 'xml' ? 'application/xml' : 'application/pdf';
+      const blob = new Blob([res.data], { type: mime });
+      const blobUrl = URL.createObjectURL(blob);
+      if (formato === 'pdf') {
+        window.open(blobUrl, '_blank');
+      } else {
+        const link = document.createElement('a');
+        link.href = blobUrl;
+        link.download = `mdfe-${id}.xml`;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+      }
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+    } catch {
+      if (fallbackUrl) window.open(fallbackUrl, '_blank');
+    }
+  };
+
   const handleEncerrar = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!modalEncerrar) return;
@@ -160,27 +185,25 @@ export default function MdfesPage() {
 
               <div className="flex items-center justify-between pt-2 border-t border-slate-100 dark:border-slate-700/60 text-xs">
                 <div className="flex gap-2">
-                  {mdfe.caminho_damdfe && (
-                    <a
-                      href={mdfe.caminho_damdfe}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-700 font-medium text-slate-700 dark:text-slate-200"
+                  {(mdfe.caminho_damdfe || mdfe.status === 'AUTORIZADO') && (
+                    <button
+                      type="button"
+                      onClick={() => handleBaixarArtefato(mdfe.id, 'pdf', mdfe.caminho_damdfe)}
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-700 font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-200 transition-colors"
                     >
                       <Eye className="w-3.5 h-3.5" />
                       DAMDFE
-                    </a>
+                    </button>
                   )}
                   {mdfe.caminho_xml && (
-                    <a
-                      href={mdfe.caminho_xml}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-700 font-medium text-slate-700 dark:text-slate-200"
+                    <button
+                      type="button"
+                      onClick={() => handleBaixarArtefato(mdfe.id, 'xml', mdfe.caminho_xml)}
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-700 font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-200 transition-colors"
                     >
                       <Download className="w-3.5 h-3.5" />
                       XML
-                    </a>
+                    </button>
                   )}
                 </div>
 

@@ -1189,7 +1189,7 @@ export default function DadosEmpresaPage() {
                   Formatos aceitos: PNG, JPG ou WEBP
                 </p>
                 <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
-                  O sistema redimensiona e converte automaticamente para <strong>PNG de até 200×200 pixels</strong> sobre fundo branco (padrão exigido pela SEFAZ / Focus NFe). Após sincronizar, todos os <strong>novos</strong> CT-es, MDF-es e NF-es emitidos trarão a logomarca impressa.
+                  O sistema redimensiona e converte automaticamente para <strong>PNG de até 200×200 pixels</strong> sobre fundo branco (padrão exigido pela SEFAZ / Focus NFe). Após sincronizar, a logomarca sai impressa tanto nos <strong>novos CT-es, MDF-es e NF-es</strong> quanto ao visualizar/baixar o DACTE de documentos já autorizados.
                 </p>
               </div>
 

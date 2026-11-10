@@ -138,13 +138,14 @@ export default function DocumentoDrawer({ tipo, documentoId, onClose, onVerRotei
     if (!doc?.id) return;
     try {
       const res = await api.get(`/transporte/documentos/${tipo}/${doc.id}/download/${formato}`, {
+        params: { _t: Date.now() },
         responseType: 'blob'
       });
       const mime = formato === 'xml' ? 'application/xml' : 'application/pdf';
       const blob = new Blob([res.data], { type: mime });
       const blobUrl = URL.createObjectURL(blob);
       if (formato === 'pdf') {
-        window.open(blobUrl, '_blank', 'noopener,noreferrer');
+        window.open(blobUrl, '_blank');
       } else {
         const link = document.createElement('a');
         link.href = blobUrl;

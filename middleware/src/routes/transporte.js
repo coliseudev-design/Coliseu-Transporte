@@ -533,6 +533,8 @@ router.get('/documentos/:tipo/:id/download/:formato', async (req, res) => {
             formato
         );
         res.setHeader('Content-Type', contentType);
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+        res.setHeader('Pragma', 'no-cache');
         res.setHeader('Content-Disposition', `${formato === 'pdf' ? 'inline' : 'attachment'}; filename="${filename}"`);
         return res.send(buffer);
     } catch (err) {

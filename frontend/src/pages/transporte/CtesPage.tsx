@@ -67,6 +67,31 @@ export default function CtesPage() {
     }
   };
 
+  const handleBaixarArtefato = async (id: number, formato: 'pdf' | 'xml', fallbackUrl?: string) => {
+    try {
+      const res = await api.get(`/transporte/documentos/CTE/${id}/download/${formato}`, {
+        params: { _t: Date.now() },
+        responseType: 'blob'
+      });
+      const mime = formato === 'xml' ? 'application/xml' : 'application/pdf';
+      const blob = new Blob([res.data], { type: mime });
+      const blobUrl = URL.createObjectURL(blob);
+      if (formato === 'pdf') {
+        window.open(blobUrl, '_blank');
+      } else {
+        const link = document.createElement('a');
+        link.href = blobUrl;
+        link.download = `cte-${id}.xml`;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+      }
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+    } catch {
+      if (fallbackUrl) window.open(fallbackUrl, '_blank');
+    }
+  };
+
   return (
     <div className="space-y-6 pb-20">
       {/* Header */}
@@ -195,29 +220,25 @@ export default function CtesPage() {
                           <span className="hidden xl:inline">SEFAZ</span>
                         </button>
                       )}
-                      {c.caminho_dacte && (
-                        <a
-                          href={c.caminho_dacte}
-                          target="_blank"
-                          rel="noreferrer"
-                          onClick={e => e.stopPropagation()}
+                      {(c.caminho_dacte || c.status === 'AUTORIZADO') && (
+                        <button
+                          type="button"
+                          onClick={e => { e.stopPropagation(); handleBaixarArtefato(c.id, 'pdf', c.caminho_dacte); }}
                           className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-medium bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-200 transition-colors"
                         >
                           <Eye className="w-3.5 h-3.5" />
                           <span className="hidden xl:inline">DACTE</span>
-                        </a>
+                        </button>
                       )}
                       {c.caminho_xml && (
-                        <a
-                          href={c.caminho_xml}
-                          target="_blank"
-                          rel="noreferrer"
-                          onClick={e => e.stopPropagation()}
+                        <button
+                          type="button"
+                          onClick={e => { e.stopPropagation(); handleBaixarArtefato(c.id, 'xml', c.caminho_xml); }}
                           className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-medium bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-200 transition-colors"
                         >
                           <Download className="w-3.5 h-3.5" />
                           <span className="hidden xl:inline">XML</span>
-                        </a>
+                        </button>
                       )}
                     </div>
                   )

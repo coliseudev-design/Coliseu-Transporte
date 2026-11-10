@@ -5,7 +5,7 @@
  * Este arquivo é atualizado automaticamente a cada commit/build.
  */
 
-const BUILD_NUMBER = 3141550;
+const BUILD_NUMBER = 3141753;
 
 /**
  * Formata o número de build no padrão de versão Coliseu Transporte.

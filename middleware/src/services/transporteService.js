@@ -9,6 +9,9 @@ const {
   calcularTributosCte400,
   montarCamposFocusImpostosCte400,
 } = require('./fiscal/cteTaxCalculator');
+const {
+  estamparLogoNoDocumentoAuxiliarPdf,
+} = require('./fiscal/dacteLogoStamper');
 const { safeCompare } = require('../middleware/auth');
 const {
   encryptSecret,
@@ -2072,9 +2075,133 @@ class TransporteService {
       if (Number(jaTemNovos[0]?.total || 0) === 0) {
         await this.gerarCtesTesteHomologacaoMs(tenantId);
       }
+
+      // 3. Se a transportadora possui logomarca configurada, ressincroniza com a Focus NFe e emite 1 CT-e único
+      // de validação em homologação (logo no DACTE + base líquida IBS/CBS LC 214/2025 art. 12 §2º V)
+      if (emitente.id && emitente.logo_base64) {
+        await this.sincronizarLogoFocus(tenantId, emitente.id, { deleteLogo: false }).catch((e) => {
+          logger.warn(`[Homolog MS] Aviso ao ressincronizar logomarca na Focus NFe: ${e.message}`);
+        });
+
+        const { rows: jaTemValLogo } = await db.query(
+          `SELECT COUNT(*)::int AS total FROM dash_ctes
+           WHERE tenant_id = $1 AND observacoes ILIKE '%VALIDACAO LOGO DACTE + IBS/CBS BASE LIQUIDA%'`,
+          [tenantId]
+        );
+
+        if (Number(jaTemValLogo[0]?.total || 0) === 0) {
+          await this.gerarCteUnicoValidacaoLogoHomologacao(tenantId, emitente);
+        }
+      }
     } catch (err) {
       logger.warn(`[Homolog MS] Aviso em reconciliarEGerarTestesHomologacaoMs: ${err.message}`);
     }
+  }
+
+  /**
+   * Emite 1 único CT-e em homologação (ex.: Nº 24) para validação integrada da logomarca no DACTE
+   * e da composição da base líquida IBS/CBS (vTPrest 280,00 - ICMS 33,60 = 246,40 -> IBS 0,25 + CBS 2,22).
+   */
+  static async gerarCteUnicoValidacaoLogoHomologacao(tenantId, emitenteInput = null) {
+    const emitente = emitenteInput || (await this.getEmitente(tenantId));
+    if (emitente.focus_ambiente === 'producao') return null;
+
+    const { rows: maxRows } = await db.query(
+      `SELECT COALESCE(MAX(numero), 0)::int AS max_num
+       FROM dash_ctes WHERE tenant_id = $1`,
+      [tenantId]
+    );
+    const proximoNumero = Math.max(24, Number(maxRows[0]?.max_num || 0) + 1);
+    const refInicial = this.gerarRef('CTE', tenantId, `L${proximoNumero}`);
+    const amanhaYmd = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+
+    const remetentePadraoMs = {
+      documento: digitsOnly(emitente.cnpj) || '03272053000150',
+      razao_social: 'CT-E EMITIDO EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL',
+      nome_fantasia: emitente.nome_fantasia || 'PANTANAL',
+      inscricao_estadual: digitsOnly(emitente.inscricao_estadual) || '283100630',
+      indicador_ie: '1',
+      logradouro: emitente.logradouro || 'RUA ARGENTINA',
+      numero: emitente.numero || '715',
+      bairro: emitente.bairro || 'PARQUE DAS NACOES',
+      cep: digitsOnly(emitente.cep) || '79841270',
+      uf: emitente.uf || 'MS',
+      municipio: emitente.municipio || 'Dourados',
+      codigo_municipio: emitente.codigo_municipio || '5003702',
+      telefone: digitsOnly(emitente.telefone) || '6734164605',
+    };
+
+    const destinatarioSp = {
+      documento: '11144477735',
+      razao_social: 'CT-E EMITIDO EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL',
+      inscricao_estadual: '',
+      indicador_ie: '9',
+      logradouro: 'AVENIDA PAULISTA',
+      numero: '1000',
+      bairro: 'BELA VISTA',
+      cep: '01310100',
+      uf: 'SP',
+      municipio: 'Sao Paulo',
+      codigo_municipio: '3550308',
+      telefone: '6734164605',
+    };
+
+    const documentosJson = [
+      {
+        id: `doc-logo-val-${proximoNumero}`,
+        tipo: 'OUTRO',
+        chave: `DECLARACAO-SEFAZ-SP-${proximoNumero}`,
+        numero: String(proximoNumero),
+        descricao: 'DECLARACAO DE TRANSPORTE INTERESTADUAL MS -> SP',
+      },
+    ];
+
+    const { rows: insRows } = await db.query(
+      `INSERT INTO dash_ctes (
+          tenant_id, emitente_id, ref, status, serie, numero, modelo,
+          formato_dacte, finalidade, cfop, natureza_operacao, modelo_cte, tipo_servico, modal,
+          retirar_mercadoria, tomador, tomador_documento,
+          uf_inicio, municipio_inicio, codigo_municipio_inicio,
+          uf_fim, municipio_fim, codigo_municipio_fim,
+          valor_total, valor_receber, peso_bruto, quantidade_volumes, unidade_medida, valor_carga,
+          componentes_valor, icms_situacao_tributaria, base_icms, aliquota_icms, valor_icms,
+          ibs_cbs_base_calculo, aliquota_ibs, aliquota_ibs_mun, aliquota_cbs,
+          valor_ibs, valor_cbs, valor_total_dfe,
+          codigo_situacao_fiscal, ibs_cbs_cst, ibs_cbs_class_trib,
+          produto_predominante, outras_caracteristicas_carga, data_prevista_entrega,
+          seguro_responsavel, observacoes,
+          remetente_dados, destinatario_dados, documentos_json, data_emissao
+       ) VALUES (
+          $1, $2, $3, 'RASCUNHO', '1', $4, '57',
+          'retrato', '0', '6353', 'PRESTACAO DE SERVICO DE TRANSPORTE INTERESTADUAL', 'normal', '0', '01',
+          true, '0', $5,
+          'MS', 'Dourados', '5003702',
+          'SP', 'Sao Paulo', '3550308',
+          280.00, 280.00, 320.00, 8, '01', 3400.00,
+          $6::jsonb, '00', 280.00, 12.00, 33.60,
+          246.40, 0.10, 0.00, 0.90,
+          0.25, 2.22, 280.00,
+          '000001', '000', '000001',
+          'MERCADORIAS DIVERSAS', 'CAIXAS', $7,
+          '4', 'VALIDACAO LOGO DACTE + IBS/CBS BASE LIQUIDA (LC 214/2025 ART. 12 §2º V — BASE 246,40)',
+          $8::jsonb, $9::jsonb, $10::jsonb, NOW()
+       ) RETURNING *`,
+      [
+        tenantId,
+        emitente.id,
+        refInicial,
+        proximoNumero,
+        remetentePadraoMs.documento,
+        JSON.stringify([{ nome: 'FRETE VALOR', valor: 280.0 }]),
+        amanhaYmd,
+        JSON.stringify(remetentePadraoMs),
+        JSON.stringify(destinatarioSp),
+        JSON.stringify(documentosJson),
+      ]
+    );
+
+    const novoCte = insRows[0];
+    return await this.emitirCte(tenantId, novoCte.id);
   }
 
   /**
@@ -3665,7 +3792,6 @@ class TransporteService {
         const { rawBase64 } = this.normalizarLogoBase64(emitente.logo_base64);
         if (rawBase64) {
           payload.arquivo_logo_base64 = rawBase64;
-          payload.delete_logo = false;
         }
       } catch (_) {
         // Evita interromper provisionamento geral caso logo antiga esteja corrompida
@@ -3912,15 +4038,34 @@ class TransporteService {
       };
     }
 
-    const logoPayload = deleteLogo
-      ? { delete_logo: true }
-      : {
-          arquivo_logo_base64: this.normalizarLogoBase64(emitente.logo_base64).rawBase64,
-          delete_logo: false,
-        };
+    let resEmpresa;
+    if (deleteLogo) {
+      resEmpresa = await reseller.atualizarEmpresa(existingFocus.id, { delete_logo: true });
+    } else {
+      const rawBase64 = this.normalizarLogoBase64(emitente.logo_base64).rawBase64;
+      resEmpresa = await reseller.atualizarEmpresa(existingFocus.id, {
+        arquivo_logo_base64: rawBase64,
+      });
 
-    const resEmpresa = await reseller.atualizarEmpresa(existingFocus.id, logoPayload);
+      // Caso o endpoint /v2/empresas exija os campos base da empresa para persistir caminho_logo, reenvia payload completo
+      if (!resEmpresa?.caminho_logo && validarCnpjReal(emitente.cnpj) && emitente.inscricao_estadual) {
+        try {
+          const fullPayload = this.montarPayloadEmpresaFocus(emitente, null, {
+            isNew: false,
+            deleteLogo: false,
+          });
+          resEmpresa = await reseller.atualizarEmpresa(existingFocus.id, fullPayload);
+        } catch (fallbackErr) {
+          logger.warn('[Focus Logo Sync] Aviso no fallback de payload completo:', {
+            emitenteId: emitente.id,
+            erro: fallbackErr.message,
+          });
+        }
+      }
+    }
+
     const focusEmpresaId = String(resEmpresa?.id || existingFocus.id);
+    const caminhoLogoFocus = resEmpresa?.caminho_logo || null;
 
     await db.query(
       `UPDATE dash_emitentes SET
@@ -3936,10 +4081,11 @@ class TransporteService {
     return {
       focus_sincronizado: true,
       focus_empresa_id: focusEmpresaId,
+      caminho_logo_focus: caminhoLogoFocus,
       acao: deleteLogo ? 'LOGO_REMOVIDA_FOCUS' : 'LOGO_ATUALIZADA_FOCUS',
       mensagem: deleteLogo
         ? `Logomarca removida com sucesso do cadastro e da Focus NFe (Empresa ID #${focusEmpresaId}).`
-        : `Logomarca salva e sincronizada com sucesso na Focus NFe (Empresa ID #${focusEmpresaId})! Os próximos CT-es, MDF-es e NF-es emitidos já trarão a logo impressa no DACTE/DAMDFE/DANFE.`,
+        : `Logomarca salva e sincronizada na Focus NFe (Empresa ID #${focusEmpresaId})! Já está ativa no DACTE/DAMDFE tanto para novas emissões quanto ao abrir/baixar PDFs já autorizados.`,
     };
   }
 
@@ -4396,8 +4542,36 @@ class TransporteService {
       );
     }
 
-    const { client } = await this.getFocusClient(tenantId, doc.emitente_id);
-    const buffer = await client.downloadArquivo(rawPath);
+    const { client, emitente } = await this.getFocusClient(tenantId, doc.emitente_id);
+    let buffer = await client.downloadArquivo(rawPath);
+
+    if (fmt === 'pdf') {
+      let logoBase64 = emitente?.logo_base64 || null;
+      if (!logoBase64) {
+        try {
+          const fallbackLogo = await db.query(
+            `SELECT logo_base64
+             FROM dash_emitentes
+             WHERE tenant_id = $1
+               AND logo_base64 IS NOT NULL
+               AND LENGTH(logo_base64) > 32
+             ORDER BY logo_atualizada_em DESC NULLS LAST, id DESC
+             LIMIT 1`,
+            [tenantId]
+          );
+          logoBase64 = fallbackLogo.rows[0]?.logo_base64 || null;
+        } catch (_) {
+          logoBase64 = null;
+        }
+      }
+
+      if (logoBase64) {
+        buffer = await estamparLogoNoDocumentoAuxiliarPdf(buffer, logoBase64, {
+          tipoDocumento: tipoUpper,
+        });
+      }
+    }
+
     const chaveOuRef = doc.chave_cte || doc.chave_mdfe || doc.ref || doc.id;
     return {
       buffer,
