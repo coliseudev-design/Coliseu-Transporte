@@ -206,6 +206,17 @@ export default function DocumentoDrawer({ tipo, documentoId, onClose, onVerRotei
                 <span className={`px-3 py-1 rounded-full text-xs font-bold ${statusBadge(doc.status)}`}>
                   {doc.status}
                 </span>
+                <span
+                  className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider border ${
+                    String(doc.focus_ambiente || 'homologacao').toLowerCase() === 'producao'
+                      ? 'bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800'
+                      : 'bg-amber-50 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 border-amber-300 dark:border-amber-700'
+                  }`}
+                >
+                  {String(doc.focus_ambiente || 'homologacao').toLowerCase() === 'producao'
+                    ? 'Produção SEFAZ'
+                    : 'Homologação SEFAZ (Sem Valor Fiscal)'}
+                </span>
                 {doc.status_sefaz && (
                   <span className="px-2.5 py-1 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 text-xs font-mono">
                     SEFAZ {doc.status_sefaz}

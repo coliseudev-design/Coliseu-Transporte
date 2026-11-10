@@ -391,6 +391,89 @@ export default function CteWizardPage() {
     };
   };
 
+  const emitenteSelecionado = useMemo(
+    () => emitentes.find((x: any) => String(x.id) === String(form.emitente_id)) || emitentes[0] || null,
+    [emitentes, form.emitente_id]
+  );
+  const ambienteAtivo =
+    String(emitenteSelecionado?.focus_ambiente || 'homologacao').toLowerCase() === 'producao'
+      ? 'producao'
+      : 'homologacao';
+
+  const preencherTesteHomologacao = () => {
+    const em = emitenteSelecionado || {};
+    const amanha = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+    setForm(f => ({
+      ...f,
+      emitente_id: String(em.id || f.emitente_id || ''),
+      cfop: '5353',
+      natureza_operacao: em.natureza_padrao_cte || 'PRESTACAO DE SERVICO DE TRANSPORTE',
+      codigo_municipio_inicio: em.codigo_municipio || '5003702',
+      municipio_inicio: em.municipio || 'Dourados',
+      uf_inicio: em.uf || 'MS',
+      codigo_municipio_fim: '5002704',
+      municipio_fim: 'Campo Grande',
+      uf_fim: 'MS',
+      tomador: '0',
+      remetente_dados: {
+        documento: em.cnpj || '03272053000150',
+        razao_social: em.razao_social || 'PANTANAL COMERCIO DE ALIMENTOS LTDA',
+        nome_fantasia: em.nome_fantasia || 'PANTANAL',
+        inscricao_estadual: em.inscricao_estadual || '283100630',
+        logradouro: em.logradouro || 'RUA ARGENTINA',
+        numero: em.numero || '715',
+        bairro: em.bairro || 'PARQUE DAS NACOES',
+        cep: em.cep || '79841270',
+        municipio: em.municipio || 'Dourados',
+        codigo_municipio: em.codigo_municipio || '5003702',
+        uf: em.uf || 'MS',
+        telefone: em.telefone || '6734164605'
+      },
+      destinatario_dados: {
+        documento: '11144477735',
+        razao_social: 'CT-E EMITIDO EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL',
+        nome_fantasia: 'DESTINATARIO HOMOLOGACAO',
+        inscricao_estadual: 'ISENTO',
+        logradouro: 'AVENIDA AFONSO PENA',
+        numero: '1000',
+        bairro: 'CENTRO',
+        cep: '79002070',
+        municipio: 'Campo Grande',
+        codigo_municipio: '5002704',
+        uf: 'MS',
+        telefone: '6734164605'
+      },
+      componentes_valor:
+        f.componentes_valor.length > 0 && parseFloat(f.componentes_valor[0]?.valor || '0') > 0
+          ? f.componentes_valor
+          : [{ id: 'comp-homolog-1', nome: 'FRETE_VALOR', valor: '150.00' }],
+      valor_total: f.valor_total && parseFloat(f.valor_total) > 0 ? f.valor_total : '150.00',
+      valor_receber: f.valor_receber && parseFloat(f.valor_receber) > 0 ? f.valor_receber : '150.00',
+      icms_situacao_tributaria: '00',
+      aliquota_icms: em.aliquota_icms_padrao != null ? String(em.aliquota_icms_padrao) : '12.00',
+      valor_total_carga: f.valor_total_carga && parseFloat(f.valor_total_carga) > 0 ? f.valor_total_carga : '1000.00',
+      peso_bruto: f.peso_bruto && parseFloat(f.peso_bruto) > 0 ? f.peso_bruto : '100',
+      quantidade_volumes: f.quantidade_volumes || '1',
+      produto_predominante: f.produto_predominante || 'MERCADORIAS DIVERSAS',
+      outras_caracteristicas_carga: f.outras_caracteristicas_carga || 'CAIXAS',
+      data_prevista_entrega: f.data_prevista_entrega || amanha,
+      documentos:
+        f.documentos.length > 0
+          ? f.documentos
+          : [
+              {
+                id: 'doc-homolog-1',
+                chave: 'DECLARACAO-HOMOLOGACAO-001',
+                tipo: 'OUTRO',
+                numero: '1'
+              }
+            ],
+      rntrc: f.rntrc || em.rntrc || '04755410',
+      observacoes: f.observacoes || 'CT-E EMITIDO EM AMBIENTE DE HOMOLOGACAO SEFAZ - SEM VALOR FISCAL'
+    }));
+    setVisitados(new Set(STEPS.map(s => s.id)));
+  };
+
   const salvar = async (transmitir: boolean) => {
     setSalvando(true);
     setErroSalvar('');
@@ -404,8 +487,36 @@ export default function CteWizardPage() {
       qc.invalidateQueries({ queryKey: ['ctes'] });
 
       if (transmitir) {
-        await api.post(`/transporte/ctes/${id}/emitir`);
-        alert('CT-e transmitido para a SEFAZ! O processamento é assíncrono — acompanhe o status em Documentos Emitidos.');
+        const resEmitir = await api.post(`/transporte/ctes/${id}/emitir`);
+        const dadosEmissao = resEmitir.data || {};
+        const ambLabel =
+          (dadosEmissao.ambiente || ambienteAtivo) === 'producao'
+            ? 'PRODUÇÃO (Validade Jurídica SEFAZ)'
+            : 'HOMOLOGAÇÃO (Testes SEFAZ — Sem Valor Fiscal)';
+
+        if (dadosEmissao.status === 'REJEITADO') {
+          setErroSalvar(
+            `SEFAZ [${dadosEmissao.status_sefaz || 'REJEITADO'}] (${ambLabel}): ${
+              dadosEmissao.mensagem_sefaz || 'Documento rejeitado pela SEFAZ. Revise os campos e tente novamente.'
+            }`
+          );
+          return;
+        }
+
+        if (dadosEmissao.status === 'AUTORIZADO') {
+          alert(
+            `CT-e AUTORIZADO com sucesso na SEFAZ!\n\n` +
+              `• Ambiente: ${ambLabel}\n` +
+              `• Número / Série: ${dadosEmissao.numero || '—'} / ${dadosEmissao.serie || '1'}\n` +
+              `• Protocolo SEFAZ: ${dadosEmissao.protocolo || '—'}\n` +
+              `• Chave de Acesso: ${dadosEmissao.chave_cte || '—'}`
+          );
+        } else {
+          alert(
+            `CT-e transmitido para a SEFAZ em ambiente de ${ambLabel}!\n` +
+              `Acompanhe o retorno e baixe o XML/DACTE em Documentos Emitidos.`
+          );
+        }
         navigate('/transporte/documentos');
       } else {
         alert('CT-e salvo como rascunho. Transmita quando estiver pronto.');
@@ -435,8 +546,25 @@ export default function CteWizardPage() {
   }));
 
   const adicionarDocumento = () => {
+    if (novoDoc.tipo === 'OUTRO') {
+      const numDoc = novoDoc.chave.trim() || novoDoc.numero.trim() || String(form.documentos.length + 1);
+      setForm(f => ({
+        ...f,
+        documentos: [
+          ...f.documentos,
+          {
+            id: `${Date.now()}-${Math.random()}`,
+            chave: `DECLARACAO-${numDoc}`,
+            tipo: 'OUTRO',
+            numero: numDoc
+          }
+        ]
+      }));
+      setNovoDoc({ chave: '', tipo: 'NFE', numero: '' });
+      return;
+    }
     if (!novoDoc.chave || novoDoc.chave.replace(/\D/g, '').length < 44) {
-      alert('Informe uma chave de acesso válida (44 dígitos).');
+      alert('Informe uma chave de acesso válida (44 dígitos) ou selecione "Outro (Declaração)" para teste sem NF-e.');
       return;
     }
     if (form.documentos.some(d => d.chave === novoDoc.chave)) {
@@ -550,15 +678,41 @@ export default function CteWizardPage() {
       {/* Cabeçalho */}
       <div className="bg-white dark:bg-slate-800 px-6 py-5 rounded-2xl border border-slate-200/80 dark:border-slate-700/80 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
         <div>
-          <h1 className="text-xl font-bold tracking-tight text-slate-900 dark:text-white flex items-center gap-2.5">
-            <FileText className="w-6 h-6 text-brand-600 dark:text-brand-500" />
-            Emissão de CT-e 4.00 / CT-e OS (Focus NFe v2)
-          </h1>
-          <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+          <div className="flex flex-wrap items-center gap-2.5">
+            <h1 className="text-xl font-bold tracking-tight text-slate-900 dark:text-white flex items-center gap-2.5">
+              <FileText className="w-6 h-6 text-brand-600 dark:text-brand-500" />
+              Emissão de CT-e 4.00 / CT-e OS (Focus NFe v2)
+            </h1>
+            <span
+              className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-bold uppercase tracking-wider border ${
+                ambienteAtivo === 'producao'
+                  ? 'bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800'
+                  : 'bg-amber-50 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 border-amber-300 dark:border-amber-700'
+              }`}
+            >
+              <ShieldCheck className="w-3.5 h-3.5" />
+              {ambienteAtivo === 'producao'
+                ? 'Ambiente: Produção (Validade Jurídica SEFAZ)'
+                : 'Ambiente: Homologação (Testes SEFAZ — Sem Valor Fiscal)'}
+            </span>
+          </div>
+          <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
             Preencha as 6 etapas na ordem da SEFAZ. Vincular uma NF-e preenche automaticamente Remetente, Destinatário e Carga.
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {ambienteAtivo === 'homologacao' && (
+            <button
+              type="button"
+              onClick={preencherTesteHomologacao}
+              disabled={salvando}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-bold border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-200 hover:bg-amber-100 dark:hover:bg-amber-900/50 transition-colors"
+              title="Preenche automaticamente todas as 6 abas com dados válidos para teste de homologação na SEFAZ"
+            >
+              <ShieldCheck className="w-3.5 h-3.5" />
+              Preencher Dados de Teste (Homologação)
+            </button>
+          )}
           <button
             type="button"
             onClick={() => salvar(false)}
@@ -1094,18 +1248,27 @@ export default function CteWizardPage() {
                   <div className="flex-1">
                     <InputFiscal
                       value={novoDoc.chave}
-                      onChange={v => setNovoDoc({ ...novoDoc, chave: v.replace(/\D/g, '') })}
-                      placeholder="Chave de acesso da NF-e (44 dígitos)"
+                      onChange={v =>
+                        setNovoDoc({
+                          ...novoDoc,
+                          chave: novoDoc.tipo === 'OUTRO' ? v : v.replace(/\D/g, '')
+                        })
+                      }
+                      placeholder={
+                        novoDoc.tipo === 'OUTRO'
+                          ? 'Número da Declaração de Conteúdo (ex: 1)'
+                          : 'Chave de acesso da NF-e (44 dígitos)'
+                      }
                     />
                   </div>
-                  <div className="w-32">
+                  <div className="w-44">
                     <SelectFiscal
                       value={novoDoc.tipo}
                       onChange={v => setNovoDoc({ ...novoDoc, tipo: v })}
                       opcoes={[
-                        { valor: 'NFE', rotulo: 'NF-e' },
-                        { valor: 'CTE', rotulo: 'CT-e' },
-                        { valor: 'OUTRO', rotulo: 'Outro' }
+                        { valor: 'NFE', rotulo: 'NF-e (44 dígitos)' },
+                        { valor: 'CTE', rotulo: 'CT-e (44 dígitos)' },
+                        { valor: 'OUTRO', rotulo: 'Declaração / Outro' }
                       ]}
                     />
                   </div>
@@ -1115,7 +1278,7 @@ export default function CteWizardPage() {
                     className="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl bg-brand-600 hover:bg-brand-700 text-white text-xs font-bold transition-colors"
                   >
                     <Plus className="w-3.5 h-3.5" />
-                    Adicionar Chave
+                    {novoDoc.tipo === 'OUTRO' ? 'Adicionar Declaração' : 'Adicionar Chave'}
                   </button>
                 </div>
 

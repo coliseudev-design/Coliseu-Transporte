@@ -178,6 +178,15 @@ export default function MdfeWizardPage() {
     }));
   };
 
+  const emitenteSelecionado = useMemo(
+    () => emitentes.find((x: any) => String(x.id) === String(form.emitente_id)) || emitentes[0] || null,
+    [emitentes, form.emitente_id]
+  );
+  const ambienteAtivo =
+    String(emitenteSelecionado?.focus_ambiente || 'homologacao').toLowerCase() === 'producao'
+      ? 'producao'
+      : 'homologacao';
+
   const salvar = async (transmitir: boolean) => {
     setSalvando(true);
     setErroSalvar('');
@@ -193,8 +202,33 @@ export default function MdfeWizardPage() {
       setMdfeId(id);
 
       if (transmitir) {
-        await api.post(`/transporte/mdfes/${id}/emitir`);
-        alert('MDF-e transmitido para a SEFAZ! Acompanhe em Documentos Emitidos.');
+        const resEmitir = await api.post(`/transporte/mdfes/${id}/emitir`);
+        const dadosEmissao = resEmitir.data || {};
+        const ambLabel =
+          (dadosEmissao.ambiente || ambienteAtivo) === 'producao'
+            ? 'PRODUÇÃO (Validade Jurídica SEFAZ)'
+            : 'HOMOLOGAÇÃO (Testes SEFAZ — Sem Valor Fiscal)';
+
+        if (dadosEmissao.status === 'REJEITADO') {
+          setErroSalvar(
+            `SEFAZ [${dadosEmissao.status_sefaz || 'REJEITADO'}] (${ambLabel}): ${
+              dadosEmissao.mensagem_sefaz || 'MDF-e rejeitado pela SEFAZ. Revise os campos e tente novamente.'
+            }`
+          );
+          return;
+        }
+
+        if (dadosEmissao.status === 'AUTORIZADO') {
+          alert(
+            `MDF-e AUTORIZADO com sucesso na SEFAZ!\n\n` +
+              `• Ambiente: ${ambLabel}\n` +
+              `• Número / Série: ${dadosEmissao.numero || '—'} / ${dadosEmissao.serie || '1'}\n` +
+              `• Protocolo SEFAZ: ${dadosEmissao.protocolo || '—'}\n` +
+              `• Chave de Acesso: ${dadosEmissao.chave_mdfe || '—'}`
+          );
+        } else {
+          alert(`MDF-e transmitido para a SEFAZ em ambiente de ${ambLabel}! Acompanhe em Documentos Emitidos.`);
+        }
         navigate('/transporte/documentos');
       } else {
         alert('MDF-e salvo como rascunho.');
@@ -217,10 +251,23 @@ export default function MdfeWizardPage() {
       {/* ═══ JANELA DO DOCUMENTO ═══ */}
       <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200/80 dark:border-slate-700/80 overflow-hidden shadow-sm">
         {/* Barra azul do documento */}
-        <div className="bg-[#0B63A5] dark:bg-[#0A4F82] px-5 py-3 flex items-center justify-between">
-          <span className="text-white font-bold text-sm tracking-tight">
-            MDF-e 3.00 — Manifesto Eletrônico de Documentos Fiscais
-          </span>
+        <div className="bg-[#0B63A5] dark:bg-[#0A4F82] px-5 py-3 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center gap-2.5">
+            <span className="text-white font-bold text-sm tracking-tight">
+              MDF-e 3.00 — Manifesto Eletrônico de Documentos Fiscais
+            </span>
+            <span
+              className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${
+                ambienteAtivo === 'producao'
+                  ? 'bg-emerald-500/90 text-white'
+                  : 'bg-amber-400 text-slate-950'
+              }`}
+            >
+              {ambienteAtivo === 'producao'
+                ? 'Ambiente: Produção'
+                : 'Ambiente: Homologação (Sem Valor Fiscal)'}
+            </span>
+          </div>
           <div className="flex items-center gap-2">
             <span className="text-white/80 text-[11px] font-mono">
               {form.serie ? `Série ${form.serie}` : 'Série 1'}

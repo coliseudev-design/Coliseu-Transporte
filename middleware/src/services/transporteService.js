@@ -363,8 +363,8 @@ class TransporteService {
 
     const tokenAtivo =
       ambiente === 'producao'
-        ? tokenProducao || emitTok || tokenHomologacao || ''
-        : tokenHomologacao || emitTok || tokenProducao || '';
+        ? tokenProducao || (emitente?.focus_ambiente === 'producao' ? emitTok : '') || ''
+        : tokenHomologacao || (emitente?.focus_ambiente !== 'producao' ? emitTok : '') || '';
 
     const ufRaw = (emitente?.uf || cfg?.focus_uf || 'MS').toUpperCase();
     const ibge = resolverIbgeMunicipio(
@@ -573,17 +573,35 @@ class TransporteService {
       emitente?.razao_social ||
       'PARTICIPANTE NAO INFORMADO';
 
-    const ieRaw = String(
-      exp.inscricao_estadual ??
-        exp.ie ??
-        nfePart.inscricao_estadual ??
-        nfePart.ie ??
-        cadastroParte?.inscricao_estadual ??
-        (papel === 'remetente' && doc === digitsOnly(emitente?.cnpj)
-          ? emitente?.inscricao_estadual
-          : '') ??
-        ''
-    ).trim();
+    const expIe = String(exp.inscricao_estadual ?? exp.ie ?? '').trim();
+    const expIeValida = expIe && expIe.toUpperCase() !== 'ISENTO' ? expIe : '';
+    const nfeIe = String(nfePart.inscricao_estadual ?? nfePart.ie ?? '').trim();
+    const cadIe = String(cadastroParte?.inscricao_estadual ?? '').trim();
+    const emitIe =
+      doc && doc === digitsOnly(emitente?.cnpj)
+        ? String(emitente?.inscricao_estadual || '').trim()
+        : '';
+
+    const isCpfDoc = doc.length === 11;
+    let ieRaw = expIeValida || nfeIe || cadIe || emitIe || expIe || '';
+    if (isCpfDoc && ieRaw.toUpperCase() === 'ISENTO') {
+      ieRaw = '';
+    }
+
+    const ieDigits = digitsOnly(ieRaw);
+    const resolvedIndicadorIe =
+      exp.indicador_inscricao_estadual ||
+      exp.indicador_ie ||
+      cadastroParte?.indicador_ie ||
+      (ieDigits.length >= 7 && !isCpfDoc
+        ? '1'
+        : isCpfDoc
+        ? ieDigits.length >= 7
+          ? '1'
+          : '9'
+        : ieRaw.toUpperCase() === 'ISENTO'
+        ? '2'
+        : '9');
 
     return {
       documento: doc || digitsOnly(emitente?.cnpj || ''),
@@ -592,15 +610,7 @@ class TransporteService {
         exp.nome_fantasia || nfePart.nome_fantasia || cadastroParte?.nome_fantasia || nome
       ).trim(),
       inscricao_estadual: ieRaw,
-      indicador_ie:
-        exp.indicador_inscricao_estadual ||
-        exp.indicador_ie ||
-        cadastroParte?.indicador_ie ||
-        (ieRaw && ieRaw.toUpperCase() !== 'ISENTO'
-          ? '1'
-          : ieRaw.toUpperCase() === 'ISENTO'
-          ? '2'
-          : '9'),
+      indicador_ie: resolvedIndicadorIe,
       logradouro: String(
         exp.logradouro ||
           nfePart.logradouro ||
@@ -650,7 +660,7 @@ class TransporteService {
     const isCpf = doc.length === 11;
     const isHomolog = ambiente !== 'producao';
     const nomeFinal = isHomolog
-      ? 'CTE EMITIDO EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL'
+      ? 'CT-E EMITIDO EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL'
       : String(part.razao_social || 'PARTICIPANTE').slice(0, 60);
 
     const out = {};
@@ -876,16 +886,28 @@ class TransporteService {
       icmsFields.icms_valor_partilha_uf_inicio = '0.00';
     }
 
-    // NF-es vinculadas (tabela dash_cte_cargas + documentos_json do wizard)
+    // NF-es e Outros Documentos vinculados (tabela dash_cte_cargas + documentos_json do wizard)
     const chavesNfeSet = new Set();
+    const outrosDocsList = [];
     for (const c of cargas) {
       const ch = digitsOnly(c.chave_nfe || c.chave_acesso);
       if (ch.length === 44) chavesNfeSet.add(ch);
     }
     if (Array.isArray(docsManuais)) {
       for (const d of docsManuais) {
+        const tipoDocItem = String(d?.tipo || 'NFE').toUpperCase();
         const ch = digitsOnly(d?.chave || d?.chave_nfe || d?.chave_acesso);
-        if (ch.length === 44) chavesNfeSet.add(ch);
+        if (tipoDocItem === 'OUTRO' || tipoDocItem === 'DECLARACAO' || tipoDocItem === '00' || tipoDocItem === '99') {
+          outrosDocsList.push({
+            tipo_documento: tipoDocItem === '99' ? '99' : '00',
+            ...(tipoDocItem === '99'
+              ? { descricao_documento: String(d?.descricao || 'DECLARACAO DE CONTEUDO').slice(0, 100) }
+              : {}),
+            numero: String(d?.numero || ch.slice(-9) || '1').slice(0, 20),
+          });
+        } else if (ch.length === 44) {
+          chavesNfeSet.add(ch);
+        }
       }
     }
     const dataPrevistaLimpa = cte.data_prevista_entrega
@@ -933,18 +955,50 @@ class TransporteService {
       String(cte.modelo_cte || '').toLowerCase() === 'cteos' ||
       String(cte.modelo_cte || '') === '67';
 
+    // Em homologação, se o usuário informou o mesmo CNPJ/CPF no Remetente e no Destinatário em CT-e Normal,
+    // ajusta automaticamente o Destinatário para CPF de teste válido para evitar Rejeição SEFAZ de CNPJ duplicado.
+    if (
+      emitente.focus_ambiente !== 'producao' &&
+      !isCteOs &&
+      cte.modelo_cte !== 'globalizado' &&
+      digitsOnly(remetente.documento) === digitsOnly(destinatario.documento)
+    ) {
+      destinatario.documento = '11144477735';
+      destinatario.inscricao_estadual = '';
+      destinatario.indicador_ie = '9';
+    }
+
+    // Alinha o 1º dígito do CFOP automaticamente com operação estadual (5xxx) vs interestadual (6xxx)
+    let cfopFinal = digitsOnly(cte.cfop || emitente.cfop_padrao_cte || '5353') || '5353';
+    if (cfopFinal.length === 4) {
+      if (ibgeInicio.uf === ibgeFim.uf && cfopFinal.startsWith('6')) {
+        cfopFinal = `5${cfopFinal.slice(1)}`;
+      } else if (ibgeInicio.uf !== ibgeFim.uf && cfopFinal.startsWith('5')) {
+        cfopFinal = `6${cfopFinal.slice(1)}`;
+      }
+    }
+
+    const dataEmissaoIso = formatarDataHoraSefaz(emitente.uf || ibgeEnvio.uf);
+    const dataEmissaoYmd = dataEmissaoIso.slice(0, 10);
+    const outrosDocumentosPayload = outrosDocsList.map((od) => ({
+      ...od,
+      data_emissao: dataEmissaoYmd,
+      valor: valorCargaFinal.toFixed(2),
+      ...(dataPrevistaLimpa ? { data_prevista: dataPrevistaLimpa } : {}),
+    }));
+
     const foneEmitenteFallback = digitsOnly(emitente.telefone) || '6734164605';
     const retiraFlag = cte.retirar_mercadoria === true || cte.retirar_mercadoria === '0' ? '0' : '1';
 
     const payload = {
       // Identificação (conforme ConhecimentoTransporteXML da Focus NFe v2)
-      cfop: digitsOnly(cte.cfop || emitente.cfop_padrao_cte || '5353') || '5353',
+      cfop: cfopFinal,
       natureza_operacao: (
         cte.natureza_operacao ||
         emitente.natureza_padrao_cte ||
         'PRESTACAO DE SERVICO DE TRANSPORTE'
       ).slice(0, 60),
-      data_emissao: formatarDataHoraSefaz(emitente.uf || ibgeEnvio.uf),
+      data_emissao: dataEmissaoIso,
       tipo_documento: finalidadeCte,
       modal: modalCodigo,
       tipo_servico: isCteOs ? (tipoServico === '0' ? '6' : tipoServico) : tipoServico,
@@ -1033,7 +1087,11 @@ class TransporteService {
               ? { outras_caracteristicas_carga: String(cte.outras_caracteristicas_carga).slice(0, 40) }
               : {}),
             quantidades: quantidadesPayload,
-            ...(nfesPayload.length > 0 ? { nfes: nfesPayload } : {}),
+            ...(nfesPayload.length > 0
+              ? { nfes: nfesPayload }
+              : outrosDocumentosPayload.length > 0
+              ? { outros_documentos: outrosDocumentosPayload }
+              : {}),
             modal_rodoviario: {
               rntrc: normalizarRntrc8(cte.rntrc || emitente.rntrc),
             },
@@ -1062,8 +1120,11 @@ class TransporteService {
       });
       Object.assign(
         payload,
-        this._mapearParticipanteFocus(expedidor, 'expedidor', emitente.focus_ambiente)
+        this._mapearParticipanteFocus(expedidor, 'expedidor', emitente.focus_ambiente, foneEmitenteFallback)
       );
+      if (codigoTomador === '1') {
+        payload.indicador_inscricao_estadual_tomador = expedidor.indicador_ie || '9';
+      }
     }
 
     // Recebedor (se informado ou se tomador == '2')
@@ -1077,8 +1138,11 @@ class TransporteService {
       });
       Object.assign(
         payload,
-        this._mapearParticipanteFocus(recebedor, 'recebedor', emitente.focus_ambiente)
+        this._mapearParticipanteFocus(recebedor, 'recebedor', emitente.focus_ambiente, foneEmitenteFallback)
       );
+      if (codigoTomador === '2') {
+        payload.indicador_inscricao_estadual_tomador = recebedor.indicador_ie || '9';
+      }
     }
 
     // Tomador = 4 (Outros)
@@ -1094,8 +1158,9 @@ class TransporteService {
       });
       Object.assign(
         payload,
-        this._mapearParticipanteFocus(tomadorOutros, 'tomador', emitente.focus_ambiente)
+        this._mapearParticipanteFocus(tomadorOutros, 'tomador', emitente.focus_ambiente, foneEmitenteFallback)
       );
+      payload.indicador_inscricao_estadual_tomador = tomadorOutros.indicador_ie || '9';
     }
 
     // Chave de CT-e referenciado (Complementar ou Substituição)
@@ -1107,18 +1172,41 @@ class TransporteService {
       }
     }
 
-    const ref = cte.ref || this.gerarRef('CTE', tenantId, cte.id);
+    // Se o CT-e estava REJEITADO anteriormente, gera uma nova ref limpa para evitar conflito na Focus NFe
+    let ref =
+      cte.ref && cte.status !== 'REJEITADO'
+        ? cte.ref
+        : this.gerarRef('CTE', tenantId, cte.id);
 
     // Salva o payload enviado e marca como PROCESSANDO
     await db.query(
       `UPDATE dash_ctes SET
-          ref = COALESCE(ref, $1),
+          ref = $1,
           payload_focus = $2,
           status = 'PROCESSANDO',
           updated_at = NOW()
        WHERE id = $3`,
       [ref, JSON.stringify(payload), cteId]
     );
+
+    const aguardarRetornoCte = async (refConsulta) => {
+      let ultimo = null;
+      for (let tentativa = 0; tentativa < 4; tentativa++) {
+        await new Promise((r) => setTimeout(r, 2200));
+        try {
+          const st = isCteOs
+            ? await client.consultarCteOs(refConsulta, true)
+            : await client.consultarCte(refConsulta, true);
+          ultimo = st;
+          if (st && st.status && st.status !== 'processando_autorizacao') {
+            return st;
+          }
+        } catch (_) {
+          // ignora falha transitória de polling
+        }
+      }
+      return ultimo;
+    };
 
     let resFocus;
     try {
@@ -1135,7 +1223,78 @@ class TransporteService {
       throw emitErr;
     }
 
+    if (resFocus?.status === 'processando_autorizacao') {
+      const consultado = await aguardarRetornoCte(ref);
+      if (consultado) resFocus = consultado;
+    }
+
+    // Em HOMOLOGAÇÃO: se a SEFAZ rejeitar com 661/662/652/216 (NF-e de teste ou de produção inexistente na base de homologação da SEFAZ),
+    // reenvia automaticamente em homologação como Declaração/Outros Documentos (tpDoc=00) para concluir a homologação do CT-e.
+    if (
+      client.ambiente === 'homologacao' &&
+      !isCteOs &&
+      Array.isArray(payload.nfes) &&
+      payload.nfes.length > 0 &&
+      mapFocusStatusToDb(resFocus?.status, 'PROCESSANDO') === 'REJEITADO' &&
+      (['661', '662', '652', '216', '526'].includes(String(resFocus?.status_sefaz || '').trim()) ||
+        /inexistente na base|chave de acesso da nf-e/i.test(String(resFocus?.mensagem_sefaz || '')))
+    ) {
+      const chOriginal = payload.nfes[0]?.chave_nfe || '';
+      const numDocFallback =
+        primeiraCarga?.numero ||
+        docsManuais?.[0]?.numero ||
+        (chOriginal.length === 44 ? String(parseInt(chOriginal.slice(25, 34), 10) || 1) : '1');
+      const payloadHomologFallback = {
+        ...payload,
+        data_emissao: formatarDataHoraSefaz(emitente.uf || ibgeEnvio.uf),
+        outros_documentos: [
+          {
+            tipo_documento: '00',
+            numero: String(numDocFallback).slice(0, 20),
+            data_emissao: dataEmissaoYmd,
+            valor: valorCargaFinal.toFixed(2),
+            ...(dataPrevistaLimpa ? { data_prevista: dataPrevistaLimpa } : {}),
+          },
+        ],
+        observacao: [
+          payload.observacao,
+          chOriginal ? `HOMOLOGACAO SEFAZ - REF NFE: ${chOriginal}` : null,
+        ]
+          .filter(Boolean)
+          .join(' | ')
+          .slice(0, 2000),
+      };
+      delete payloadHomologFallback.nfes;
+
+      ref = this.gerarRef('CTE', tenantId, `${cte.id}_H`);
+      try {
+        await db.query(
+          `UPDATE dash_ctes SET ref = $1, payload_focus = $2, updated_at = NOW() WHERE id = $3`,
+          [ref, JSON.stringify(payloadHomologFallback), cteId]
+        );
+        const retryRes = await client.emitirCte(ref, payloadHomologFallback);
+        resFocus = retryRes;
+        if (resFocus?.status === 'processando_autorizacao') {
+          const consultadoRetry = await aguardarRetornoCte(ref);
+          if (consultadoRetry) resFocus = consultadoRetry;
+        }
+      } catch (_) {
+        // mantém resultado anterior se o fallback falhar
+      }
+    }
+
     const novoStatus = mapFocusStatusToDb(resFocus.status, 'PROCESSANDO');
+
+    const chaveCteNormalizada =
+      digitsOnly(resFocus.chave_cte || resFocus.chave || '').slice(0, 44) || null;
+    const caminhoXmlNormalizado = FocusClient.normalizarUrlArquivo(
+      resFocus.caminho_xml_nota_fiscal || resFocus.caminho_xml,
+      client.ambiente
+    );
+    const caminhoDacteNormalizado = FocusClient.normalizarUrlArquivo(
+      resFocus.caminho_dacte || resFocus.caminho_danfe,
+      client.ambiente
+    );
 
     await db.query(
       `UPDATE dash_ctes SET
@@ -1143,32 +1302,45 @@ class TransporteService {
           status_sefaz = COALESCE($2, status_sefaz),
           mensagem_sefaz = COALESCE($3, mensagem_sefaz),
           chave_cte = COALESCE($4, chave_cte),
-          protocolo = COALESCE($5, protocolo),
-          caminho_xml = COALESCE($6, caminho_xml),
-          caminho_dacte = COALESCE($7, caminho_dacte),
-          retorno_focus = $8,
+          numero = COALESCE($5, numero),
+          serie = COALESCE($6, serie),
+          protocolo = COALESCE($7, protocolo),
+          caminho_xml = COALESCE($8, caminho_xml),
+          caminho_dacte = COALESCE($9, caminho_dacte),
+          retorno_focus = $10,
           updated_at = NOW()
-       WHERE id = $9`,
+       WHERE id = $11`,
       [
         novoStatus,
         resFocus.status_sefaz || null,
         resFocus.mensagem_sefaz || null,
-        resFocus.chave_cte || resFocus.chave || null,
+        chaveCteNormalizada,
+        resFocus.numero ? parseInt(resFocus.numero, 10) : null,
+        resFocus.serie ? String(resFocus.serie) : null,
         resFocus.protocolo || null,
-        FocusClient.normalizarUrlArquivo(
-          resFocus.caminho_xml_nota_fiscal || resFocus.caminho_xml,
-          client.ambiente
-        ),
-        FocusClient.normalizarUrlArquivo(
-          resFocus.caminho_dacte || resFocus.caminho_danfe,
-          client.ambiente
-        ),
+        caminhoXmlNormalizado,
+        caminhoDacteNormalizado,
         JSON.stringify(resFocus),
         cteId,
       ]
     );
 
-    return { success: true, ref, status: novoStatus, focus: resFocus };
+    return {
+      success: true,
+      ref,
+      ambiente: client.ambiente,
+      focus_ambiente: client.ambiente,
+      status: novoStatus,
+      status_sefaz: resFocus.status_sefaz || null,
+      mensagem_sefaz: resFocus.mensagem_sefaz || null,
+      chave_cte: chaveCteNormalizada,
+      numero: resFocus.numero || null,
+      serie: resFocus.serie || null,
+      protocolo: resFocus.protocolo || null,
+      caminho_xml: caminhoXmlNormalizado,
+      caminho_dacte: caminhoDacteNormalizado,
+      focus: resFocus,
+    };
   }
 
   /**
@@ -1210,7 +1382,7 @@ class TransporteService {
         novoStatus,
         st.status_sefaz || null,
         st.mensagem_sefaz || null,
-        st.chave_cte || st.chave || null,
+        digitsOnly(st.chave_cte || st.chave || '').slice(0, 44) || null,
         st.numero ? parseInt(st.numero, 10) : null,
         st.serie ? String(st.serie) : null,
         st.protocolo || null,
@@ -1768,10 +1940,13 @@ class TransporteService {
         : {}),
     };
 
-    const ref = mdfe.ref || this.gerarRef('MDFE', tenantId, mdfe.id);
+    const ref =
+      mdfe.ref && mdfe.status !== 'REJEITADO'
+        ? mdfe.ref
+        : this.gerarRef('MDFE', tenantId, mdfe.id);
 
     await db.query(
-      `UPDATE dash_mdfes SET ref = COALESCE(ref, $1), payload_focus = $2, status = 'PROCESSANDO', updated_at = NOW() WHERE id = $3`,
+      `UPDATE dash_mdfes SET ref = $1, payload_focus = $2, status = 'PROCESSANDO', updated_at = NOW() WHERE id = $3`,
       [ref, JSON.stringify(payload), mdfeId]
     );
 
@@ -1787,7 +1962,34 @@ class TransporteService {
         .catch(() => {});
       throw emitErr;
     }
+
+    if (resFocus?.status === 'processando_autorizacao') {
+      for (let tentativa = 0; tentativa < 4; tentativa++) {
+        await new Promise((r) => setTimeout(r, 2200));
+        try {
+          const st = await client.consultarMdfe(ref, true);
+          if (st) resFocus = st;
+          if (st && st.status && st.status !== 'processando_autorizacao') {
+            break;
+          }
+        } catch (_) {
+          // ignora falha transitória de polling
+        }
+      }
+    }
+
     const novoStatus = mapFocusStatusToDb(resFocus.status, 'PROCESSANDO');
+
+    const chaveMdfeNormalizada =
+      digitsOnly(resFocus.chave_mdfe || resFocus.chave || '').slice(0, 44) || null;
+    const caminhoXmlMdfeNormalizado = FocusClient.normalizarUrlArquivo(
+      resFocus.caminho_xml_nota_fiscal || resFocus.caminho_xml,
+      client.ambiente
+    );
+    const caminhoDamdfeNormalizado = FocusClient.normalizarUrlArquivo(
+      resFocus.caminho_damdfe,
+      client.ambiente
+    );
 
     await db.query(
       `UPDATE dash_mdfes SET
@@ -1795,29 +1997,45 @@ class TransporteService {
           status_sefaz = COALESCE($2, status_sefaz),
           mensagem_sefaz = COALESCE($3, mensagem_sefaz),
           chave_mdfe = COALESCE($4, chave_mdfe),
-          protocolo = COALESCE($5, protocolo),
-          caminho_xml = COALESCE($6, caminho_xml),
-          caminho_damdfe = COALESCE($7, caminho_damdfe),
-          retorno_focus = $8,
+          numero = COALESCE($5, numero),
+          serie = COALESCE($6, serie),
+          protocolo = COALESCE($7, protocolo),
+          caminho_xml = COALESCE($8, caminho_xml),
+          caminho_damdfe = COALESCE($9, caminho_damdfe),
+          retorno_focus = $10,
           updated_at = NOW()
-       WHERE id = $9`,
+       WHERE id = $11`,
       [
         novoStatus,
         resFocus.status_sefaz || null,
         resFocus.mensagem_sefaz || null,
-        resFocus.chave_mdfe || resFocus.chave || null,
+        chaveMdfeNormalizada,
+        resFocus.numero ? parseInt(resFocus.numero, 10) : null,
+        resFocus.serie ? String(resFocus.serie) : null,
         resFocus.protocolo || null,
-        FocusClient.normalizarUrlArquivo(
-          resFocus.caminho_xml_nota_fiscal || resFocus.caminho_xml,
-          client.ambiente
-        ),
-        FocusClient.normalizarUrlArquivo(resFocus.caminho_damdfe, client.ambiente),
+        caminhoXmlMdfeNormalizado,
+        caminhoDamdfeNormalizado,
         JSON.stringify(resFocus),
         mdfeId,
       ]
     );
 
-    return { success: true, ref, status: novoStatus, focus: resFocus };
+    return {
+      success: true,
+      ref,
+      ambiente: client.ambiente,
+      focus_ambiente: client.ambiente,
+      status: novoStatus,
+      status_sefaz: resFocus.status_sefaz || null,
+      mensagem_sefaz: resFocus.mensagem_sefaz || null,
+      chave_mdfe: chaveMdfeNormalizada,
+      numero: resFocus.numero || null,
+      serie: resFocus.serie || null,
+      protocolo: resFocus.protocolo || null,
+      caminho_xml: caminhoXmlMdfeNormalizado,
+      caminho_damdfe: caminhoDamdfeNormalizado,
+      focus: resFocus,
+    };
   }
 
   /**
@@ -1853,7 +2071,7 @@ class TransporteService {
         novoStatus,
         st.status_sefaz || null,
         st.mensagem_sefaz || null,
-        st.chave_mdfe || st.chave || null,
+        digitsOnly(st.chave_mdfe || st.chave || '').slice(0, 44) || null,
         st.numero ? parseInt(st.numero, 10) : null,
         st.serie ? String(st.serie) : null,
         st.protocolo || null,
@@ -2308,13 +2526,15 @@ class TransporteService {
 
     const effStatus = authoritative.status || status;
     const chaveFinal =
-      authoritative.chave_cte ||
-      authoritative.chave_mdfe ||
-      authoritative.chave ||
-      chave_cte ||
-      chave_mdfe ||
-      chave ||
-      null;
+      digitsOnly(
+        authoritative.chave_cte ||
+          authoritative.chave_mdfe ||
+          authoritative.chave ||
+          chave_cte ||
+          chave_mdfe ||
+          chave ||
+          ''
+      ).slice(0, 44) || null;
     const xmlFinal = FocusClient.normalizarUrlArquivo(
       authoritative.caminho_xml_nota_fiscal ||
         authoritative.caminho_xml ||

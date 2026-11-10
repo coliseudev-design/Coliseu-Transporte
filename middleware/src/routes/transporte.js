@@ -439,7 +439,22 @@ router.get('/documentos', async (req, res) => {
             LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
         params.push(parseInt(limit, 10), parseInt(offset, 10));
 
-        const { rows } = await db.query(finalSql, params);
+        let { rows } = await db.query(finalSql, params);
+
+        // Se houver documentos em PROCESSANDO, consulta automaticamente a Focus NFe para atualizar o status
+        const processandoRows = rows.filter((r) => r.status === 'PROCESSANDO' && r.ref).slice(0, 5);
+        if (processandoRows.length > 0) {
+            await Promise.all(
+                processandoRows.map((r) =>
+                    r.tipo_documento === 'MDFE'
+                        ? TransporteService.consultarMdfeFocus(tenantId, r.id).catch(() => null)
+                        : TransporteService.consultarCteFocus(tenantId, r.id).catch(() => null)
+                )
+            );
+            const refreshed = await db.query(finalSql, params);
+            rows = refreshed.rows;
+        }
+
         const normalizedRows = rows.map((r) => ({
             ...r,
             caminho_xml: FocusClient.normalizarUrlArquivo(r.caminho_xml, r.focus_ambiente),
@@ -3269,7 +3284,23 @@ router.get('/timeline/:tipo/:id', async (req, res) => {
         );
         if (rows.length === 0) return res.status(404).json({ error: 'Documento não encontrado.' });
 
-        const doc = rows[0];
+        let doc = rows[0];
+        if (doc.status === 'PROCESSANDO' && doc.ref) {
+            try {
+                if (tipo === 'MDFE') {
+                    await TransporteService.consultarMdfeFocus(tenantId, docId);
+                } else {
+                    await TransporteService.consultarCteFocus(tenantId, docId);
+                }
+                const refreshedDoc = await db.query(
+                    `SELECT * FROM ${tabela} WHERE id = $1 AND tenant_id = $2`,
+                    [docId, tenantId]
+                );
+                if (refreshedDoc.rows[0]) doc = refreshedDoc.rows[0];
+            } catch (_) {
+                // ignora falha transitória de sincronização
+            }
+        }
         let emitAmb = 'homologacao';
         if (doc.emitente_id) {
             const emAmbRes = await db.query(
@@ -3278,6 +3309,7 @@ router.get('/timeline/:tipo/:id', async (req, res) => {
             ).catch(() => ({ rows: [] }));
             emitAmb = emAmbRes.rows[0]?.focus_ambiente || 'homologacao';
         }
+        doc.focus_ambiente = emitAmb;
         doc.caminho_xml = FocusClient.normalizarUrlArquivo(doc.caminho_xml, emitAmb);
         if (doc.caminho_dacte) doc.caminho_dacte = FocusClient.normalizarUrlArquivo(doc.caminho_dacte, emitAmb);
         if (doc.caminho_damdfe) doc.caminho_damdfe = FocusClient.normalizarUrlArquivo(doc.caminho_damdfe, emitAmb);

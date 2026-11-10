@@ -36,6 +36,7 @@ interface Documento {
   protocolo: string;
   data_emissao: string;
   emitente_nome: string;
+  focus_ambiente?: string;
   qtd_documentos: number;
 }
 
@@ -328,11 +329,24 @@ export default function DocumentosEmitidosPage() {
                 },
                 {
                   chave: 'status',
-                  rotulo: 'Status',
+                  rotulo: 'Status / Ambiente',
                   render: d => (
-                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold whitespace-nowrap ${statusBadge(d.status)}`}>
-                      {d.status}
-                    </span>
+                    <div className="flex flex-col items-start gap-1">
+                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold whitespace-nowrap ${statusBadge(d.status)}`}>
+                        {d.status}
+                      </span>
+                      <span
+                        className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider ${
+                          String(d.focus_ambiente || 'homologacao').toLowerCase() === 'producao'
+                            ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300'
+                            : 'bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300'
+                        }`}
+                      >
+                        {String(d.focus_ambiente || 'homologacao').toLowerCase() === 'producao'
+                          ? 'Produção'
+                          : 'Homologação'}
+                      </span>
+                    </div>
                   )
                 },
                 {
