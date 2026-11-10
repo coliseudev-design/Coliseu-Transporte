@@ -572,17 +572,18 @@ export default function CteWizardPage() {
       setNovoDoc({ chave: '', tipo: 'NFE', numero: '' });
       return;
     }
-    if (!novoDoc.chave || novoDoc.chave.replace(/\D/g, '').length < 44) {
-      alert('Informe uma chave de acesso válida (44 dígitos) ou selecione "Outro (Declaração)" para teste sem NF-e.');
+    const digits = novoDoc.chave.replace(/\D/g, '').slice(0, 44);
+    if (digits.length !== 44) {
+      alert('Informe uma chave de acesso válida (44 dígitos) ou selecione "Declaração / Outro" para teste sem NF-e.');
       return;
     }
-    if (form.documentos.some(d => d.chave === novoDoc.chave)) {
+    if (form.documentos.some(d => d.chave === digits)) {
       alert('Esta chave de acesso já está vinculada.');
       return;
     }
     setForm(f => ({
       ...f,
-      documentos: [...f.documentos, { ...novoDoc, id: `${Date.now()}-${Math.random()}` }]
+      documentos: [...f.documentos, { ...novoDoc, chave: digits, id: `${Date.now()}-${Math.random()}` }]
     }));
     setNovoDoc({ chave: '', tipo: 'NFE', numero: '' });
   };
@@ -1260,7 +1261,7 @@ export default function CteWizardPage() {
                       onChange={v =>
                         setNovoDoc({
                           ...novoDoc,
-                          chave: novoDoc.tipo === 'OUTRO' ? v : v.replace(/\D/g, '')
+                          chave: novoDoc.tipo === 'OUTRO' ? v.slice(0, 20) : v.replace(/\D/g, '').slice(0, 44)
                         })
                       }
                       placeholder={

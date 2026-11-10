@@ -120,7 +120,10 @@ function calcularDvChaveSefaz(base43) {
  * Em homologação, garante que uma chave de 44 dígitos informada manualmente para teste tenha DV Módulo 11 válido.
  */
 function normalizarChaveDfeParaAmbiente(chaveRaw, ambiente = 'homologacao') {
-  const ch = String(chaveRaw || '').replace(/\D/g, '');
+  let ch = String(chaveRaw || '').replace(/\D/g, '');
+  if (ambiente !== 'producao' && ch.length > 44) {
+    ch = ch.slice(0, 44);
+  }
   if (ch.length !== 44) return ch;
   if (ambiente === 'producao') return ch;
   const dvCalculado = calcularDvChaveSefaz(ch.slice(0, 43));
@@ -980,6 +983,11 @@ class TransporteService {
           });
         } else if (ch.length === 44) {
           chavesNfeSet.add(ch);
+        } else if (emitente.focus_ambiente !== 'producao' && (ch || d?.numero || d?.chave)) {
+          outrosDocsList.push({
+            tipo_documento: '00',
+            numero: String(d?.numero || ch.slice(-9) || '1').slice(0, 20),
+          });
         }
       }
     }
@@ -1054,6 +1062,24 @@ class TransporteService {
       valor: valorCargaFinal.toFixed(2),
       ...(dataPrevistaLimpa ? { data_prevista: dataPrevistaLimpa } : {}),
     }));
+
+    // Garantia contra Rejeição SEFAZ 693 (Grupo Documentos Transportados obrigatório para CT-e Normal):
+    // se em homologação nenhum documento de 44 dígitos ou declaração ficou preenchido, gera Declaração padrão (tpDoc=00).
+    if (
+      !isCteOs &&
+      !['3', '4'].includes(tipoServico) &&
+      nfesPayload.length === 0 &&
+      outrosDocumentosPayload.length === 0 &&
+      emitente.focus_ambiente !== 'producao'
+    ) {
+      outrosDocumentosPayload.push({
+        tipo_documento: '00',
+        numero: String(cte.numero || cte.id || '1').slice(0, 20),
+        data_emissao: dataEmissaoYmd,
+        valor: valorCargaFinal.toFixed(2),
+        ...(dataPrevistaLimpa ? { data_prevista: dataPrevistaLimpa } : {}),
+      });
+    }
 
     const foneEmitenteFallback = digitsOnly(emitente.telefone) || '6734164605';
     const retiraFlag = cte.retirar_mercadoria === true || cte.retirar_mercadoria === '0' ? '0' : '1';
@@ -1362,10 +1388,12 @@ class TransporteService {
       Array.isArray(payload.nfes) &&
       payload.nfes.length > 0 &&
       mapFocusStatusToDb(resFocus?.status, 'PROCESSANDO') === 'REJEITADO' &&
-      (['661', '662', '652', '216', '236', '616', '526'].includes(
+      (['661', '662', '652', '216', '236', '616', '526', '693'].includes(
         String(resFocus?.status_sefaz || '').trim()
       ) ||
-        /inexistente na base|chave de acesso|nf-e/i.test(String(resFocus?.mensagem_sefaz || '')))
+        /inexistente na base|chave de acesso|nf-e|documentos transportados/i.test(
+          String(resFocus?.mensagem_sefaz || '')
+        ))
     ) {
       const payloadHomologFallback = montarPayloadHomologFallback();
       ref = this.gerarRef('CTE', tenantId, `${cte.id}_H`);

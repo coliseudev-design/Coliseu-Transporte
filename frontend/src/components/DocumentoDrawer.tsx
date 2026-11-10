@@ -86,10 +86,12 @@ export default function DocumentoDrawer({ tipo, documentoId, onClose, onVerRotei
     setEnviando(true);
     setErro('');
     try {
-      await fn();
+      const res = await fn();
+      const d = res?.data || {};
       await refetch();
       qc.invalidateQueries({ queryKey: ['ctes'] });
       qc.invalidateQueries({ queryKey: ['mdfes'] });
+      qc.invalidateQueries({ queryKey: ['documentos-emitidos'] });
       setModalCancelar(false);
       setModalCarga(false);
       setModalCondutor(false);
@@ -97,7 +99,20 @@ export default function DocumentoDrawer({ tipo, documentoId, onClose, onVerRotei
       setModalCorrecao(false);
       setJustificativa('');
       setCorrigenda('');
-      alert(msg);
+      if (d.status === 'REJEITADO') {
+        const msgRej = `SEFAZ [${d.status_sefaz || 'REJEITADO'}]: ${d.mensagem_sefaz || 'Documento rejeitado pela SEFAZ.'}`;
+        setErro(msgRej);
+        alert(msgRej);
+      } else if (d.status === 'AUTORIZADO') {
+        alert(
+          `${tipo} AUTORIZADO pela SEFAZ!\n` +
+            `• Ambiente: ${(d.ambiente || d.focus_ambiente) === 'producao' ? 'PRODUÇÃO' : 'HOMOLOGAÇÃO (Testes)'}\n` +
+            `• Número/Série: ${d.numero || '—'} / ${d.serie || '1'}\n` +
+            `• Protocolo SEFAZ: ${d.protocolo || '—'}`
+        );
+      } else {
+        alert(msg);
+      }
     } catch (e: any) {
       const msgErro = e.response?.data?.error || e.message || 'Erro inesperado';
       setErro(msgErro);
