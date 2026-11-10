@@ -151,6 +151,24 @@ const KNOWN_ANTT_FISCAL_REGISTRY = {
 };
 
 const inFlightAutoHidratacao = new Map();
+const inFlightCteEmissoes = new Map();
+const tenantEmissionChains = new Map();
+const tenantsLoteHomologMsInicializado = new Set();
+
+function runTenantSequential(tenantId, taskFn) {
+  const key = String(tenantId || 'default');
+  const prev = tenantEmissionChains.get(key) || Promise.resolve();
+  const next = prev.catch(() => null).then(() => taskFn());
+  tenantEmissionChains.set(
+    key,
+    next.finally(() => {
+      if (tenantEmissionChains.get(key) === next) {
+        tenantEmissionChains.delete(key);
+      }
+    })
+  );
+  return next;
+}
 
 function extrairTagXml(bloco, tag) {
   if (!bloco || !tag) return '';
@@ -827,7 +845,24 @@ class TransporteService {
   /**
    * Emite um CT-e (Modelo 57) ou CT-e OS (Modelo 67) na Focus NFe v2.
    */
-  static async emitirCte(tenantId, cteId) {
+  static async emitirCte(tenantId, cteId, opts = {}) {
+    const idKey = Number(cteId);
+    if (inFlightCteEmissoes.has(idKey)) {
+      return inFlightCteEmissoes.get(idKey);
+    }
+
+    const promise = runTenantSequential(tenantId, () =>
+      this._executarEmissaoCte(tenantId, cteId, opts)
+    );
+    inFlightCteEmissoes.set(idKey, promise);
+    try {
+      return await promise;
+    } finally {
+      inFlightCteEmissoes.delete(idKey);
+    }
+  }
+
+  static async _executarEmissaoCte(tenantId, cteId, opts = {}) {
     const { rows } = await db.query(
       `SELECT c.* FROM dash_ctes c WHERE c.id = $1 AND c.tenant_id = $2`,
       [cteId, tenantId]
@@ -838,6 +873,22 @@ class TransporteService {
 
     const cte = rows[0];
     const { client, emitente } = await this.getFocusClient(tenantId, cte.emitente_id);
+
+    // Se já estava em PROCESSANDO com ref existente, verifica primeiro se a Focus NFe já autorizou
+    if (cte.status === 'PROCESSANDO' && cte.ref && !opts.forcarNovaEmissao) {
+      try {
+        const isCteOsCheck =
+          String(cte.modelo) === '67' || String(cte.modelo_cte || '').toLowerCase() === 'cteos';
+        const stCheck = isCteOsCheck
+          ? await client.consultarCteOs(cte.ref, true)
+          : await client.consultarCte(cte.ref, true);
+        if (stCheck && mapFocusStatusToDb(stCheck.status, 'PROCESSANDO') === 'AUTORIZADO') {
+          return await this._persistirRetornoFocusCte(cteId, cte.ref, stCheck, client.ambiente);
+        }
+      } catch (_) {
+        // segue para emissão limpa com nova ref e numeração sequencial
+      }
+    }
 
     // Busca as NF-e vinculadas a este CT-e
     const { rows: cargas } = await db.query(
@@ -1262,6 +1313,26 @@ class TransporteService {
 
     const foneEmitenteFallback = digitsOnly(emitente.telefone) || '6734164605';
     const retiraFlag = cte.retirar_mercadoria === true || cte.retirar_mercadoria === '0' ? '0' : '1';
+    const serieEnvio = Number(cte.serie || emitente.serie_cte || 1) || 1;
+
+    // Aloca numeração sequencial única para evitar colisão de (série, número) na Focus NFe / SEFAZ
+    const { rows: maxNumRows } = await db.query(
+      `SELECT COALESCE(MAX(numero), 0)::int AS max_num FROM dash_ctes WHERE tenant_id = $1 AND id <> $2`,
+      [tenantId, cteId]
+    );
+    const maxNumExistente = Number(maxNumRows[0]?.max_num || 0);
+    const precisaNovoNumeroHomolog =
+      emitente.focus_ambiente !== 'producao' &&
+      (cte.status === 'REJEITADO' ||
+        cte.status === 'PROCESSANDO' ||
+        !cte.numero ||
+        Number(cte.numero) <= 2 ||
+        Boolean(opts.forcarNovaEmissao));
+    let numeroEnvio = precisaNovoNumeroHomolog
+      ? Math.max(maxNumExistente + 1, Number(cte.id || 1) + 10)
+      : Number(cte.numero) > 0
+      ? Number(cte.numero)
+      : Math.max(maxNumExistente + 1, 1);
 
     const payload = {
       // Identificação (conforme ConhecimentoTransporteXML da Focus NFe v2)
@@ -1275,9 +1346,8 @@ class TransporteService {
       tipo_documento: finalidadeCte,
       modal: modalCodigo,
       tipo_servico: isCteOs ? (tipoServico === '0' ? '6' : tipoServico) : tipoServico,
-      ...(cte.status !== 'REJEITADO' && Number(cte.numero) > 0 && (cte.serie || emitente.serie_cte)
-        ? { serie: Number(cte.serie || emitente.serie_cte), numero: Number(cte.numero) }
-        : {}),
+      serie: serieEnvio,
+      numero: numeroEnvio,
       ...(cte.modelo_cte === 'globalizado' ? { indicador_globalizado: '1' } : {}),
 
       // Emitente
@@ -1447,13 +1517,15 @@ class TransporteService {
     }
 
     // Em homologação, se o documento estava REJEITADO ou preso em PROCESSANDO, gera uma nova ref limpa para garantir
-    // que a Focus NFe monte um novo XML 4.00 completo (com <IBSCBS>, <vTotDFe> e alíquota SEFAZ/MS atualizada).
+    // que a Focus NFe monte um novo XML 4.00 completo (com <IBSCBS>, <vTotDFe>, alíquota SEFAZ/MS e número sequencial único).
     let ref =
-      (emitente.focus_ambiente !== 'producao' && (cte.status === 'REJEITADO' || cte.status === 'PROCESSANDO')) || !cte.ref
+      (emitente.focus_ambiente !== 'producao' &&
+        (cte.status === 'REJEITADO' || cte.status === 'PROCESSANDO' || Boolean(opts.forcarNovaEmissao))) ||
+      !cte.ref
         ? this.gerarRef('CTE', tenantId, cte.id)
         : cte.ref;
 
-    // Salva o payload enviado, campos fiscais ICMS + IBS/CBS calculados e marca como PROCESSANDO
+    // Salva o payload enviado, campos fiscais ICMS + IBS/CBS calculados, numeração e marca como PROCESSANDO
     await db.query(
       `UPDATE dash_ctes SET
           ref = $1,
@@ -1468,6 +1540,8 @@ class TransporteService {
           valor_total_dfe = $11,
           aliquota_icms = $12,
           valor_icms = $13,
+          serie = $14,
+          numero = $15,
           status = 'PROCESSANDO',
           updated_at = NOW()
        WHERE id = $3`,
@@ -1485,13 +1559,15 @@ class TransporteService {
         valorTotalDfeCalc,
         aliquotaIcms,
         valorIcms,
+        String(serieEnvio),
+        numeroEnvio,
       ]
     );
 
     const aguardarRetornoCte = async (refConsulta) => {
       let ultimo = null;
-      for (let tentativa = 0; tentativa < 6; tentativa++) {
-        await new Promise((r) => setTimeout(r, 2200));
+      for (let tentativa = 0; tentativa < 10; tentativa++) {
+        await new Promise((r) => setTimeout(r, 2000));
         try {
           const st = isCteOs
             ? await client.consultarCteOs(refConsulta, true)
@@ -1507,40 +1583,58 @@ class TransporteService {
       return ultimo;
     };
 
-    const enviarParaFocusComRetryRef = async (payloadEnvio, sufixoNovaRef = '') => {
+    const enviarParaFocusComRetryRef = async (payloadEnvio, sufixoNovaRef = '', forcarNovaRef = false) => {
+      if (forcarNovaRef) {
+        numeroEnvio += 1;
+        payloadEnvio.serie = serieEnvio;
+        payloadEnvio.numero = numeroEnvio;
+        payloadEnvio.data_emissao = formatarDataHoraSefaz(emitente.uf || ibgeEnvio.uf);
+        ref = this.gerarRef('CTE', tenantId, `${cte.id}${sufixoNovaRef}`);
+        await db.query(
+          `UPDATE dash_ctes SET ref = $1, numero = $2, payload_focus = $3, updated_at = NOW() WHERE id = $4`,
+          [ref, numeroEnvio, JSON.stringify(payloadEnvio), cteId]
+        );
+      }
       try {
         return isCteOs
           ? await client.emitirCteOs(ref, payloadEnvio)
           : await client.emitirCte(ref, payloadEnvio);
       } catch (err) {
         if (
-          /referencia|referência|ja foi autorizad|já foi autorizad|ja existe|já existe|duplicad|conflito|processando_autorizacao|em processamento/i.test(
+          /referencia|referência|ja foi autorizad|já foi autorizad|ja existe|já existe|duplicad|conflito|processando_autorizacao|em processamento|numero/i.test(
             String(err.message || '')
           )
         ) {
-          ref = this.gerarRef('CTE', tenantId, `${cte.id}${sufixoNovaRef}`);
-          const payloadSemNumeroFixo = { ...payloadEnvio };
-          delete payloadSemNumeroFixo.numero;
+          numeroEnvio += 1;
+          ref = this.gerarRef('CTE', tenantId, `${cte.id}${sufixoNovaRef || '_N'}`);
+          const payloadNovoNumero = {
+            ...payloadEnvio,
+            serie: serieEnvio,
+            numero: numeroEnvio,
+            data_emissao: formatarDataHoraSefaz(emitente.uf || ibgeEnvio.uf),
+          };
           await db.query(
-            `UPDATE dash_ctes SET ref = $1, payload_focus = $2, updated_at = NOW() WHERE id = $3`,
-            [ref, JSON.stringify(payloadSemNumeroFixo), cteId]
+            `UPDATE dash_ctes SET ref = $1, numero = $2, payload_focus = $3, updated_at = NOW() WHERE id = $4`,
+            [ref, numeroEnvio, JSON.stringify(payloadNovoNumero), cteId]
           );
           return isCteOs
-            ? await client.emitirCteOs(ref, payloadSemNumeroFixo)
-            : await client.emitirCte(ref, payloadSemNumeroFixo);
+            ? await client.emitirCteOs(ref, payloadNovoNumero)
+            : await client.emitirCte(ref, payloadNovoNumero);
         }
         throw err;
       }
     };
 
-    const montarPayloadHomologFallback = () => {
-      const chOriginal = payload.nfes?.[0]?.chave_nfe || '';
+    const montarPayloadHomologFallback = (basePayload = payload) => {
+      const chOriginal = basePayload.nfes?.[0]?.chave_nfe || '';
       const numDocFallback =
         primeiraCarga?.numero ||
         docsManuais?.[0]?.numero ||
-        (chOriginal.length === 44 ? String(parseInt(chOriginal.slice(25, 34), 10) || 1) : '1');
+        (chOriginal.length === 44 ? String(parseInt(chOriginal.slice(25, 34), 10) || 1) : String(numeroEnvio));
       const fallback = {
-        ...payload,
+        ...basePayload,
+        serie: serieEnvio,
+        numero: numeroEnvio,
         data_emissao: formatarDataHoraSefaz(emitente.uf || ibgeEnvio.uf),
         outros_documentos: [
           {
@@ -1552,7 +1646,7 @@ class TransporteService {
           },
         ],
         observacao: [
-          payload.observacao,
+          basePayload.observacao,
           chOriginal ? `HOMOLOGACAO SEFAZ - REF NFE: ${chOriginal}` : null,
         ]
           .filter(Boolean)
@@ -1560,27 +1654,22 @@ class TransporteService {
           .slice(0, 2000),
       };
       delete fallback.nfes;
-      delete fallback.numero;
       return fallback;
     };
 
     let resFocus;
+    let payloadAtual = { ...payload };
     try {
-      resFocus = await enviarParaFocusComRetryRef(payload);
+      resFocus = await enviarParaFocusComRetryRef(payloadAtual);
     } catch (emitErr) {
-      // Se em HOMOLOGAÇÃO a Focus NFe recusar a chave de NF-e de teste (ex: 422 em chave_nfe/infNFe), faz fallback para Declaração (tpDoc=00)
       if (
         client.ambiente === 'homologacao' &&
         !isCteOs &&
         /chave|nfe|infnfe|documentos transportados/i.test(String(emitErr.message || ''))
       ) {
-        const payloadHomologFallback = montarPayloadHomologFallback();
+        payloadAtual = montarPayloadHomologFallback(payloadAtual);
         try {
-          await db.query(
-            `UPDATE dash_ctes SET ref = $1, payload_focus = $2, updated_at = NOW() WHERE id = $3`,
-            [ref, JSON.stringify(payloadHomologFallback), cteId]
-          );
-          resFocus = await enviarParaFocusComRetryRef(payloadHomologFallback, '_H');
+          resFocus = await enviarParaFocusComRetryRef(payloadAtual, '_H', true);
         } catch (fallbackErr) {
           await db
             .query(
@@ -1606,41 +1695,82 @@ class TransporteService {
       if (consultado) resFocus = consultado;
     }
 
-    // Em HOMOLOGAÇÃO: se a SEFAZ rejeitar com 661/662/652/216/236/616/526/693 (NF-e de teste ou de produção inexistente na base de homologação da SEFAZ),
-    // reenvia automaticamente em homologação como Declaração/Outros Documentos (tpDoc=00) para concluir a homologação do CT-e.
-    if (
-      client.ambiente === 'homologacao' &&
-      !isCteOs &&
-      mapFocusStatusToDb(resFocus?.status, 'PROCESSANDO') === 'REJEITADO' &&
-      (['661', '662', '652', '216', '236', '616', '526', '693'].includes(
-        String(extrairStatusSefazFocus(resFocus) || '').trim()
-      ) ||
-        /inexistente na base|chave de acesso|nf-e|documentos transportados/i.test(
-          String(extrairMensagemSefazFocus(resFocus) || '')
-        ))
-    ) {
-      const payloadHomologFallback = montarPayloadHomologFallback();
+    // Em HOMOLOGAÇÃO: trata automaticamente rejeições recuperáveis da SEFAZ (Duplicidade 204/539, NF-e de teste 661/693, vTotDFe 365, vBC IBS/CBS)
+    for (let retrySefaz = 1; retrySefaz <= 3; retrySefaz++) {
+      if (
+        client.ambiente !== 'homologacao' ||
+        isCteOs ||
+        mapFocusStatusToDb(resFocus?.status, 'PROCESSANDO') !== 'REJEITADO'
+      ) {
+        break;
+      }
+
+      const codSefaz = String(extrairStatusSefazFocus(resFocus) || '').trim();
+      const msgSefaz = String(extrairMensagemSefazFocus(resFocus) || '');
+
+      let ajustou = false;
+
+      // 1. Duplicidade de CT-e (204 / 539): avança numeração
+      if (['204', '539'].includes(codSefaz) || /duplicidade/i.test(msgSefaz)) {
+        numeroEnvio = Math.max(numeroEnvio, parseInt(resFocus?.numero || '0', 10) || 0) + retrySefaz;
+        payloadAtual = { ...payloadAtual, serie: serieEnvio, numero: numeroEnvio };
+        ajustou = true;
+      }
+      // 2. NF-e de teste inexistente na SEFAZ Homologação (661/662/652/216/236/616/526/693): converte para Declaração (tpDoc=00)
+      else if (
+        ['661', '662', '652', '216', '236', '616', '526', '693'].includes(codSefaz) ||
+        /inexistente na base|chave de acesso|nf-e|documentos transportados/i.test(msgSefaz)
+      ) {
+        payloadAtual = montarPayloadHomologFallback(payloadAtual);
+        ajustou = true;
+      }
+      // 3. Rejeição 365 (Total do DFe inválido / vTotDFe): alterna entre vTPrest puro e vTPrest + IBS + CBS
+      else if (codSefaz === '365' || /total do dfe|vtotdfe/i.test(msgSefaz)) {
+        const vTotAlternativo =
+          Number(payloadAtual.valor_total_dfe) === Number(baseCalculo.toFixed(2))
+            ? Number((baseCalculo + valorIbsTotalCalc + valorCbsCalc).toFixed(2))
+            : Number(baseCalculo.toFixed(2));
+        payloadAtual = {
+          ...payloadAtual,
+          valor_total_dfe: vTotAlternativo.toFixed(2),
+        };
+        ajustou = true;
+      }
+      // 4. Rejeição de Base de Cálculo IBS/CBS (dedução do ICMS na vBC do IBS/CBS)
+      else if (/base de calculo.*(ibs|cbs)|vbc.*(ibs|cbs)/i.test(msgSefaz)) {
+        const vBcLiquida = Math.max(0, Number((baseCalculo - valorIcms).toFixed(2)));
+        const vIbsUfLiq = Number(((vBcLiquida * aliqEfetIbsUf) / 100).toFixed(2));
+        const vIbsMunLiq = Number(((vBcLiquida * aliqEfetIbsMun) / 100).toFixed(2));
+        const vIbsTotLiq = Number((vIbsUfLiq + vIbsMunLiq).toFixed(2));
+        const vCbsLiq = Number(((vBcLiquida * aliqEfetCbs) / 100).toFixed(2));
+        payloadAtual = {
+          ...payloadAtual,
+          ibs_cbs_base_calculo: vBcLiquida.toFixed(2),
+          ibs_uf_valor: vIbsUfLiq.toFixed(2),
+          ibs_mun_valor: vIbsMunLiq.toFixed(2),
+          ibs_valor_total: vIbsTotLiq.toFixed(2),
+          cbs_valor: vCbsLiq.toFixed(2),
+        };
+        ajustou = true;
+      }
+
+      if (!ajustou) break;
+
       try {
-        await db.query(
-          `UPDATE dash_ctes SET ref = $1, payload_focus = $2, updated_at = NOW() WHERE id = $3`,
-          [ref, JSON.stringify(payloadHomologFallback), cteId]
-        );
-        const retryRes = await enviarParaFocusComRetryRef(payloadHomologFallback, '_H');
+        const retryRes = await enviarParaFocusComRetryRef(payloadAtual, `_R${retrySefaz}`, true);
         resFocus = retryRes;
         if (resFocus?.status === 'processando_autorizacao') {
           const consultadoRetry = await aguardarRetornoCte(ref);
           if (consultadoRetry) resFocus = consultadoRetry;
         }
       } catch (_) {
-        // mantém resultado anterior se o fallback falhar
+        break;
       }
     }
 
-    let novoStatus = mapFocusStatusToDb(resFocus.status, 'PROCESSANDO');
-
     // Garante que documentos recém-autorizados já tragam caminho_dacte (PDF oficial) e caminho_xml completos
     if (
-      novoStatus === 'AUTORIZADO' &&
+      mapFocusStatusToDb(resFocus?.status, 'PROCESSANDO') === 'AUTORIZADO' &&
       (!resFocus.caminho_dacte && !resFocus.caminho_danfe)
     ) {
       try {
@@ -1649,28 +1779,69 @@ class TransporteService {
           : await client.consultarCte(ref, true);
         if (stCompleto) {
           resFocus = stCompleto;
-          novoStatus = mapFocusStatusToDb(resFocus.status, novoStatus);
         }
       } catch (_) {
         // segue com resFocus atual
       }
     }
 
+    return await this._persistirRetornoFocusCte(
+      cteId,
+      ref,
+      resFocus || {},
+      client.ambiente,
+      numeroEnvio,
+      String(serieEnvio)
+    );
+  }
+
+  static async _persistirRetornoFocusCte(
+    cteId,
+    ref,
+    resFocus,
+    ambiente = 'homologacao',
+    numeroFallback = null,
+    serieFallback = null
+  ) {
+    const novoStatus = mapFocusStatusToDb(resFocus?.status, 'PROCESSANDO');
     const chaveCteNormalizada =
       digitsOnly(
-        resFocus.chave_cte || resFocus.chave || resFocus.protocolo?.chave_cte || ''
+        resFocus?.chave_cte || resFocus?.chave || resFocus?.protocolo?.chave_cte || ''
       ).slice(0, 44) || null;
     const caminhoXmlNormalizado = FocusClient.normalizarUrlArquivo(
-      resFocus.caminho_xml_nota_fiscal || resFocus.caminho_xml,
-      client.ambiente
+      resFocus?.caminho_xml_nota_fiscal || resFocus?.caminho_xml,
+      ambiente
     );
     const caminhoDacteNormalizado = FocusClient.normalizarUrlArquivo(
-      resFocus.caminho_dacte || resFocus.caminho_danfe,
-      client.ambiente
+      resFocus?.caminho_dacte || resFocus?.caminho_danfe,
+      ambiente
     );
     const protocoloNormalizado = extrairProtocoloFocus(resFocus);
-    const statusSefazNormalizado = extrairStatusSefazFocus(resFocus);
-    const mensagemSefazNormalizada = extrairMensagemSefazFocus(resFocus);
+    const statusSefazExtraido = extrairStatusSefazFocus(resFocus);
+    const mensagemSefazExtraida = extrairMensagemSefazFocus(resFocus);
+
+    const statusSefazNormalizado =
+      novoStatus === 'AUTORIZADO' ? statusSefazExtraido || '100' : statusSefazExtraido;
+    const mensagemSefazNormalizada =
+      novoStatus === 'AUTORIZADO'
+        ? mensagemSefazExtraida || 'Autorizado o uso do CT-e'
+        : mensagemSefazExtraida;
+
+    const numeroDaChave =
+      chaveCteNormalizada && chaveCteNormalizada.length === 44
+        ? parseInt(chaveCteNormalizada.slice(25, 34), 10) || null
+        : null;
+    const serieDaChave =
+      chaveCteNormalizada && chaveCteNormalizada.length === 44
+        ? String(parseInt(chaveCteNormalizada.slice(22, 25), 10) || 1)
+        : null;
+
+    const numeroFinal = resFocus?.numero
+      ? parseInt(resFocus.numero, 10)
+      : numeroDaChave || (numeroFallback ? parseInt(numeroFallback, 10) : null);
+    const serieFinal = resFocus?.serie
+      ? String(resFocus.serie)
+      : serieDaChave || (serieFallback ? String(serieFallback) : null);
 
     await db.query(
       `UPDATE dash_ctes SET
@@ -1691,12 +1862,12 @@ class TransporteService {
         statusSefazNormalizado,
         mensagemSefazNormalizada,
         chaveCteNormalizada,
-        resFocus.numero ? parseInt(resFocus.numero, 10) : null,
-        resFocus.serie ? String(resFocus.serie) : null,
+        numeroFinal,
+        serieFinal,
         protocoloNormalizado,
         caminhoXmlNormalizado,
         caminhoDacteNormalizado,
-        JSON.stringify(resFocus),
+        JSON.stringify(resFocus || {}),
         cteId,
       ]
     );
@@ -1704,14 +1875,14 @@ class TransporteService {
     return {
       success: true,
       ref,
-      ambiente: client.ambiente,
-      focus_ambiente: client.ambiente,
+      ambiente,
+      focus_ambiente: ambiente,
       status: novoStatus,
       status_sefaz: statusSefazNormalizado,
       mensagem_sefaz: mensagemSefazNormalizada,
       chave_cte: chaveCteNormalizada,
-      numero: resFocus.numero || null,
-      serie: resFocus.serie || null,
+      numero: numeroFinal,
+      serie: serieFinal,
       protocolo: protocoloNormalizado,
       caminho_xml: caminhoXmlNormalizado,
       caminho_dacte: caminhoDacteNormalizado,
@@ -1723,6 +1894,11 @@ class TransporteService {
    * Consulta na Focus NFe o status atual de um CT-e ou CT-e OS e atualiza o banco.
    */
   static async consultarCteFocus(tenantId, cteId) {
+    const idKey = Number(cteId);
+    if (inFlightCteEmissoes.has(idKey)) {
+      return await inFlightCteEmissoes.get(idKey);
+    }
+
     const { rows } = await db.query(
       `SELECT * FROM dash_ctes WHERE id = $1 AND tenant_id = $2`,
       [cteId, tenantId]
@@ -1740,84 +1916,298 @@ class TransporteService {
         ? await client.consultarCteOs(cte.ref, true)
         : await client.consultarCte(cte.ref, true);
     } catch (err) {
-      // Se o CT-e estava travado em PROCESSANDO ou REJEITADO em homologação mas a ref nunca chegou a existir na Focus NFe (404),
-      // dispara automaticamente a emissão completa para destravar o documento
-      if (
-        client.ambiente === 'homologacao' &&
-        (err.statusCode === 404 || /404|nao_encontrad|não encontrad|not found/i.test(String(err.message || '')))
-      ) {
-        return await this.emitirCte(tenantId, cteId);
+      const is404 =
+        err.statusCode === 404 ||
+        /404|nao_encontrad|não encontrad|not found/i.test(String(err.message || ''));
+      const idadeMs = cte.updated_at ? Date.now() - new Date(cte.updated_at).getTime() : 999999;
+      if (client.ambiente === 'homologacao' && is404 && (!cte.payload_focus || idadeMs > 30000)) {
+        return await this.emitirCte(tenantId, cteId, { forcarNovaEmissao: true });
       }
       throw err;
     }
 
-    const statusSefazConsulta = String(extrairStatusSefazFocus(st) || '').trim();
-    const mensagemSefazConsulta = String(extrairMensagemSefazFocus(st) || '');
+    const statusMapeado = mapFocusStatusToDb(st?.status, cte.status);
+    const chaveConsulta = digitsOnly(st?.chave_cte || st?.chave || cte.chave_cte || '');
+    const nCtNaChave = chaveConsulta.length === 44 ? parseInt(chaveConsulta.slice(25, 34), 10) : null;
+    const idadeMs = cte.updated_at ? Date.now() - new Date(cte.updated_at).getTime() : 999999;
 
-    // Se em homologação o documento na Focus ainda estiver com rejeição antiga (310 IBS/CBS, 360/365 vTotDFe, 693 Doc Transportados),
-    // reemite automaticamente com o payload atualizado da Reforma Tributária
+    // Se em homologação uma ref antiga ficou presa em processando_autorizacao com nCT=1 por colisão de numeração (>25s),
+    // destrava automaticamente reemitindo com numeração sequencial alta (>=10)
     if (
       client.ambiente === 'homologacao' &&
-      mapFocusStatusToDb(st.status, cte.status) === 'REJEITADO' &&
-      (['310', '360', '365', '693', '661', '662', '652'].includes(statusSefazConsulta) ||
-        /IBS|CBS|vTotDFe|Documentos Transportados/i.test(mensagemSefazConsulta))
+      statusMapeado === 'PROCESSANDO' &&
+      (nCtNaChave === 1 || Number(cte.numero || 0) <= 2) &&
+      idadeMs > 25000
     ) {
-      return await this.emitirCte(tenantId, cteId);
+      return await this.emitirCte(tenantId, cteId, { forcarNovaEmissao: true });
     }
 
-    const novoStatus = mapFocusStatusToDb(st.status, cte.status);
-    const chaveCteNormalizada =
-      digitsOnly(st.chave_cte || st.chave || st.protocolo?.chave_cte || '').slice(0, 44) || null;
-    const protocoloNormalizado = extrairProtocoloFocus(st);
-    const statusSefazNormalizado = extrairStatusSefazFocus(st);
-    const mensagemSefazNormalizada = extrairMensagemSefazFocus(st);
-    const caminhoXmlNormalizado = FocusClient.normalizarUrlArquivo(
-      st.caminho_xml_nota_fiscal || st.caminho_xml,
-      client.ambiente
+    return await this._persistirRetornoFocusCte(
+      cteId,
+      cte.ref,
+      st,
+      client.ambiente,
+      cte.numero,
+      cte.serie
     );
-    const caminhoDacteNormalizado = FocusClient.normalizarUrlArquivo(
-      st.caminho_dacte || st.caminho_danfe,
-      client.ambiente
-    );
+  }
 
-    await db.query(
-      `UPDATE dash_ctes SET
-          status = $1,
-          status_sefaz = COALESCE($2, status_sefaz),
-          mensagem_sefaz = COALESCE($3, mensagem_sefaz),
-          chave_cte = COALESCE($4, chave_cte),
-          numero = COALESCE($5, numero),
-          serie = COALESCE($6, serie),
-          protocolo = COALESCE($7, protocolo),
-          caminho_xml = COALESCE($8, caminho_xml),
-          caminho_dacte = COALESCE($9, caminho_dacte),
-          retorno_focus = $10,
-          updated_at = NOW()
-       WHERE id = $11`,
-      [
-        novoStatus,
-        statusSefazNormalizado,
-        mensagemSefazNormalizada,
-        chaveCteNormalizada,
-        st.numero ? parseInt(st.numero, 10) : null,
-        st.serie ? String(st.serie) : null,
-        protocoloNormalizado,
-        caminhoXmlNormalizado,
-        caminhoDacteNormalizado,
-        JSON.stringify(st),
-        cteId,
-      ]
+  /**
+   * Cria e transmite novos CT-es de teste em Homologação SEFAZ/MS
+   * (1 Operação Interna MS -> MS com CFOP 5353 e ICMS 17%, e 1 Operação Interestadual MS -> SP com CFOP 6353 e ICMS 12%,
+   *  ambos com Reforma Tributária IBS 0,10% + CBS 0,90% e Declaração tpDoc=00).
+   */
+  static async gerarCtesTesteHomologacaoMs(tenantId) {
+    const emitente = await this.getEmitente(tenantId);
+    let emitenteId = emitente.id;
+    if (!emitenteId) {
+      const { rows: emRows } = await db.query(
+        `SELECT id FROM dash_emitentes WHERE tenant_id = $1 AND ativo = true ORDER BY id ASC LIMIT 1`,
+        [tenantId]
+      );
+      emitenteId = emRows[0]?.id || null;
+    }
+
+    const { rows: maxRows } = await db.query(
+      `SELECT COALESCE(MAX(numero), 0)::int AS max_num, COUNT(*)::int AS total_ctes
+       FROM dash_ctes WHERE tenant_id = $1`,
+      [tenantId]
     );
+    let baseNumero = Math.max(Number(maxRows[0]?.max_num || 0) + 1, 20 + Number(maxRows[0]?.total_ctes || 0));
+
+    const amanhaYmd = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+    const remetentePadraoMs = {
+      documento: digitsOnly(emitente.cnpj) || '03272053000150',
+      razao_social: 'CT-E EMITIDO EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL',
+      nome_fantasia: emitente.nome_fantasia || 'PANTANAL',
+      inscricao_estadual: digitsOnly(emitente.inscricao_estadual) || '283100630',
+      indicador_ie: '1',
+      logradouro: emitente.logradouro || 'RUA ARGENTINA',
+      numero: emitente.numero || '715',
+      bairro: emitente.bairro || 'PARQUE DAS NACOES',
+      cep: digitsOnly(emitente.cep) || '79841270',
+      uf: emitente.uf || 'MS',
+      municipio: emitente.municipio || 'Dourados',
+      codigo_municipio: emitente.codigo_municipio || '5003702',
+      telefone: digitsOnly(emitente.telefone) || '6734164605',
+    };
+
+    const cenariosTeste = [
+      {
+        descricao: 'CT-e Homologação SEFAZ/MS — Operação Interna (Dourados/MS → Campo Grande/MS)',
+        cfop: '5353',
+        natureza_operacao: 'PRESTACAO DE SERVICO DE TRANSPORTE COMERCIAL',
+        uf_inicio: 'MS',
+        municipio_inicio: 'Dourados',
+        codigo_municipio_inicio: '5003702',
+        uf_fim: 'MS',
+        municipio_fim: 'Campo Grande',
+        codigo_municipio_fim: '5002704',
+        valor_total: 150.0,
+        aliquota_icms: 17.0,
+        valor_icms: 25.5,
+        peso_bruto: 180.0,
+        quantidade_volumes: 4,
+        valor_carga: 1850.0,
+        produto_predominante: 'ALIMENTOS EM GERAL',
+        destinatario_dados: {
+          documento: '11144477735',
+          razao_social: 'CT-E EMITIDO EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL',
+          inscricao_estadual: '',
+          indicador_ie: '9',
+          logradouro: 'AVENIDA AFONSO PENA',
+          numero: '1500',
+          bairro: 'CENTRO',
+          cep: '79002070',
+          uf: 'MS',
+          municipio: 'Campo Grande',
+          codigo_municipio: '5002704',
+          telefone: '6734164605',
+        },
+        documentos_json: [
+          {
+            id: 'doc-homolog-ms-1',
+            tipo: 'OUTRO',
+            chave: 'DECLARACAO-SEFAZ-MS-101',
+            numero: '101',
+            descricao: 'DECLARACAO DE TRANSPORTE INTERNO MS',
+          },
+        ],
+        observacoes:
+          'TESTE HOMOLOGACAO SEFAZ/MS #1 — OPERACAO INTERNA MS -> MS (CFOP 5353 | ICMS 17,00% | IBS 0,10% | CBS 0,90%)',
+      },
+      {
+        descricao: 'CT-e Homologação SEFAZ/MS — Operação Interestadual (Dourados/MS → São Paulo/SP)',
+        cfop: '6353',
+        natureza_operacao: 'PRESTACAO DE SERVICO DE TRANSPORTE INTERESTADUAL',
+        uf_inicio: 'MS',
+        municipio_inicio: 'Dourados',
+        codigo_municipio_inicio: '5003702',
+        uf_fim: 'SP',
+        municipio_fim: 'Sao Paulo',
+        codigo_municipio_fim: '3550308',
+        valor_total: 280.0,
+        aliquota_icms: 12.0,
+        valor_icms: 33.6,
+        peso_bruto: 320.0,
+        quantidade_volumes: 8,
+        valor_carga: 3400.0,
+        produto_predominante: 'MERCADORIAS DIVERSAS',
+        destinatario_dados: {
+          documento: '11144477735',
+          razao_social: 'CT-E EMITIDO EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL',
+          inscricao_estadual: '',
+          indicador_ie: '9',
+          logradouro: 'AVENIDA PAULISTA',
+          numero: '1000',
+          bairro: 'BELA VISTA',
+          cep: '01310100',
+          uf: 'SP',
+          municipio: 'Sao Paulo',
+          codigo_municipio: '3550308',
+          telefone: '6734164605',
+        },
+        documentos_json: [
+          {
+            id: 'doc-homolog-sp-2',
+            tipo: 'OUTRO',
+            chave: 'DECLARACAO-SEFAZ-SP-102',
+            numero: '102',
+            descricao: 'DECLARACAO DE TRANSPORTE INTERESTADUAL MS -> SP',
+          },
+        ],
+        observacoes:
+          'TESTE HOMOLOGACAO SEFAZ/MS #2 — OPERACAO INTERESTADUAL MS -> SP (CFOP 6353 | ICMS 12,00% | IBS 0,10% | CBS 0,90%)',
+      },
+    ];
+
+    const resultados = [];
+    for (const cenario of cenariosTeste) {
+      const numeroCte = baseNumero++;
+      const refInicial = this.gerarRef('CTE', tenantId, `T${numeroCte}`);
+      const componentes = [{ nome: 'FRETE VALOR', valor: cenario.valor_total }];
+
+      const { rows: insRows } = await db.query(
+        `INSERT INTO dash_ctes (
+            tenant_id, emitente_id, ref, status, serie, numero, modelo,
+            formato_dacte, finalidade, cfop, natureza_operacao, modelo_cte, tipo_servico, modal,
+            retirar_mercadoria, tomador, tomador_documento,
+            uf_inicio, municipio_inicio, codigo_municipio_inicio,
+            uf_fim, municipio_fim, codigo_municipio_fim,
+            valor_total, valor_receber, peso_bruto, quantidade_volumes, unidade_medida, valor_carga,
+            componentes_valor, icms_situacao_tributaria, base_icms, aliquota_icms, valor_icms,
+            aliquota_ibs, aliquota_ibs_mun, aliquota_cbs, codigo_situacao_fiscal, ibs_cbs_cst, ibs_cbs_class_trib,
+            produto_predominante, outras_caracteristicas_carga, data_prevista_entrega,
+            seguro_responsavel, observacoes,
+            remetente_dados, destinatario_dados, documentos_json, data_emissao
+         ) VALUES (
+            $1, $2, $3, 'RASCUNHO', '1', $4, '57',
+            'retrato', '0', $5, $6, 'normal', '0', '01',
+            true, '0', $7,
+            $8, $9, $10,
+            $11, $12, $13,
+            $14, $14, $15, $16, '01', $17,
+            $18::jsonb, '00', $14, $19, $20,
+            0.10, 0.00, 0.90, '000001', '000', '000001',
+            $21, 'CAIXAS', $22,
+            '4', $23,
+            $24::jsonb, $25::jsonb, $26::jsonb, NOW()
+         ) RETURNING *`,
+        [
+          tenantId,
+          emitenteId,
+          refInicial,
+          numeroCte,
+          cenario.cfop,
+          cenario.natureza_operacao,
+          remetentePadraoMs.documento,
+          cenario.uf_inicio,
+          cenario.municipio_inicio,
+          cenario.codigo_municipio_inicio,
+          cenario.uf_fim,
+          cenario.municipio_fim,
+          cenario.codigo_municipio_fim,
+          cenario.valor_total,
+          cenario.peso_bruto,
+          cenario.quantidade_volumes,
+          cenario.valor_carga,
+          JSON.stringify(componentes),
+          cenario.aliquota_icms,
+          cenario.valor_icms,
+          cenario.produto_predominante,
+          amanhaYmd,
+          cenario.observacoes,
+          JSON.stringify(remetentePadraoMs),
+          JSON.stringify(cenario.destinatario_dados),
+          JSON.stringify(cenario.documentos_json),
+        ]
+      );
+
+      const novoCte = insRows[0];
+      try {
+        const resEmissao = await this.emitirCte(tenantId, novoCte.id);
+        resultados.push({
+          cte_id: novoCte.id,
+          descricao: cenario.descricao,
+          ...resEmissao,
+        });
+      } catch (err) {
+        resultados.push({
+          cte_id: novoCte.id,
+          descricao: cenario.descricao,
+          status: 'REJEITADO',
+          error: err.message,
+        });
+      }
+    }
 
     return {
       success: true,
-      status: novoStatus,
-      chave_cte: chaveCteNormalizada,
-      protocolo: protocoloNormalizado,
-      caminho_xml: caminhoXmlNormalizado,
-      caminho_dacte: caminhoDacteNormalizado,
-      focus: st,
+      criados: resultados.length,
+      autorizados: resultados.filter((r) => r.status === 'AUTORIZADO').length,
+      resultados,
     };
+  }
+
+  /**
+   * Executa uma única vez por tenant a reconciliação de CT-es travados em nCT=1 e a criação do lote de testes SEFAZ/MS.
+   */
+  static async reconciliarEGerarTestesHomologacaoMs(tenantId) {
+    const key = String(tenantId);
+    if (tenantsLoteHomologMsInicializado.has(key)) return;
+    tenantsLoteHomologMsInicializado.add(key);
+
+    try {
+      const emitente = await this.getEmitente(tenantId);
+      if (emitente.focus_ambiente === 'producao') return;
+
+      // 1. Destrava CT-es antigos que ficaram em PROCESSANDO/REJEITADO com número <= 2
+      const { rows: antigos } = await db.query(
+        `SELECT id, status, numero FROM dash_ctes
+         WHERE tenant_id = $1 AND status IN ('PROCESSANDO', 'REJEITADO')
+         ORDER BY id ASC LIMIT 4`,
+        [tenantId]
+      );
+      for (const a of antigos) {
+        try {
+          await this.emitirCte(tenantId, a.id, { forcarNovaEmissao: true });
+        } catch (e) {
+          logger.warn(`[Homolog MS] Aviso ao destravar CT-e #${a.id}: ${e.message}`);
+        }
+      }
+
+      // 2. Verifica se já foram criados os novos CT-es de teste SEFAZ/MS (Interno 17% e Interestadual 12%)
+      const { rows: jaTemNovos } = await db.query(
+        `SELECT COUNT(*)::int AS total FROM dash_ctes
+         WHERE tenant_id = $1 AND observacoes ILIKE '%TESTE HOMOLOGACAO SEFAZ/MS%'`,
+        [tenantId]
+      );
+      if (Number(jaTemNovos[0]?.total || 0) === 0) {
+        await this.gerarCtesTesteHomologacaoMs(tenantId);
+      }
+    } catch (err) {
+      logger.warn(`[Homolog MS] Aviso em reconciliarEGerarTestesHomologacaoMs: ${err.message}`);
+    }
   }
 
   /**

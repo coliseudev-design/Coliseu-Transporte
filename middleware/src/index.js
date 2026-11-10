@@ -77,33 +77,19 @@ async function startServer() {
                     logger.warn('[App] Erro na aplicação de migrações automáticas:', migErr.message);
                 }
 
-                // Auto-reconciliação em background no boot: reemite CT-es de homologação rejeitados ou presos em PROCESSANDO
+                // Auto-reconciliação e criação do lote de testes SEFAZ/MS em background no boot
                 setImmediate(async () => {
                     try {
                         const TransporteService = require('./services/transporteService');
-                        const { rows: pendentes } = await db.query(
-                            `SELECT c.id, c.tenant_id, c.status, c.status_sefaz, c.mensagem_sefaz
-                             FROM dash_ctes c
-                             LEFT JOIN dash_emitentes e ON e.id = c.emitente_id
-                             WHERE COALESCE(e.focus_ambiente, 'homologacao') <> 'producao'
-                               AND c.status IN ('REJEITADO', 'PROCESSANDO', 'RASCUNHO')
-                             ORDER BY c.id DESC
-                             LIMIT 5`
+                        const { rows: tenantsHomolog } = await db.query(
+                            `SELECT DISTINCT tenant_id FROM (
+                                SELECT tenant_id FROM dash_emitentes WHERE COALESCE(focus_ambiente, 'homologacao') <> 'producao'
+                                UNION
+                                SELECT tenant_id FROM dash_ctes
+                             ) t WHERE tenant_id IS NOT NULL`
                         );
-                        for (const p of pendentes) {
-                            try {
-                                if (p.status === 'PROCESSANDO') {
-                                    const resCons = await TransporteService.consultarCteFocus(p.tenant_id, p.id).catch(() => null);
-                                    if (!resCons || resCons.status !== 'AUTORIZADO') {
-                                        await TransporteService.emitirCte(p.tenant_id, p.id);
-                                    }
-                                } else {
-                                    await TransporteService.emitirCte(p.tenant_id, p.id);
-                                }
-                                logger.info(`[App] Auto-reconciliação homologação concluída para CT-e #${p.id}`);
-                            } catch (e) {
-                                logger.warn(`[App] Aviso ao auto-reconciliar CT-e #${p.id}: ${e.message}`);
-                            }
+                        for (const row of tenantsHomolog) {
+                            await TransporteService.reconciliarEGerarTestesHomologacaoMs(row.tenant_id);
                         }
                     } catch (reconcileErr) {
                         logger.warn('[App] Aviso na auto-reconciliação inicial de CT-es:', reconcileErr.message);

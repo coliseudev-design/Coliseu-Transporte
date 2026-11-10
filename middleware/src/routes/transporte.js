@@ -439,44 +439,34 @@ router.get('/documentos', async (req, res) => {
             LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
         params.push(parseInt(limit, 10), parseInt(offset, 10));
 
+        // Garante que em homologação o lote inicial de testes SEFAZ/MS seja criado e os documentos presos em nCT=1 sejam destravados (uma única vez por tenant)
+        await Promise.race([
+            TransporteService.reconciliarEGerarTestesHomologacaoMs(tenantId),
+            new Promise((r) => setTimeout(r, 25000)),
+        ]);
+
         let { rows } = await db.query(finalSql, params);
 
-        // Se houver CT-es em HOMOLOGAÇÃO rejeitados, re-emite automaticamente com as regras SEFAZ/MS e IBS/CBS atualizadas
-        const autoRetryHomologRows = rows
-            .filter(
-                (r) =>
-                    r.tipo_documento === 'CTE' &&
-                    r.status === 'REJEITADO' &&
-                    String(r.focus_ambiente || 'homologacao').toLowerCase() !== 'producao'
-            )
-            .slice(0, 3);
-
-        if (autoRetryHomologRows.length > 0) {
-            await Promise.all(
-                autoRetryHomologRows.map((r) =>
-                    TransporteService.emitirCte(tenantId, r.id).catch(() => null)
-                )
-            );
-            const refreshedRetry = await db.query(finalSql, params);
-            rows = refreshedRetry.rows;
-        }
-
-        // Se houver documentos em PROCESSANDO ou AUTORIZADO sem PDF sincronizado, consulta automaticamente a Focus NFe
+        // Se houver documentos em PROCESSANDO ou AUTORIZADO sem PDF sincronizado, consulta sequencialmente a Focus NFe
         const processandoRows = rows
             .filter(
                 (r) =>
                     r.ref &&
                     (r.status === 'PROCESSANDO' || (r.status === 'AUTORIZADO' && !r.caminho_pdf))
             )
-            .slice(0, 5);
+            .slice(0, 4);
         if (processandoRows.length > 0) {
-            await Promise.all(
-                processandoRows.map((r) =>
-                    r.tipo_documento === 'MDFE'
-                        ? TransporteService.consultarMdfeFocus(tenantId, r.id).catch(() => null)
-                        : TransporteService.consultarCteFocus(tenantId, r.id).catch(() => null)
-                )
-            );
+            for (const r of processandoRows) {
+                try {
+                    if (r.tipo_documento === 'MDFE') {
+                        await TransporteService.consultarMdfeFocus(tenantId, r.id);
+                    } else {
+                        await TransporteService.consultarCteFocus(tenantId, r.id);
+                    }
+                } catch (_) {
+                    // ignora falha individual de consulta
+                }
+            }
             const refreshed = await db.query(finalSql, params);
             rows = refreshed.rows;
         }
@@ -548,6 +538,18 @@ router.get('/ctes', async (req, res) => {
         const { rows } = await db.query(sql, params);
         return res.json({ success: true, data: rows });
     } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+});
+
+router.post('/ctes/gerar-teste-homologacao', async (req, res) => {
+    const tenantId = req.tenant.id;
+    try {
+        await aplicarRegrasPadraoSefazMs(tenantId);
+        const result = await TransporteService.gerarCtesTesteHomologacaoMs(tenantId);
+        return res.json(result);
+    } catch (err) {
+        logger.error('[Transporte API] Erro ao gerar CT-es de teste em homologação:', err.message);
         return res.status(500).json({ error: err.message });
     }
 });

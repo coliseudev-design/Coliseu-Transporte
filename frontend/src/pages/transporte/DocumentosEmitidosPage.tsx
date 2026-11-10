@@ -5,7 +5,7 @@ import TabelaResponsiva from '../../components/TabelaResponsiva';
 import DocumentoDrawer from '../../components/DocumentoDrawer';
 import {
   FileText, Truck, Search, Calendar, Download, Eye,
-  RefreshCw, X, FileStack, ArrowUpRight
+  RefreshCw, X, FileStack, ArrowUpRight, Send, CheckCircle2, AlertTriangle, Loader2
 } from 'lucide-react';
 
 interface Documento {
@@ -47,6 +47,12 @@ export default function DocumentosEmitidosPage() {
   const [dataInicio, setDataInicio] = useState('');
   const [dataFim, setDataFim] = useState('');
   const [drawer, setDrawer] = useState<{ tipo: 'CTE' | 'MDFE'; id: number } | null>(null);
+  const [gerandoTestes, setGerandoTestes] = useState(false);
+  const [resultadoTestes, setResultadoTestes] = useState<{
+    criados: number;
+    autorizados: number;
+    resultados: any[];
+  } | null>(null);
 
   const { data, isLoading, refetch } = useQuery({
     queryKey: ['documentos-emitidos', tipo, status, search, dataInicio, dataFim],
@@ -62,10 +68,28 @@ export default function DocumentosEmitidosPage() {
         }
       });
       return res.data;
+    },
+    refetchInterval: (query) => {
+      const rows = (query.state.data as any)?.data || [];
+      return rows.some((r: Documento) => r.status === 'PROCESSANDO') ? 5000 : false;
     }
   });
 
   const documentos: Documento[] = data?.data || [];
+
+  const handleGerarCtesTesteHomologacao = async () => {
+    setGerandoTestes(true);
+    setResultadoTestes(null);
+    try {
+      const res = await api.post('/transporte/ctes/gerar-teste-homologacao');
+      setResultadoTestes(res.data);
+      await refetch();
+    } catch (e: any) {
+      alert(e?.response?.data?.error || 'Erro ao gerar e transmitir novos CT-es de teste.');
+    } finally {
+      setGerandoTestes(false);
+    }
+  };
 
   const statusBadge = (s: string) => {
     const cores: Record<string, string> = {
@@ -137,7 +161,24 @@ export default function DocumentosEmitidosPage() {
           </p>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={handleGerarCtesTesteHomologacao}
+            disabled={gerandoTestes}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm transition-colors disabled:opacity-60"
+            title="Cria e transmite 2 novos CT-es de teste em homologação na SEFAZ/MS (Interno MS 17% e Interestadual 12% + IBS/CBS)"
+          >
+            {gerandoTestes ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <Send className="w-3.5 h-3.5" />
+            )}
+            {gerandoTestes
+              ? 'Emitindo CT-es na SEFAZ/MS...'
+              : 'Gerar Novos CT-es de Teste (SEFAZ/MS)'}
+          </button>
+
           <button
             onClick={() => refetch()}
             className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
@@ -147,6 +188,66 @@ export default function DocumentosEmitidosPage() {
           </button>
         </div>
       </div>
+
+      {resultadoTestes && (
+        <div className="bg-emerald-50/90 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/70 rounded-2xl p-4 space-y-2.5">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-xs font-bold text-emerald-900 dark:text-emerald-200">
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+              <span>
+                Lote de Teste Homologação SEFAZ/MS processado: {resultadoTestes.criados} CT-e(s) emitido(s) ({resultadoTestes.autorizados} autorizado(s))
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setResultadoTestes(null)}
+              className="text-xs text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
+            >
+              Fechar
+            </button>
+          </div>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
+            {(resultadoTestes.resultados || []).map((r: any, idx: number) => (
+              <div
+                key={r.cte_id || idx}
+                className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-3 flex items-center justify-between gap-3 text-xs"
+              >
+                <div className="min-w-0">
+                  <p className="font-bold text-slate-900 dark:text-white truncate">
+                    Nº {r.numero || '—'} — {r.descricao}
+                  </p>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate mt-0.5">
+                    Status: <strong className="text-slate-800 dark:text-slate-200">{r.status}</strong>
+                    {r.status_sefaz ? ` (SEFAZ ${r.status_sefaz})` : ''}
+                    {r.mensagem_sefaz ? ` — ${r.mensagem_sefaz}` : ''}
+                    {r.error ? ` — ${r.error}` : ''}
+                  </p>
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  {r.cte_id && (
+                    <button
+                      type="button"
+                      onClick={() => setDrawer({ tipo: 'CTE', id: r.cte_id })}
+                      className="px-2.5 py-1 rounded-lg bg-slate-900 dark:bg-white text-white dark:text-slate-900 font-semibold text-[11px]"
+                    >
+                      Detalhes
+                    </button>
+                  )}
+                  {r.status === 'AUTORIZADO' && r.cte_id && (
+                    <button
+                      type="button"
+                      onClick={() => handleBaixarArquivo('CTE', r.cte_id, 'pdf', r.caminho_dacte)}
+                      className="px-2.5 py-1 rounded-lg bg-emerald-600 text-white font-semibold text-[11px]"
+                    >
+                      DACTE (PDF)
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Filtros */}
       <div className="bg-white dark:bg-slate-800 p-4 rounded-2xl border border-slate-200/80 dark:border-slate-700/80 space-y-3">
