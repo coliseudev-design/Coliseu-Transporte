@@ -47,7 +47,21 @@ async function ensureTransporteColumns() {
               ADD COLUMN IF NOT EXISTS logo_base64 TEXT,
               ADD COLUMN IF NOT EXISTS logo_mime VARCHAR(40) DEFAULT 'image/png',
               ADD COLUMN IF NOT EXISTS logo_atualizada_em TIMESTAMPTZ,
-              ADD COLUMN IF NOT EXISTS logo_focus_sincronizada BOOLEAN DEFAULT FALSE;
+              ADD COLUMN IF NOT EXISTS logo_focus_sincronizada BOOLEAN DEFAULT FALSE,
+              ADD COLUMN IF NOT EXISTS pis_cofins_modo VARCHAR(20) DEFAULT 'NAO_APURADO',
+              ADD COLUMN IF NOT EXISTS pis_cst VARCHAR(2),
+              ADD COLUMN IF NOT EXISTS aliquota_pis NUMERIC(7,4),
+              ADD COLUMN IF NOT EXISTS cofins_cst VARCHAR(2),
+              ADD COLUMN IF NOT EXISTS aliquota_cofins NUMERIC(7,4),
+              ADD COLUMN IF NOT EXISTS excluir_icms_base_pis_cofins BOOLEAN DEFAULT TRUE;
+
+            ALTER TABLE dash_regras_fiscais
+              ADD COLUMN IF NOT EXISTS pis_cofins_modo VARCHAR(20) DEFAULT 'NAO_APURADO',
+              ADD COLUMN IF NOT EXISTS pis_cst VARCHAR(2),
+              ADD COLUMN IF NOT EXISTS aliquota_pis NUMERIC(7,4),
+              ADD COLUMN IF NOT EXISTS cofins_cst VARCHAR(2),
+              ADD COLUMN IF NOT EXISTS aliquota_cofins NUMERIC(7,4),
+              ADD COLUMN IF NOT EXISTS excluir_icms_base_pis_cofins BOOLEAN DEFAULT TRUE;
 
             ALTER TABLE dash_certificados
               ADD COLUMN IF NOT EXISTS focus_sincronizado BOOLEAN DEFAULT FALSE,
@@ -90,7 +104,17 @@ async function ensureTransporteColumns() {
               ADD COLUMN IF NOT EXISTS modal_os_dados JSONB DEFAULT '{}'::jsonb,
               ADD COLUMN IF NOT EXISTS chave_cte_referenciado VARCHAR(44),
               ADD COLUMN IF NOT EXISTS quantidade_volumes NUMERIC(15,4) DEFAULT 1,
-              ADD COLUMN IF NOT EXISTS unidade_medida VARCHAR(10) DEFAULT '01';
+              ADD COLUMN IF NOT EXISTS unidade_medida VARCHAR(10) DEFAULT '01',
+              ADD COLUMN IF NOT EXISTS ibs_cbs_base_calculo NUMERIC(15,2),
+              ADD COLUMN IF NOT EXISTS pis_cofins_modo VARCHAR(20) DEFAULT 'NAO_APURADO',
+              ADD COLUMN IF NOT EXISTS pis_cst VARCHAR(2),
+              ADD COLUMN IF NOT EXISTS aliquota_pis NUMERIC(7,4),
+              ADD COLUMN IF NOT EXISTS valor_pis NUMERIC(15,2) DEFAULT 0,
+              ADD COLUMN IF NOT EXISTS cofins_cst VARCHAR(2),
+              ADD COLUMN IF NOT EXISTS aliquota_cofins NUMERIC(7,4),
+              ADD COLUMN IF NOT EXISTS valor_cofins NUMERIC(15,2) DEFAULT 0,
+              ADD COLUMN IF NOT EXISTS excluir_icms_base_pis_cofins BOOLEAN DEFAULT TRUE,
+              ADD COLUMN IF NOT EXISTS pendencias_fiscais JSONB DEFAULT '[]'::jsonb;
 
             ALTER TABLE dash_mdfes
               ADD COLUMN IF NOT EXISTS tipo_emitente VARCHAR(2) DEFAULT '1',
@@ -731,7 +755,9 @@ router.post('/ctes', async (req, res) => {
                 observacoes, chave_cte_referenciado,
                 remetente_dados, destinatario_dados, expedidor_dados, recebedor_dados, tomador_dados,
                 documentos_json, quantidades_carga, modal_os_dados,
-                ibs_cbs_cst, ibs_cbs_class_trib, aliquota_ibs_mun, reducao_aliquota_ibs_cbs
+                ibs_cbs_cst, ibs_cbs_class_trib, aliquota_ibs_mun, reducao_aliquota_ibs_cbs,
+                ibs_cbs_base_calculo, pis_cofins_modo, pis_cst, aliquota_pis, valor_pis,
+                cofins_cst, aliquota_cofins, valor_cofins, excluir_icms_base_pis_cofins
              ) VALUES (
                 $1, $2, $3, 'RASCUNHO', $4, $5, $6,
                 $7, $8, $9, $10, $11, $12, $13,
@@ -747,7 +773,8 @@ router.post('/ctes', async (req, res) => {
                 $48, $49,
                 $50::jsonb, $51::jsonb, $52::jsonb, $53::jsonb, $54::jsonb,
                 $55::jsonb, $56::jsonb, $57::jsonb,
-                $58, $59, $60, $61
+                $58, $59, $60, $61,
+                $62, $63, $64, $65, $66, $67, $68, $69, $70
              ) RETURNING *`,
             [
                 tenantId,
@@ -811,6 +838,21 @@ router.post('/ctes', async (req, res) => {
                 b.ibs_cbs_class_trib || b.codigo_situacao_fiscal || '000001',
                 parseFloat(b.aliquota_ibs_mun || 0),
                 parseFloat(b.reducao_aliquota_ibs_cbs || 0),
+                b.ibs_cbs_base_calculo !== undefined && b.ibs_cbs_base_calculo !== null && b.ibs_cbs_base_calculo !== ''
+                    ? parseFloat(b.ibs_cbs_base_calculo)
+                    : null,
+                b.pis_cofins_modo || 'NAO_APURADO',
+                b.pis_cst || null,
+                b.aliquota_pis !== undefined && b.aliquota_pis !== null && b.aliquota_pis !== ''
+                    ? parseFloat(b.aliquota_pis)
+                    : null,
+                parseFloat(b.valor_pis || 0),
+                b.cofins_cst || null,
+                b.aliquota_cofins !== undefined && b.aliquota_cofins !== null && b.aliquota_cofins !== ''
+                    ? parseFloat(b.aliquota_cofins)
+                    : null,
+                parseFloat(b.valor_cofins || 0),
+                b.excluir_icms_base_pis_cofins !== false,
             ]
         );
 
@@ -851,6 +893,19 @@ router.put('/ctes/:id', async (req, res) => {
     const b = req.body || {};
 
     try {
+        const atualRes = await db.query(
+            `SELECT id, status FROM dash_ctes WHERE id = $1 AND tenant_id = $2`,
+            [cteId, tenantId]
+        );
+        if (atualRes.rows.length === 0) {
+            return res.status(404).json({ error: 'CT-e não encontrado' });
+        }
+        if (atualRes.rows[0].status === 'AUTORIZADO') {
+            return res.status(409).json({
+                error: 'CT-e já AUTORIZADO pela SEFAZ não pode ser alterado. Gere um novo documento para retificação ou teste.'
+            });
+        }
+
         const modeloCodigo = b.modelo === '67' || b.modelo_cte === 'cteos' ? '67' : '57';
         const { rows } = await db.query(
             `UPDATE dash_ctes SET
@@ -913,8 +968,17 @@ router.put('/ctes/:id', async (req, res) => {
                 ibs_cbs_class_trib = COALESCE($59, ibs_cbs_class_trib),
                 aliquota_ibs_mun = COALESCE($60, aliquota_ibs_mun),
                 reducao_aliquota_ibs_cbs = COALESCE($61, reducao_aliquota_ibs_cbs),
+                ibs_cbs_base_calculo = COALESCE($62, ibs_cbs_base_calculo),
+                pis_cofins_modo = COALESCE($63, pis_cofins_modo),
+                pis_cst = COALESCE($64, pis_cst),
+                aliquota_pis = COALESCE($65, aliquota_pis),
+                valor_pis = COALESCE($66, valor_pis),
+                cofins_cst = COALESCE($67, cofins_cst),
+                aliquota_cofins = COALESCE($68, aliquota_cofins),
+                valor_cofins = COALESCE($69, valor_cofins),
+                excluir_icms_base_pis_cofins = COALESCE($70, excluir_icms_base_pis_cofins),
                 updated_at = NOW()
-             WHERE id = $56 AND tenant_id = $57
+             WHERE id = $56 AND tenant_id = $57 AND status <> 'AUTORIZADO'
              RETURNING *`,
             [
                 b.emitente_id || null,
@@ -978,6 +1042,15 @@ router.put('/ctes/:id', async (req, res) => {
                 b.ibs_cbs_class_trib || b.codigo_situacao_fiscal || null,
                 b.aliquota_ibs_mun !== undefined ? parseFloat(b.aliquota_ibs_mun || 0) : null,
                 b.reducao_aliquota_ibs_cbs !== undefined ? parseFloat(b.reducao_aliquota_ibs_cbs || 0) : null,
+                b.ibs_cbs_base_calculo !== undefined && b.ibs_cbs_base_calculo !== '' ? parseFloat(b.ibs_cbs_base_calculo) : null,
+                b.pis_cofins_modo || null,
+                b.pis_cst || null,
+                b.aliquota_pis !== undefined && b.aliquota_pis !== '' && b.aliquota_pis !== null ? parseFloat(b.aliquota_pis) : null,
+                b.valor_pis !== undefined && b.valor_pis !== '' && b.valor_pis !== null ? parseFloat(b.valor_pis) : null,
+                b.cofins_cst || null,
+                b.aliquota_cofins !== undefined && b.aliquota_cofins !== '' && b.aliquota_cofins !== null ? parseFloat(b.aliquota_cofins) : null,
+                b.valor_cofins !== undefined && b.valor_cofins !== '' && b.valor_cofins !== null ? parseFloat(b.valor_cofins) : null,
+                b.excluir_icms_base_pis_cofins !== undefined ? Boolean(b.excluir_icms_base_pis_cofins) : null,
             ]
         );
 
@@ -2054,6 +2127,43 @@ router.post('/emitentes', async (req, res) => {
             ]
         ).catch(() => {});
 
+        if (
+            b.pis_cofins_modo !== undefined ||
+            b.pis_cst !== undefined ||
+            b.aliquota_pis !== undefined ||
+            b.cofins_cst !== undefined ||
+            b.aliquota_cofins !== undefined ||
+            b.excluir_icms_base_pis_cofins !== undefined
+        ) {
+            const pcRes = await db.query(
+                `UPDATE dash_emitentes
+                 SET pis_cofins_modo = COALESCE($1, pis_cofins_modo),
+                     pis_cst = CASE WHEN $2::boolean THEN $3 ELSE pis_cst END,
+                     aliquota_pis = CASE WHEN $4::boolean THEN $5 ELSE aliquota_pis END,
+                     cofins_cst = CASE WHEN $6::boolean THEN $7 ELSE cofins_cst END,
+                     aliquota_cofins = CASE WHEN $8::boolean THEN $9 ELSE aliquota_cofins END,
+                     excluir_icms_base_pis_cofins = COALESCE($10, excluir_icms_base_pis_cofins),
+                     updated_at = NOW()
+                 WHERE id = $11 AND tenant_id = $12
+                 RETURNING *`,
+                [
+                    b.pis_cofins_modo || null,
+                    b.pis_cst !== undefined,
+                    b.pis_cst !== '' && b.pis_cst !== null ? String(b.pis_cst).padStart(2, '0').slice(-2) : null,
+                    b.aliquota_pis !== undefined,
+                    b.aliquota_pis !== '' && b.aliquota_pis !== null && b.aliquota_pis !== undefined ? parseFloat(b.aliquota_pis) : null,
+                    b.cofins_cst !== undefined,
+                    b.cofins_cst !== '' && b.cofins_cst !== null ? String(b.cofins_cst).padStart(2, '0').slice(-2) : null,
+                    b.aliquota_cofins !== undefined,
+                    b.aliquota_cofins !== '' && b.aliquota_cofins !== null && b.aliquota_cofins !== undefined ? parseFloat(b.aliquota_cofins) : null,
+                    b.excluir_icms_base_pis_cofins !== undefined ? Boolean(b.excluir_icms_base_pis_cofins) : null,
+                    saved.id,
+                    tenantId,
+                ]
+            );
+            if (pcRes.rows[0]) saved = pcRes.rows[0];
+        }
+
         if (b.logo_base64 && typeof b.logo_base64 === 'string' && b.logo_base64.trim().length > 32) {
             const normLogo = TransporteService.normalizarLogoBase64(b.logo_base64);
             const logoRes = await db.query(
@@ -2897,7 +3007,9 @@ router.post('/regras', async (req, res) => {
         ibs_cbs_cst = '000', ibs_cbs_class_trib = '000001',
         aliquota_ibs = 0.10, aliquota_ibs_mun = 0.00, aliquota_cbs = 0.90,
         reducao_aliquota_ibs_cbs = 0, diferimento_ibs_cbs = 0,
-        codigo_situacao_fiscal = null, vigente_de = null, vigente_ate = null
+        codigo_situacao_fiscal = null, vigente_de = null, vigente_ate = null,
+        pis_cofins_modo = 'NAO_APURADO', pis_cst = null, aliquota_pis = null,
+        cofins_cst = null, aliquota_cofins = null, excluir_icms_base_pis_cofins = true
     } = req.body || {};
 
     try {
@@ -2910,10 +3022,12 @@ router.post('/regras', async (req, res) => {
                 percentual_adicional, ativo,
                 ibs_cbs_cst, ibs_cbs_class_trib, aliquota_ibs, aliquota_ibs_mun, aliquota_cbs,
                 reducao_aliquota_ibs_cbs, diferimento_ibs_cbs, codigo_situacao_fiscal,
-                vigente_de, vigente_ate
+                vigente_de, vigente_ate,
+                pis_cofins_modo, pis_cst, aliquota_pis, cofins_cst, aliquota_cofins, excluir_icms_base_pis_cofins
              ) VALUES (
                 $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
-                $21,$22,$23,$24,$25,$26,$27,$28,$29,$30
+                $21,$22,$23,$24,$25,$26,$27,$28,$29,$30,
+                $31,$32,$33,$34,$35,$36
              )
              RETURNING *`,
             [
@@ -2937,7 +3051,13 @@ router.post('/regras', async (req, res) => {
                 parseFloat(diferimento_ibs_cbs || 0),
                 codigo_situacao_fiscal || ibs_cbs_class_trib || '000001',
                 vigente_de || null,
-                vigente_ate || null
+                vigente_ate || null,
+                pis_cofins_modo || 'NAO_APURADO',
+                pis_cst ? String(pis_cst).padStart(2, '0').slice(-2) : null,
+                aliquota_pis !== null && aliquota_pis !== '' && aliquota_pis !== undefined ? parseFloat(aliquota_pis) : null,
+                cofins_cst ? String(cofins_cst).padStart(2, '0').slice(-2) : null,
+                aliquota_cofins !== null && aliquota_cofins !== '' && aliquota_cofins !== undefined ? parseFloat(aliquota_cofins) : null,
+                excluir_icms_base_pis_cofins !== false
             ]
         );
         return res.status(201).json({ success: true, data: rows[0] });
@@ -2956,7 +3076,8 @@ const atualizarRegraHandler = async (req, res) => {
         'criterio_rateio', 'valor_minimo', 'valor_maximo', 'percentual_adicional', 'ativo',
         'ibs_cbs_cst', 'ibs_cbs_class_trib', 'aliquota_ibs', 'aliquota_ibs_mun', 'aliquota_cbs',
         'reducao_aliquota_ibs_cbs', 'diferimento_ibs_cbs', 'codigo_situacao_fiscal',
-        'vigente_de', 'vigente_ate'
+        'vigente_de', 'vigente_ate',
+        'pis_cofins_modo', 'pis_cst', 'aliquota_pis', 'cofins_cst', 'aliquota_cofins', 'excluir_icms_base_pis_cofins'
     ];
 
     try {
@@ -2966,7 +3087,17 @@ const atualizarRegraHandler = async (req, res) => {
         for (const c of camposPermitidos) {
             if (body[c] !== undefined) {
                 let val = body[c];
-                if ((c === 'valor_minimo' || c === 'valor_maximo' || c === 'vigente_de' || c === 'vigente_ate') && val === '') {
+                if (
+                    (c === 'valor_minimo' ||
+                        c === 'valor_maximo' ||
+                        c === 'vigente_de' ||
+                        c === 'vigente_ate' ||
+                        c === 'pis_cst' ||
+                        c === 'cofins_cst' ||
+                        c === 'aliquota_pis' ||
+                        c === 'aliquota_cofins') &&
+                    val === ''
+                ) {
                     val = null;
                 }
                 params.push(val);

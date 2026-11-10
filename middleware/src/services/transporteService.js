@@ -5,6 +5,10 @@ const db = require('../db/postgres');
 const config = require('../config/env');
 const logger = require('../config/logger');
 const FocusClient = require('./focus/focusClient');
+const {
+  calcularTributosCte400,
+  montarCamposFocusImpostosCte400,
+} = require('./fiscal/cteTaxCalculator');
 const { safeCompare } = require('../middleware/auth');
 const {
   encryptSecret,
@@ -159,14 +163,12 @@ function runTenantSequential(tenantId, taskFn) {
   const key = String(tenantId || 'default');
   const prev = tenantEmissionChains.get(key) || Promise.resolve();
   const next = prev.catch(() => null).then(() => taskFn());
-  tenantEmissionChains.set(
-    key,
-    next.finally(() => {
-      if (tenantEmissionChains.get(key) === next) {
-        tenantEmissionChains.delete(key);
-      }
-    })
-  );
+  const tail = next.catch(() => null).finally(() => {
+    if (tenantEmissionChains.get(key) === tail) {
+      tenantEmissionChains.delete(key);
+    }
+  });
+  tenantEmissionChains.set(key, tail);
   return next;
 }
 
@@ -872,6 +874,11 @@ class TransporteService {
     }
 
     const cte = rows[0];
+    if (cte.status === 'AUTORIZADO') {
+      throw new Error(
+        'CT-e já autorizado pela SEFAZ. O documento e seu XML autorizado são preservados; gere um novo CT-e se necessário.'
+      );
+    }
     const { client, emitente } = await this.getFocusClient(tenantId, cte.emitente_id);
 
     // Se já estava em PROCESSANDO com ref existente, verifica primeiro se a Focus NFe já autorizou
@@ -1022,164 +1029,43 @@ class TransporteService {
     );
     const regraFiscal = regraRows[0] || null;
 
-    // Tributos ICMS + DIFAL + Reforma Tributária (IBS/CBS)
-    const cstRaw = String(
-      cte.icms_situacao_tributaria || regraFiscal?.situacao_tributaria || '00'
-    ).toUpperCase();
-    const isSimples =
-      cstRaw === 'SN' ||
-      cstRaw.includes('SIMPLES') ||
-      (String(emitente.regime_tributario) === '1' && cstRaw === 'SN');
-
-    const isInternoMsComDefaultAntigo =
-      ibgeInicio.uf === 'MS' &&
-      ibgeFim.uf === 'MS' &&
-      (cte.aliquota_icms == null || Number(cte.aliquota_icms) === 12) &&
-      Number(regraFiscal?.aliquota_icms || 17) === 17;
-
-    const aliquotaIcms = parseFloat(
-      isInternoMsComDefaultAntigo
-        ? regraFiscal?.aliquota_icms ?? 17
-        : cte.aliquota_icms ?? regraFiscal?.aliquota_icms ?? emitente.aliquota_icms_padrao ?? (ibgeInicio.uf === 'MS' && ibgeFim.uf === 'MS' ? 17 : 12)
-    );
-    const valorIcms = parseFloat(
-      isInternoMsComDefaultAntigo
-        ? (baseCalculo * aliquotaIcms) / 100
-        : cte.valor_icms || (baseCalculo * aliquotaIcms) / 100
-    );
-
-    const icmsFields = isSimples
-      ? {
-          icms_situacao_tributaria: '90',
-          icms_indicador_simples_nacional: '1',
-        }
-      : {
-          icms_situacao_tributaria: ['00', '20', '40', '41', '51', '60', '90'].includes(
-            cstRaw.slice(0, 2)
-          )
-            ? cstRaw.slice(0, 2)
-            : '00',
-          icms_base_calculo: parseFloat(cte.base_icms || baseCalculo).toFixed(2),
-          icms_aliquota: aliquotaIcms.toFixed(2),
-          icms_valor: valorIcms.toFixed(2),
-        };
-
-    // DIFAL somente quando interestadual e tomador não contribuinte (ou explicitamente informado com FCP > 0)
-    if (
-      ibgeInicio.uf !== ibgeFim.uf &&
-      Number(cte.aliquota_fcp || 0) > 0
-    ) {
-      icmsFields.icms_base_calculo_uf_fim = baseCalculo.toFixed(2);
-      icmsFields.icms_percentual_fcp_uf_fim = parseFloat(cte.aliquota_fcp || 0).toFixed(2);
-      icmsFields.icms_aliquota_interna_uf_fim = parseFloat(cte.part_fcp_destino || 0).toFixed(2);
-      icmsFields.icms_aliquota_interestadual_uf_fim = aliquotaIcms.toFixed(2);
-      icmsFields.icms_valor_total_fcp_uf_fim = ((baseCalculo * parseFloat(cte.aliquota_fcp || 0)) / 100).toFixed(2);
-      icmsFields.icms_valor_partilha_uf_fim = '0.00';
-      icmsFields.icms_valor_partilha_uf_inicio = '0.00';
-    }
-
     const dataEmissaoIso = formatarDataHoraSefaz(emitente.uf || ibgeEnvio.uf);
     const dataEmissaoYmd = dataEmissaoIso.slice(0, 10);
 
-    // Reforma Tributária do Consumo (IBS / CBS — NT 2025.001 / NT 2026.002 / LC 214/2025)
-    // Evita Rejeição SEFAZ 310 (IBS / CBS não informado), 360 (vTotDFe obrigatório) e 365 (vTotDFe = vTPrest em 2026)
-    const cstIbsCbs = String(
-      cte.ibs_cbs_cst || regraFiscal?.ibs_cbs_cst || '000'
-    )
-      .replace(/\D/g, '')
-      .padStart(3, '0')
-      .slice(0, 3);
-    const classTribDefault =
-      cstIbsCbs === '200'
-        ? '200002'
-        : cstIbsCbs === '410' || cstIbsCbs === '400'
-        ? '410001'
-        : cstIbsCbs === '510'
-        ? '510001'
-        : cstIbsCbs === '515'
-        ? '515001'
-        : '000001';
-    const classTribIbsCbs = String(
-      cte.ibs_cbs_class_trib ||
-        cte.codigo_situacao_fiscal ||
-        regraFiscal?.ibs_cbs_class_trib ||
-        regraFiscal?.codigo_situacao_fiscal ||
-        classTribDefault
-    )
-      .replace(/\D/g, '')
-      .padStart(6, '0')
-      .slice(0, 6);
+    // Cálculo tributário unificado pré-assinatura (LC 214/2025, art. 12, § 2º, V + NT 2025.001 / NT 2026.002):
+    // - Preserva apuração do ICMS;
+    // - Exclui da base do IBS/CBS o ICMS, eventual ISS e PIS/COFINS efetivamente incidentes na prestação;
+    // - Mantém vTotDFe = vTPrest em 2026 (por data de vigência), sem somar IBS/CBS ao total em 2026;
+    // - Explicita pendências fiscais/cadastrais caso PIS/COFINS não esteja parametrizado.
+    const calculoFiscal = calcularTributosCte400({
+      cte,
+      regraFiscal,
+      emitente,
+      ufInicio: ibgeInicio.uf,
+      ufFim: ibgeFim.uf,
+      dataEmissao: dataEmissaoIso,
+    });
 
-    const aliqIbsUfRaw =
-      Number(cte.aliquota_ibs) > 0
-        ? Number(cte.aliquota_ibs)
-        : Number(regraFiscal?.aliquota_ibs) > 0
-        ? Number(regraFiscal.aliquota_ibs)
-        : 0.1;
-    const aliqIbsMunRaw =
-      Number(cte.aliquota_ibs_mun) > 0
-        ? Number(cte.aliquota_ibs_mun)
-        : Number(regraFiscal?.aliquota_ibs_mun) > 0
-        ? Number(regraFiscal.aliquota_ibs_mun)
-        : 0.0;
-    const aliqCbsRaw =
-      Number(cte.aliquota_cbs) > 0
-        ? Number(cte.aliquota_cbs)
-        : Number(regraFiscal?.aliquota_cbs) > 0
-        ? Number(regraFiscal.aliquota_cbs)
-        : 0.9;
-    const percReducaoIbsCbs =
-      Number(cte.reducao_aliquota_ibs_cbs ?? regraFiscal?.reducao_aliquota_ibs_cbs ?? 0) || 0;
+    const { icmsFields, ibsCbsFields } = montarCamposFocusImpostosCte400(calculoFiscal, {
+      cte,
+      ufInicio: ibgeInicio.uf,
+      ufFim: ibgeFim.uf,
+    });
 
-    const fatorRedIbsCbs =
-      (cstIbsCbs === '200' || cstIbsCbs === '515') && percReducaoIbsCbs > 0
-        ? Math.max(0, 1 - percReducaoIbsCbs / 100)
-        : 1;
-    const aliqEfetIbsUf = aliqIbsUfRaw * fatorRedIbsCbs;
-    const aliqEfetIbsMun = aliqIbsMunRaw * fatorRedIbsCbs;
-    const aliqEfetCbs = aliqCbsRaw * fatorRedIbsCbs;
-
-    const valorIbsUfCalc = Number(((baseCalculo * aliqEfetIbsUf) / 100).toFixed(2));
-    const valorIbsMunCalc = Number(((baseCalculo * aliqEfetIbsMun) / 100).toFixed(2));
-    const valorIbsTotalCalc = Number((valorIbsUfCalc + valorIbsMunCalc).toFixed(2));
-    const valorCbsCalc = Number(((baseCalculo * aliqEfetCbs) / 100).toFixed(2));
-
-    const anoEmissaoNum = parseInt(dataEmissaoYmd.slice(0, 4), 10) || 2026;
-    const valorTotalDfeCalc =
-      anoEmissaoNum >= 2027
-        ? Number((baseCalculo + valorIbsTotalCalc + valorCbsCalc).toFixed(2))
-        : Number(baseCalculo.toFixed(2));
-
-    const ibsCbsFields =
-      cstIbsCbs === '410' || cstIbsCbs === '400'
-        ? {
-            ibs_cbs_situacao_tributaria: cstIbsCbs,
-            ibs_cbs_classificacao_tributaria: classTribIbsCbs,
-            valor_total_dfe: valorTotalDfeCalc.toFixed(2),
-          }
-        : {
-            ibs_cbs_situacao_tributaria: cstIbsCbs,
-            ibs_cbs_classificacao_tributaria: classTribIbsCbs,
-            ibs_cbs_base_calculo: baseCalculo.toFixed(2),
-            ibs_uf_aliquota: aliqIbsUfRaw.toFixed(2),
-            ibs_uf_valor: valorIbsUfCalc.toFixed(2),
-            ibs_mun_aliquota: aliqIbsMunRaw.toFixed(2),
-            ibs_mun_valor: valorIbsMunCalc.toFixed(2),
-            ibs_valor_total: valorIbsTotalCalc.toFixed(2),
-            cbs_aliquota: aliqCbsRaw.toFixed(2),
-            cbs_valor: valorCbsCalc.toFixed(2),
-            valor_total_dfe: valorTotalDfeCalc.toFixed(2),
-            ...(cstIbsCbs === '200' || cstIbsCbs === '515'
-              ? {
-                  ibs_uf_percentual_reducao_aliquota: percReducaoIbsCbs.toFixed(2),
-                  ibs_uf_aliquota_efetiva: aliqEfetIbsUf.toFixed(4),
-                  ibs_mun_percentual_reducao_aliquota: percReducaoIbsCbs.toFixed(2),
-                  ibs_mun_aliquota_efetiva: aliqEfetIbsMun.toFixed(4),
-                  cbs_percentual_reducao_aliquota: percReducaoIbsCbs.toFixed(2),
-                  cbs_aliquota_efetiva: aliqEfetCbs.toFixed(4),
-                }
-              : {}),
-          };
+    const cstIbsCbs = calculoFiscal.valores.ibsCbs.CST;
+    const classTribIbsCbs = calculoFiscal.valores.ibsCbs.cClassTrib;
+    const aliqIbsUfRaw = calculoFiscal.numeros.aliquotaIbsUf;
+    const aliqIbsMunRaw = calculoFiscal.numeros.aliquotaIbsMun;
+    const aliqCbsRaw = calculoFiscal.numeros.aliquotaCbs;
+    const baseIbsCbsCalc = calculoFiscal.numeros.baseIbsCbs;
+    const valorIbsTotalCalc = calculoFiscal.numeros.valorIbsTotal;
+    const valorCbsCalc = calculoFiscal.numeros.valorCbs;
+    const valorTotalDfeCalc = calculoFiscal.numeros.valorTotalDfe;
+    const aliquotaIcms = calculoFiscal.numeros.aliquotaIcms;
+    const valorIcms = calculoFiscal.numeros.valorIcms;
+    const valorPisCalc = calculoFiscal.numeros.valorPis;
+    const valorCofinsCalc = calculoFiscal.numeros.valorCofins;
+    const pendenciasFiscais = calculoFiscal.pendenciasFiscais;
     const rawDataPrevista = formatarDataYmd(cte.data_prevista_entrega);
     const dataPrevistaLimpa =
       rawDataPrevista && rawDataPrevista < dataEmissaoYmd
@@ -1413,9 +1299,9 @@ class TransporteService {
             indicador_inscricao_estadual_tomador: destinatario.indicador_ie || '9',
           }),
 
-      // Valores e Componentes
-      valor_total: baseCalculo.toFixed(2),
-      valor_receber: parseFloat(cte.valor_receber || cte.valor_total || 0).toFixed(2),
+      // Valores e Componentes (formatados com aritmética decimal exata)
+      valor_total: calculoFiscal.valores.vTPrest,
+      valor_receber: parseFloat(cte.valor_receber || calculoFiscal.numeros.vTPrest || 0).toFixed(2),
       componentes_valor: componentesFrete,
 
       // Tributos ICMS + Reforma Tributária (IBS / CBS + vTotDFe)
@@ -1525,13 +1411,15 @@ class TransporteService {
         ? this.gerarRef('CTE', tenantId, cte.id)
         : cte.ref;
 
-    // Salva o payload enviado, campos fiscais ICMS + IBS/CBS calculados, numeração e marca como PROCESSANDO
+    // Salva o payload enviado, campos fiscais ICMS + PIS/COFINS + IBS/CBS (base líquida) calculados,
+    // eventuais pendências fiscais, numeração e marca como PROCESSANDO
     await db.query(
       `UPDATE dash_ctes SET
           ref = $1,
           payload_focus = $2,
           ibs_cbs_cst = $4,
           ibs_cbs_class_trib = $5,
+          ibs_cbs_base_calculo = $16,
           aliquota_ibs = $6,
           aliquota_ibs_mun = $7,
           aliquota_cbs = $8,
@@ -1540,6 +1428,9 @@ class TransporteService {
           valor_total_dfe = $11,
           aliquota_icms = $12,
           valor_icms = $13,
+          valor_pis = $17,
+          valor_cofins = $18,
+          pendencias_fiscais = $19::jsonb,
           serie = $14,
           numero = $15,
           status = 'PROCESSANDO',
@@ -1561,6 +1452,10 @@ class TransporteService {
         valorIcms,
         String(serieEnvio),
         numeroEnvio,
+        baseIbsCbsCalc,
+        valorPisCalc,
+        valorCofinsCalc,
+        JSON.stringify(pendenciasFiscais),
       ]
     );
 
@@ -1695,7 +1590,8 @@ class TransporteService {
       if (consultado) resFocus = consultado;
     }
 
-    // Em HOMOLOGAÇÃO: trata automaticamente rejeições recuperáveis da SEFAZ (Duplicidade 204/539, NF-e de teste 661/693, vTotDFe 365, vBC IBS/CBS)
+    // Em HOMOLOGAÇÃO: trata automaticamente rejeições operacionais recuperáveis (Duplicidade 204/539 e NF-e de teste 661/693),
+    // mantendo inalterada a composição fiscal pré-assinatura de ICMS, vBC IBS/CBS e vTotDFe.
     for (let retrySefaz = 1; retrySefaz <= 3; retrySefaz++) {
       if (
         client.ambiente !== 'homologacao' ||
@@ -1722,35 +1618,6 @@ class TransporteService {
         /inexistente na base|chave de acesso|nf-e|documentos transportados/i.test(msgSefaz)
       ) {
         payloadAtual = montarPayloadHomologFallback(payloadAtual);
-        ajustou = true;
-      }
-      // 3. Rejeição 365 (Total do DFe inválido / vTotDFe): alterna entre vTPrest puro e vTPrest + IBS + CBS
-      else if (codSefaz === '365' || /total do dfe|vtotdfe/i.test(msgSefaz)) {
-        const vTotAlternativo =
-          Number(payloadAtual.valor_total_dfe) === Number(baseCalculo.toFixed(2))
-            ? Number((baseCalculo + valorIbsTotalCalc + valorCbsCalc).toFixed(2))
-            : Number(baseCalculo.toFixed(2));
-        payloadAtual = {
-          ...payloadAtual,
-          valor_total_dfe: vTotAlternativo.toFixed(2),
-        };
-        ajustou = true;
-      }
-      // 4. Rejeição de Base de Cálculo IBS/CBS (dedução do ICMS na vBC do IBS/CBS)
-      else if (/base de calculo.*(ibs|cbs)|vbc.*(ibs|cbs)/i.test(msgSefaz)) {
-        const vBcLiquida = Math.max(0, Number((baseCalculo - valorIcms).toFixed(2)));
-        const vIbsUfLiq = Number(((vBcLiquida * aliqEfetIbsUf) / 100).toFixed(2));
-        const vIbsMunLiq = Number(((vBcLiquida * aliqEfetIbsMun) / 100).toFixed(2));
-        const vIbsTotLiq = Number((vIbsUfLiq + vIbsMunLiq).toFixed(2));
-        const vCbsLiq = Number(((vBcLiquida * aliqEfetCbs) / 100).toFixed(2));
-        payloadAtual = {
-          ...payloadAtual,
-          ibs_cbs_base_calculo: vBcLiquida.toFixed(2),
-          ibs_uf_valor: vIbsUfLiq.toFixed(2),
-          ibs_mun_valor: vIbsMunLiq.toFixed(2),
-          ibs_valor_total: vIbsTotLiq.toFixed(2),
-          cbs_valor: vCbsLiq.toFixed(2),
-        };
         ajustou = true;
       }
 
@@ -3093,51 +2960,51 @@ class TransporteService {
       [tenantId, c.uf_inicio, c.uf_fim]
     );
 
-    const r = regra[0];
-    const valorFreteNum = Number(c.valor_total || 0);
-    const aliqRef = r ? Number(r.aliquota_icms) : Number(c.aliquota_icms || emitente?.aliquota_icms_padrao || 0);
-    const icmsCalculado = (valorFreteNum * aliqRef) / 100;
-    const aliqIbsUfRef =
-      Number(c.aliquota_ibs) > 0
-        ? Number(c.aliquota_ibs)
-        : Number(r?.aliquota_ibs) > 0
-        ? Number(r.aliquota_ibs)
-        : 0.1;
-    const aliqIbsMunRef =
-      Number(c.aliquota_ibs_mun) > 0
-        ? Number(c.aliquota_ibs_mun)
-        : Number(r?.aliquota_ibs_mun) > 0
-        ? Number(r.aliquota_ibs_mun)
-        : 0.0;
-    const aliqCbsRef =
-      Number(c.aliquota_cbs) > 0
-        ? Number(c.aliquota_cbs)
-        : Number(r?.aliquota_cbs) > 0
-        ? Number(r.aliquota_cbs)
-        : 0.9;
-    const ibsEstimado = Math.round(((valorFreteNum * (aliqIbsUfRef + aliqIbsMunRef)) / 100) * 100) / 100;
-    const cbsEstimado = Math.round(((valorFreteNum * aliqCbsRef) / 100) * 100) / 100;
+    const r = regra[0] || null;
+    const calculoPre = calcularTributosCte400({
+      cte: c,
+      regraFiscal: r,
+      emitente: emitente || {},
+      ufInicio: c.uf_inicio,
+      ufFim: c.uf_fim,
+      dataEmissao: c.data_emissao || new Date(),
+    });
+
+    for (const pend of calculoPre.pendenciasFiscais) {
+      alertas.push(pend.mensagem);
+    }
 
     return {
       valido: impedimentos.length === 0,
       impedimentos,
       alertas,
+      pendencias_fiscais: calculoPre.pendenciasFiscais,
+      base_definitiva_confirmada: calculoPre.baseDefinitivaConfirmada,
       calculos: {
-        valor_frete: valorFreteNum,
+        valor_frete: calculoPre.numeros.vTPrest,
         valor_carga: valorCargas || Number(c.valor_carga || 0),
         peso_cte: Number(c.peso_bruto || 0),
         peso_nfes: pesoCargas,
-        icms_estimado: Math.round(icmsCalculado * 100) / 100,
-        aliquota_aplicada: aliqRef,
-        situacao_tributaria: r ? r.situacao_tributaria : c.icms_situacao_tributaria || '00',
-        ibs_cbs_cst: c.ibs_cbs_cst || r?.ibs_cbs_cst || '000',
-        ibs_cbs_class_trib: c.ibs_cbs_class_trib || r?.ibs_cbs_class_trib || '000001',
-        aliquota_ibs_uf: aliqIbsUfRef,
-        aliquota_ibs_mun: aliqIbsMunRef,
-        aliquota_cbs: aliqCbsRef,
-        ibs_estimado: ibsEstimado,
-        cbs_estimado: cbsEstimado,
-        valor_total_dfe: valorFreteNum,
+        base_icms: calculoPre.numeros.baseIcms,
+        icms_estimado: calculoPre.numeros.valorIcms,
+        aliquota_aplicada: calculoPre.numeros.aliquotaIcms,
+        situacao_tributaria: calculoPre.valores.icms.cst,
+        pis_cofins_status: calculoPre.valores.pisCofins.status,
+        base_pis_cofins: calculoPre.numeros.basePisCofins,
+        pis_estimado: calculoPre.numeros.valorPis,
+        cofins_estimado: calculoPre.numeros.valorCofins,
+        ibs_cbs_cst: calculoPre.valores.ibsCbs.CST,
+        ibs_cbs_class_trib: calculoPre.valores.ibsCbs.cClassTrib,
+        ibs_cbs_base_calculo: calculoPre.numeros.baseIbsCbs,
+        aliquota_ibs_uf: calculoPre.numeros.aliquotaIbsUf,
+        ibs_uf_estimado: calculoPre.numeros.valorIbsUf,
+        aliquota_ibs_mun: calculoPre.numeros.aliquotaIbsMun,
+        ibs_mun_estimado: calculoPre.numeros.valorIbsMun,
+        aliquota_cbs: calculoPre.numeros.aliquotaCbs,
+        ibs_estimado: calculoPre.numeros.valorIbsTotal,
+        cbs_estimado: calculoPre.numeros.valorCbs,
+        valor_total_dfe: calculoPre.numeros.valorTotalDfe,
+        deducoes_base_ibs_cbs: calculoPre.valores.deducoesBaseIbsCbs,
       },
       resumo: {
         nfes_vinculadas: totalDocs,

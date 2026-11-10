@@ -169,6 +169,13 @@ export default function CteWizardPage() {
     aliquota_ibs: '0.10',
     aliquota_ibs_mun: '0.00',
     aliquota_cbs: '0.90',
+    reducao_aliquota_ibs_cbs: '0.00',
+    pis_cofins_modo: 'NAO_APURADO',
+    pis_cst: '',
+    aliquota_pis: '',
+    cofins_cst: '',
+    aliquota_cofins: '',
+    excluir_icms_base_pis_cofins: true,
     codigo_situacao_fiscal: '000001',
     aliquota_fcp: '0.00',
     part_fcp_origem: '50.00',
@@ -276,6 +283,22 @@ export default function CteWizardPage() {
       aliquota_ibs: regra?.aliquota_ibs != null ? Number(regra.aliquota_ibs).toFixed(2) : f.aliquota_ibs || '0.10',
       aliquota_ibs_mun: regra?.aliquota_ibs_mun != null ? Number(regra.aliquota_ibs_mun).toFixed(2) : f.aliquota_ibs_mun || '0.00',
       aliquota_cbs: regra?.aliquota_cbs != null ? Number(regra.aliquota_cbs).toFixed(2) : f.aliquota_cbs || '0.90',
+      reducao_aliquota_ibs_cbs:
+        regra?.reducao_aliquota_ibs_cbs != null
+          ? Number(regra.reducao_aliquota_ibs_cbs).toFixed(2)
+          : f.reducao_aliquota_ibs_cbs || '0.00',
+      pis_cofins_modo:
+        regra?.pis_cofins_modo && regra.pis_cofins_modo !== 'NAO_APURADO'
+          ? String(regra.pis_cofins_modo)
+          : f.pis_cofins_modo || 'NAO_APURADO',
+      pis_cst: regra?.pis_cst || f.pis_cst || '',
+      aliquota_pis: regra?.aliquota_pis != null ? String(regra.aliquota_pis) : f.aliquota_pis || '',
+      cofins_cst: regra?.cofins_cst || f.cofins_cst || '',
+      aliquota_cofins: regra?.aliquota_cofins != null ? String(regra.aliquota_cofins) : f.aliquota_cofins || '',
+      excluir_icms_base_pis_cofins:
+        regra?.excluir_icms_base_pis_cofins !== undefined
+          ? Boolean(regra.excluir_icms_base_pis_cofins)
+          : f.excluir_icms_base_pis_cofins,
     }));
   }, [form.uf_inicio, form.uf_fim, regrasFiscais.length, cteId]);
 
@@ -345,20 +368,79 @@ export default function CteWizardPage() {
     }
   }, [cteExistente]);
 
-  // ── Cálculos ──
+  // ── Cálculos (LC 214/2025, art. 12, § 2º, V + NT 2025.001 / 2026.002 — arredondamento half-up) ──
+  const round2 = (v: number): number => {
+    if (!Number.isFinite(v)) return 0;
+    const sign = v < 0 ? -1 : 1;
+    return (sign * Math.floor(Math.abs(v) * 100 + 0.5 + 1e-9)) / 100;
+  };
+
   const totalComponentes = useMemo(
-    () => form.componentes_valor.reduce((acc, c) => acc + (parseFloat(c.valor || '0') || 0), 0),
+    () => round2(form.componentes_valor.reduce((acc, c) => acc + (parseFloat(c.valor || '0') || 0), 0)),
     [form.componentes_valor]
   );
 
-  const baseCalculo = parseFloat(form.valor_total || '0') || totalComponentes;
-  const valorReceber = parseFloat(form.valor_receber || '0') || 0;
+  const emitenteSelecionado = useMemo(
+    () => emitentes.find((e: any) => String(e.id) === String(form.emitente_id)) || emitentes[0] || null,
+    [emitentes, form.emitente_id]
+  );
+
+  const anoVigencia = new Date().getFullYear();
+  const excluirIcmsDaBaseIbsCbs = anoVigencia < 2033;
+  const excluirPisCofinsDaBaseIbsCbs = anoVigencia <= 2026;
+  const somarIbsCbsNoTotalDfe = anoVigencia >= 2027;
+
+  const baseCalculo = round2(parseFloat(form.valor_total || '0') || totalComponentes);
+  const valorReceber = round2(parseFloat(form.valor_receber || '0') || 0);
   const aliquotaIcms = parseFloat(form.aliquota_icms || '0') || 0;
-  const valorIcms = (baseCalculo * aliquotaIcms) / 100;
+  const icmsTributado = ['00', '20', '90'].includes(form.icms_situacao_tributaria);
+  const baseIcms = icmsTributado ? baseCalculo : 0;
+  const valorIcms = icmsTributado ? round2((baseIcms * aliquotaIcms) / 100) : 0;
+
+  const modoPisCofinsEfetivo =
+    form.pis_cofins_modo && form.pis_cofins_modo !== 'NAO_APURADO'
+      ? form.pis_cofins_modo
+      : emitenteSelecionado?.pis_cofins_modo || 'NAO_APURADO';
+
+  const aliqPisRaw = form.aliquota_pis !== '' ? form.aliquota_pis : emitenteSelecionado?.aliquota_pis;
+  const aliqCofinsRaw = form.aliquota_cofins !== '' ? form.aliquota_cofins : emitenteSelecionado?.aliquota_cofins;
+  const temAliqPisCofins = aliqPisRaw !== undefined && aliqPisRaw !== null && String(aliqPisRaw).trim() !== '' &&
+    aliqCofinsRaw !== undefined && aliqCofinsRaw !== null && String(aliqCofinsRaw).trim() !== '';
+
+  const aliquotaPis = temAliqPisCofins ? parseFloat(String(aliqPisRaw)) || 0 : 0;
+  const aliquotaCofins = temAliqPisCofins ? parseFloat(String(aliqCofinsRaw)) || 0 : 0;
+  const pisCofinsIncidente = excluirPisCofinsDaBaseIbsCbs && modoPisCofinsEfetivo === 'INCIDENTE' && temAliqPisCofins;
+  const basePisCofins = pisCofinsIncidente
+    ? Math.max(0, round2(form.excluir_icms_base_pis_cofins !== false ? baseCalculo - valorIcms : baseCalculo))
+    : 0;
+  const valorPis = pisCofinsIncidente ? round2((basePisCofins * aliquotaPis) / 100) : 0;
+  const valorCofins = pisCofinsIncidente ? round2((basePisCofins * aliquotaCofins) / 100) : 0;
+
+  const deducaoIcmsIbsCbs = excluirIcmsDaBaseIbsCbs && icmsTributado ? valorIcms : 0;
+  const deducaoPisCofinsIbsCbs = pisCofinsIncidente ? round2(valorPis + valorCofins) : 0;
+  const semGrupoIbsCbs = form.ibs_cbs_cst === '400' || form.ibs_cbs_cst === '410';
+  const baseIbsCbs = semGrupoIbsCbs
+    ? 0
+    : Math.max(0, round2(baseCalculo - deducaoIcmsIbsCbs - deducaoPisCofinsIbsCbs));
+
   const aliquotaIbs = parseFloat(form.aliquota_ibs || '0') || 0;
-  const valorIbs = (baseCalculo * aliquotaIbs) / 100;
+  const aliquotaIbsMun = parseFloat(form.aliquota_ibs_mun || '0') || 0;
   const aliquotaCbs = parseFloat(form.aliquota_cbs || '0') || 0;
-  const valorCbs = (baseCalculo * aliquotaCbs) / 100;
+  const percReducaoIbsCbs = parseFloat(form.reducao_aliquota_ibs_cbs || '0') || 0;
+  const aplicaReducaoIbsCbs = (form.ibs_cbs_cst === '200' || form.ibs_cbs_cst === '515') && percReducaoIbsCbs > 0;
+  const fatorAliqEfetiva = aplicaReducaoIbsCbs ? Math.max(0, (100 - percReducaoIbsCbs) / 100) : 1;
+
+  const valorIbsUf = semGrupoIbsCbs ? 0 : round2((baseIbsCbs * (aliquotaIbs * fatorAliqEfetiva)) / 100);
+  const valorIbsMun = semGrupoIbsCbs ? 0 : round2((baseIbsCbs * (aliquotaIbsMun * fatorAliqEfetiva)) / 100);
+  const valorIbs = round2(valorIbsUf + valorIbsMun);
+  const valorCbs = semGrupoIbsCbs ? 0 : round2((baseIbsCbs * (aliquotaCbs * fatorAliqEfetiva)) / 100);
+  const valorTotalDfe = somarIbsCbsNoTotalDfe && !semGrupoIbsCbs
+    ? round2(baseCalculo + valorIbs + valorCbs)
+    : baseCalculo;
+  const pisCofinsPendente =
+    excluirPisCofinsDaBaseIbsCbs &&
+    !semGrupoIbsCbs &&
+    (modoPisCofinsEfetivo === 'NAO_APURADO' || (modoPisCofinsEfetivo === 'INCIDENTE' && !temAliqPisCofins));
 
   // ── Validação por passo ──
   const erros = useMemo(() => {
@@ -446,10 +528,6 @@ export default function CteWizardPage() {
   };
 
   // ── Ações ──
-  const emitenteSelecionado = useMemo(
-    () => emitentes.find((x: any) => String(x.id) === String(form.emitente_id)) || emitentes[0] || null,
-    [emitentes, form.emitente_id]
-  );
   const ambienteAtivo =
     String(emitenteSelecionado?.focus_ambiente || 'homologacao').toLowerCase() === 'producao'
       ? 'producao'
@@ -540,22 +618,57 @@ export default function CteWizardPage() {
 
   const montarPayload = (formBase = form) => {
     const cargasIds = formBase.documentos.map(d => d.carga_id).filter(Boolean);
-    const totalComp = formBase.componentes_valor.reduce(
-      (acc, c) => acc + (parseFloat(c.valor || '0') || 0),
-      0
+    const totalComp = round2(
+      formBase.componentes_valor.reduce(
+        (acc, c) => acc + (parseFloat(c.valor || '0') || 0),
+        0
+      )
     );
-    const baseCalc = parseFloat(formBase.valor_total || '0') || totalComp;
+    const baseCalc = round2(parseFloat(formBase.valor_total || '0') || totalComp);
     const aliqIcmsNum = parseFloat(formBase.aliquota_icms || '0') || 0;
-    const vlrIcms = (baseCalc * aliqIcmsNum) / 100;
+    const isIcmsTrib = ['00', '20', '90'].includes(formBase.icms_situacao_tributaria);
+    const baseIcmsCalc = isIcmsTrib ? baseCalc : 0;
+    const vlrIcms = isIcmsTrib ? round2((baseIcmsCalc * aliqIcmsNum) / 100) : 0;
+
+    const modoPc =
+      formBase.pis_cofins_modo && formBase.pis_cofins_modo !== 'NAO_APURADO'
+        ? formBase.pis_cofins_modo
+        : emitenteSelecionado?.pis_cofins_modo || 'NAO_APURADO';
+    const rawPis = formBase.aliquota_pis !== '' ? formBase.aliquota_pis : emitenteSelecionado?.aliquota_pis;
+    const rawCofins = formBase.aliquota_cofins !== '' ? formBase.aliquota_cofins : emitenteSelecionado?.aliquota_cofins;
+    const temPc =
+      rawPis !== undefined && rawPis !== null && String(rawPis).trim() !== '' &&
+      rawCofins !== undefined && rawCofins !== null && String(rawCofins).trim() !== '';
+    const pcIncidente = excluirPisCofinsDaBaseIbsCbs && modoPc === 'INCIDENTE' && temPc;
+    const basePc = pcIncidente
+      ? Math.max(0, round2(formBase.excluir_icms_base_pis_cofins !== false ? baseCalc - vlrIcms : baseCalc))
+      : 0;
+    const vlrPis = pcIncidente ? round2((basePc * (parseFloat(String(rawPis)) || 0)) / 100) : null;
+    const vlrCofins = pcIncidente ? round2((basePc * (parseFloat(String(rawCofins)) || 0)) / 100) : null;
+
+    const dedIcms = excluirIcmsDaBaseIbsCbs && isIcmsTrib ? vlrIcms : 0;
+    const dedPc = pcIncidente ? round2((vlrPis || 0) + (vlrCofins || 0)) : 0;
+    const semGrupo = formBase.ibs_cbs_cst === '400' || formBase.ibs_cbs_cst === '410';
+    const baseIbsCbsCalc = semGrupo ? 0 : Math.max(0, round2(baseCalc - dedIcms - dedPc));
+
     return {
       ...formBase,
       emitente_id: formBase.emitente_id ? Number(formBase.emitente_id) : undefined,
-      componentes_valor: formBase.componentes_valor.map(c => ({ nome: c.nome, valor: parseFloat(c.valor || '0') || 0 })),
+      componentes_valor: formBase.componentes_valor.map(c => ({ nome: c.nome, valor: round2(parseFloat(c.valor || '0') || 0) })),
       valor_total: baseCalc,
-      valor_receber: parseFloat(formBase.valor_receber || '0') || totalComp,
-      base_icms: baseCalc,
+      valor_receber: round2(parseFloat(formBase.valor_receber || '0') || totalComp),
+      base_icms: baseIcmsCalc,
       valor_icms: vlrIcms,
-      valor_carga: parseFloat(formBase.valor_total_carga || '0') || 0,
+      ibs_cbs_base_calculo: baseIbsCbsCalc,
+      pis_cofins_modo: modoPc,
+      pis_cst: formBase.pis_cst || null,
+      aliquota_pis: temPc ? parseFloat(String(rawPis)) : null,
+      valor_pis: vlrPis,
+      cofins_cst: formBase.cofins_cst || null,
+      aliquota_cofins: temPc ? parseFloat(String(rawCofins)) : null,
+      valor_cofins: vlrCofins,
+      excluir_icms_base_pis_cofins: formBase.excluir_icms_base_pis_cofins !== false,
+      valor_carga: round2(parseFloat(formBase.valor_total_carga || '0') || 0),
       peso_bruto: parseFloat(formBase.peso_bruto || '0') || 0,
       quantidade_volumes: parseFloat(formBase.quantidade_volumes || '1') || 1,
       remetente_dados: formBase.remetente_dados,
@@ -1334,20 +1447,88 @@ export default function CteWizardPage() {
               <CampoFiscal rotulo="CBS Federal — Alíquota (%)" obrigatorio dica="Transição 2026: 0,90%">
                 <InputFiscal type="number" step="0.0001" value={form.aliquota_cbs} onChange={v => setCampo('aliquota_cbs', v)} />
               </CampoFiscal>
+
+              <CampoFiscal
+                rotulo="PIS / COFINS na Operação"
+                dica="LC 214/2025, art. 12, § 2º, V (exclusão da base do IBS/CBS em 2026)"
+              >
+                <SelectFiscal
+                  value={form.pis_cofins_modo}
+                  onChange={v => {
+                    if (v === 'NAO_INCIDENTE') {
+                      setForm(f => ({
+                        ...f,
+                        pis_cofins_modo: 'NAO_INCIDENTE',
+                        pis_cst: f.pis_cst || '06',
+                        cofins_cst: f.cofins_cst || '06',
+                        aliquota_pis: '',
+                        aliquota_cofins: '',
+                      }));
+                    } else {
+                      setCampo('pis_cofins_modo', v);
+                    }
+                  }}
+                  opcoes={[
+                    { valor: 'NAO_APURADO', rotulo: 'Não parametrizado (sinalizar pendência fiscal)' },
+                    { valor: 'INCIDENTE', rotulo: 'Incidente na prestação (informar PIS/COFINS)' },
+                    { valor: 'NAO_INCIDENTE', rotulo: 'Não incidente / Alíquota Zero / Suspensão (CST 04/06/07/08/09)' }
+                  ]}
+                />
+              </CampoFiscal>
+
+              {form.pis_cofins_modo === 'INCIDENTE' && (
+                <>
+                  <CampoFiscal rotulo="PIS — Alíquota (%)" dica="Ex.: 0,65% (cumulativo) ou 1,65% (não cumulativo)">
+                    <InputFiscal type="number" step="0.0001" value={form.aliquota_pis} onChange={v => setCampo('aliquota_pis', v)} placeholder="Ex: 0.65" />
+                  </CampoFiscal>
+                  <CampoFiscal rotulo="COFINS — Alíquota (%)" dica="Ex.: 3,00% (cumulativo) ou 7,60% (não cumulativo)">
+                    <InputFiscal type="number" step="0.0001" value={form.aliquota_cofins} onChange={v => setCampo('aliquota_cofins', v)} placeholder="Ex: 3.00" />
+                  </CampoFiscal>
+                </>
+              )}
             </GradeCampos>
 
-            <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900/40 border border-slate-100 dark:border-slate-800">
-              <div className="flex items-center gap-2 mb-2">
-                <ShieldCheck className="w-4 h-4 text-slate-400" />
-                <span className="text-xs font-bold text-slate-600 dark:text-slate-300">Memória de cálculo fiscal (ICMS + Reforma Tributária IBS/CBS)</span>
+            <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900/40 border border-slate-100 dark:border-slate-800 space-y-3">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <div className="flex items-center gap-2">
+                  <ShieldCheck className="w-4 h-4 text-slate-400" />
+                  <span className="text-xs font-bold text-slate-600 dark:text-slate-300">
+                    Memória de cálculo fiscal (ICMS + Base Líquida IBS/CBS — Art. 12, § 2º, V, LC 214/2025)
+                  </span>
+                </div>
+                {!somarIbsCbsNoTotalDfe && (
+                  <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-300 dark:border-emerald-800">
+                    Vigência {anoVigencia}: IBS/CBS não somam ao vTotDFe
+                  </span>
+                )}
               </div>
-              <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-xs">
-                <div className="flex justify-between"><span className="text-slate-500">Base Fiscal</span><span className="font-bold text-slate-900 dark:text-white">R$ {baseCalculo.toFixed(2)}</span></div>
-                <div className="flex justify-between"><span className="text-slate-500">ICMS ({aliquotaIcms}%)</span><span className="font-bold text-slate-900 dark:text-white">R$ {valorIcms.toFixed(2)}</span></div>
-                <div className="flex justify-between"><span className="text-slate-500">IBS ({aliquotaIbs}%)</span><span className="font-bold text-emerald-700 dark:text-emerald-400">R$ {valorIbs.toFixed(2)}</span></div>
-                <div className="flex justify-between"><span className="text-slate-500">CBS ({aliquotaCbs}%)</span><span className="font-bold text-emerald-700 dark:text-emerald-400">R$ {valorCbs.toFixed(2)}</span></div>
-                <div className="flex justify-between"><span className="text-slate-500">Total DFe (vTotDFe)</span><span className="font-bold text-brand-600 dark:text-brand-400">R$ {baseCalculo.toFixed(2)}</span></div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 text-xs">
+                <div className="flex justify-between gap-2"><span className="text-slate-500">Base ICMS</span><span className="font-bold text-slate-900 dark:text-white">R$ {baseIcms.toFixed(2)}</span></div>
+                <div className="flex justify-between gap-2"><span className="text-slate-500">ICMS ({aliquotaIcms}%)</span><span className="font-bold text-slate-900 dark:text-white">R$ {valorIcms.toFixed(2)}</span></div>
+                <div className="flex justify-between gap-2"><span className="text-slate-500">Base IBS/CBS</span><span className="font-bold text-slate-900 dark:text-white">R$ {baseIbsCbs.toFixed(2)}</span></div>
+                <div className="flex justify-between gap-2"><span className="text-slate-500">IBS ({aliquotaIbs}%)</span><span className="font-bold text-emerald-700 dark:text-emerald-400">R$ {valorIbs.toFixed(2)}</span></div>
+                <div className="flex justify-between gap-2"><span className="text-slate-500">CBS ({aliquotaCbs}%)</span><span className="font-bold text-emerald-700 dark:text-emerald-400">R$ {valorCbs.toFixed(2)}</span></div>
+                <div className="flex justify-between gap-2"><span className="text-slate-500">Total DFe (vTotDFe)</span><span className="font-bold text-brand-600 dark:text-brand-400">R$ {valorTotalDfe.toFixed(2)}</span></div>
               </div>
+
+              {pisCofinsIncidente && (
+                <div className="pt-2 border-t border-slate-200/70 dark:border-slate-800 flex flex-wrap gap-4 text-[11px] text-slate-600 dark:text-slate-400">
+                  <span>Base PIS/COFINS: <strong>R$ {basePisCofins.toFixed(2)}</strong></span>
+                  <span>PIS ({aliquotaPis}%): <strong>R$ {valorPis.toFixed(2)}</strong></span>
+                  <span>COFINS ({aliquotaCofins}%): <strong>R$ {valorCofins.toFixed(2)}</strong></span>
+                  <span>Total excluído da base IBS/CBS: <strong>R$ {(deducaoIcmsIbsCbs + deducaoPisCofinsIbsCbs).toFixed(2)}</strong></span>
+                </div>
+              )}
+
+              {pisCofinsPendente && (
+                <div className="p-2.5 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/60 flex items-start gap-2 text-[11px] text-amber-900 dark:text-amber-200">
+                  <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                  <span>
+                    <strong>Pendência fiscal/cadastral de PIS/COFINS:</strong> a incidência e as alíquotas de PIS/COFINS não estão parametrizadas e não são presumidas apenas pelo CRT (nem pela ausência de tags no XML do CT-e 57). A base de IBS/CBS acima reflete somente a exclusão do ICMS destacado (R$ {deducaoIcmsIbsCbs.toFixed(2)}). Parametrize PIS/COFINS para confirmar a base definitiva.
+                  </span>
+                </div>
+              )}
             </div>
           </div>
         )}
