@@ -686,53 +686,67 @@ class FocusClient {
    * Compatível com paths relativos (/arquivos_development/...), endpoints /v2/... e URLs S3 assinadas.
    */
   async downloadArquivo(caminhoOuUrl) {
-    const url = FocusClient.normalizarUrlArquivo(caminhoOuUrl, this.ambiente);
+    const raw = String(caminhoOuUrl || '').trim();
+    const url = FocusClient.normalizarUrlArquivo(raw, this.ambiente);
     if (!url) {
       throw new Error('Caminho do arquivo fiscal ausente.');
     }
 
-    let parsedUrl = null;
-    try {
-      parsedUrl = new URL(url);
-    } catch (_) {
-      parsedUrl = null;
+    const candidateUrls = [url];
+    if (raw.startsWith('/')) {
+      const s3Url = `https://focusnfe.s3.sa-east-1.amazonaws.com${raw}`;
+      const prodUrl = `${FOCUS_URL_PRODUCAO}${raw}`;
+      const homologUrl = `${FOCUS_URL_HOMOLOGACAO}${raw}`;
+      for (const u of [s3Url, prodUrl, homologUrl]) {
+        if (!candidateUrls.includes(u)) candidateUrls.push(u);
+      }
     }
 
-    const isFocusApiEndpoint =
-      parsedUrl &&
-      parsedUrl.hostname.endsWith('focusnfe.com.br') &&
-      parsedUrl.pathname.startsWith('/v2/');
+    let lastErr = null;
+    for (const candidate of candidateUrls) {
+      let parsedUrl = null;
+      try {
+        parsedUrl = new URL(candidate);
+      } catch (_) {
+        parsedUrl = null;
+      }
 
-    try {
-      const res = await axios.get(url, {
-        responseType: 'arraybuffer',
-        timeout: 30000,
-        ...(isFocusApiEndpoint
-          ? { auth: { username: this.token, password: '' } }
-          : {}),
-      });
-      return Buffer.from(res.data);
-    } catch (err) {
-      // Se path estático em focusnfe.com.br exigir Basic Auth, tenta novamente autenticado
-      if (
-        !isFocusApiEndpoint &&
-        parsedUrl &&
-        parsedUrl.hostname.endsWith('focusnfe.com.br') &&
-        (err.response?.status === 401 || err.response?.status === 403)
-      ) {
-        try {
-          const retry = await axios.get(url, {
-            responseType: 'arraybuffer',
-            timeout: 30000,
-            auth: { username: this.token, password: '' },
-          });
-          return Buffer.from(retry.data);
-        } catch (retryErr) {
-          throw this._formatError(retryErr);
+      const isFocusHost =
+        parsedUrl && parsedUrl.hostname.endsWith('focusnfe.com.br');
+      const isFocusApiEndpoint =
+        isFocusHost && parsedUrl.pathname.startsWith('/v2/');
+
+      try {
+        const res = await axios.get(candidate, {
+          responseType: 'arraybuffer',
+          timeout: 30000,
+          ...(isFocusApiEndpoint
+            ? { auth: { username: this.token, password: '' } }
+            : {}),
+        });
+        return Buffer.from(res.data);
+      } catch (err) {
+        lastErr = err;
+        if (
+          !isFocusApiEndpoint &&
+          isFocusHost &&
+          (err.response?.status === 401 || err.response?.status === 403)
+        ) {
+          try {
+            const retry = await axios.get(candidate, {
+              responseType: 'arraybuffer',
+              timeout: 30000,
+              auth: { username: this.token, password: '' },
+            });
+            return Buffer.from(retry.data);
+          } catch (retryErr) {
+            lastErr = retryErr;
+          }
         }
       }
-      throw this._formatError(err);
     }
+
+    throw this._formatError(lastErr || new Error('Falha ao baixar arquivo fiscal na Focus NFe.'));
   }
 
   _formatError(err) {

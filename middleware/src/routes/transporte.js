@@ -441,8 +441,36 @@ router.get('/documentos', async (req, res) => {
 
         let { rows } = await db.query(finalSql, params);
 
-        // Se houver documentos em PROCESSANDO, consulta automaticamente a Focus NFe para atualizar o status
-        const processandoRows = rows.filter((r) => r.status === 'PROCESSANDO' && r.ref).slice(0, 5);
+        // Se houver CT-es em HOMOLOGAÇÃO rejeitados pelos erros antigos de dPrev ou 693, re-emite automaticamente com a correção
+        const autoRetryHomologRows = rows
+            .filter(
+                (r) =>
+                    r.tipo_documento === 'CTE' &&
+                    r.status === 'REJEITADO' &&
+                    String(r.focus_ambiente || 'homologacao').toLowerCase() !== 'producao' &&
+                    (String(r.status_sefaz || '').trim() === '693' ||
+                        /dPrev|Grupo Documentos Transportados/i.test(String(r.mensagem_sefaz || '')))
+            )
+            .slice(0, 2);
+
+        if (autoRetryHomologRows.length > 0) {
+            await Promise.all(
+                autoRetryHomologRows.map((r) =>
+                    TransporteService.emitirCte(tenantId, r.id).catch(() => null)
+                )
+            );
+            const refreshedRetry = await db.query(finalSql, params);
+            rows = refreshedRetry.rows;
+        }
+
+        // Se houver documentos em PROCESSANDO ou AUTORIZADO sem PDF sincronizado, consulta automaticamente a Focus NFe
+        const processandoRows = rows
+            .filter(
+                (r) =>
+                    r.ref &&
+                    (r.status === 'PROCESSANDO' || (r.status === 'AUTORIZADO' && !r.caminho_pdf))
+            )
+            .slice(0, 5);
         if (processandoRows.length > 0) {
             await Promise.all(
                 processandoRows.map((r) =>
@@ -457,6 +485,7 @@ router.get('/documentos', async (req, res) => {
 
         const normalizedRows = rows.map((r) => ({
             ...r,
+            protocolo: TransporteService.extrairProtocoloFocus(r.protocolo),
             caminho_xml: FocusClient.normalizarUrlArquivo(r.caminho_xml, r.focus_ambiente),
             caminho_pdf: FocusClient.normalizarUrlArquivo(r.caminho_pdf, r.focus_ambiente),
         }));
@@ -3285,7 +3314,39 @@ router.get('/timeline/:tipo/:id', async (req, res) => {
         if (rows.length === 0) return res.status(404).json({ error: 'Documento não encontrado.' });
 
         let doc = rows[0];
-        if (doc.status === 'PROCESSANDO' && doc.ref) {
+        let emitAmb = 'homologacao';
+        if (doc.emitente_id) {
+            const emAmbRes = await db.query(
+                `SELECT focus_ambiente FROM dash_emitentes WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
+                [doc.emitente_id, tenantId]
+            ).catch(() => ({ rows: [] }));
+            emitAmb = emAmbRes.rows[0]?.focus_ambiente || 'homologacao';
+        }
+
+        if (
+            tipo === 'CTE' &&
+            doc.status === 'REJEITADO' &&
+            String(emitAmb).toLowerCase() !== 'producao' &&
+            (String(doc.status_sefaz || '').trim() === '693' ||
+                /dPrev|Grupo Documentos Transportados/i.test(String(doc.mensagem_sefaz || '')))
+        ) {
+            try {
+                await TransporteService.emitirCte(tenantId, docId);
+                const retriedDoc = await db.query(
+                    `SELECT * FROM ${tabela} WHERE id = $1 AND tenant_id = $2`,
+                    [docId, tenantId]
+                );
+                if (retriedDoc.rows[0]) doc = retriedDoc.rows[0];
+            } catch (_) {
+                // ignora falha transitória de auto-reenvio
+            }
+        }
+
+        const pdfField = tipo === 'MDFE' ? doc.caminho_damdfe : doc.caminho_dacte;
+        if (
+            doc.ref &&
+            (doc.status === 'PROCESSANDO' || (doc.status === 'AUTORIZADO' && !pdfField))
+        ) {
             try {
                 if (tipo === 'MDFE') {
                     await TransporteService.consultarMdfeFocus(tenantId, docId);
@@ -3301,15 +3362,8 @@ router.get('/timeline/:tipo/:id', async (req, res) => {
                 // ignora falha transitória de sincronização
             }
         }
-        let emitAmb = 'homologacao';
-        if (doc.emitente_id) {
-            const emAmbRes = await db.query(
-                `SELECT focus_ambiente FROM dash_emitentes WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
-                [doc.emitente_id, tenantId]
-            ).catch(() => ({ rows: [] }));
-            emitAmb = emAmbRes.rows[0]?.focus_ambiente || 'homologacao';
-        }
         doc.focus_ambiente = emitAmb;
+        doc.protocolo = TransporteService.extrairProtocoloFocus(doc.protocolo);
         doc.caminho_xml = FocusClient.normalizarUrlArquivo(doc.caminho_xml, emitAmb);
         if (doc.caminho_dacte) doc.caminho_dacte = FocusClient.normalizarUrlArquivo(doc.caminho_dacte, emitAmb);
         if (doc.caminho_damdfe) doc.caminho_damdfe = FocusClient.normalizarUrlArquivo(doc.caminho_damdfe, emitAmb);

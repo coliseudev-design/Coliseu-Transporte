@@ -358,7 +358,57 @@ function mapFocusStatusToDb(focusStatus, currentStatus = 'PROCESSANDO') {
   return currentStatus;
 }
 
+/**
+ * Extrai o número do protocolo de autorização SEFAZ a partir do retorno da Focus NFe.
+ * Quando consultado com ?completa=1 (AutorizadaCompletoResponse), a Focus NFe retorna
+ * `protocolo` como objeto ({ versao, id_tag, protocolo, status, motivo, ... }) em vez de string.
+ */
+function extrairProtocoloFocus(st) {
+  if (!st) return null;
+  const p =
+    typeof st === 'string' || typeof st === 'number'
+      ? st
+      : st.protocolo ?? st.protocolo_autorizacao ?? null;
+  if (!p) return null;
+  if (typeof p === 'object') {
+    const val = p.protocolo || p.numero || p.nProt || p.id_tag || '';
+    return String(val).replace(/^ID/i, '').trim().slice(0, 60) || null;
+  }
+  const str = String(p).trim();
+  if (str.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(str);
+      const val = parsed?.protocolo || parsed?.numero || parsed?.nProt || parsed?.id_tag || '';
+      return String(val).replace(/^ID/i, '').trim().slice(0, 60) || null;
+    } catch (_) {
+      return null;
+    }
+  }
+  return str.slice(0, 60) || null;
+}
+
+function extrairStatusSefazFocus(st) {
+  if (!st) return null;
+  const s =
+    st.status_sefaz ||
+    (typeof st.protocolo === 'object' && st.protocolo ? st.protocolo.status : null) ||
+    null;
+  return s ? String(s).trim().slice(0, 20) : null;
+}
+
+function extrairMensagemSefazFocus(st) {
+  if (!st) return null;
+  const m =
+    st.mensagem_sefaz ||
+    (typeof st.protocolo === 'object' && st.protocolo ? st.protocolo.motivo : null) ||
+    null;
+  return m ? String(m).trim().slice(0, 500) : null;
+}
+
 class TransporteService {
+  static extrairProtocoloFocus(st) {
+    return extrairProtocoloFocus(st);
+  }
   /**
    * Obtém as credenciais do emitente configurado para o tenant,
    * mesclando automaticamente com dash_integracoes_config (aba Fiscal).
@@ -1266,11 +1316,9 @@ class TransporteService {
       }
     }
 
-    // Gera sempre uma nova ref limpa ao transmitir rascunho ou reenviar rejeitado, evitando cache de erro 422/erro_autorizacao na Focus NFe
-    let ref =
-      cte.ref && cte.status === 'AUTORIZADO'
-        ? cte.ref
-        : this.gerarRef('CTE', tenantId, cte.id);
+    // Reaproveita a mesma referência (ref) se o documento estiver em RASCUNHO ou REJEITADO (conforme boas práticas Focus NFe v2 para manter numeração);
+    // caso a Focus NFe recuse a ref por conflito/processamento, gera uma nova ref automaticamente no bloco de envio.
+    let ref = cte.ref || this.gerarRef('CTE', tenantId, cte.id);
 
     // Salva o payload enviado e marca como PROCESSANDO
     await db.query(
@@ -1285,7 +1333,7 @@ class TransporteService {
 
     const aguardarRetornoCte = async (refConsulta) => {
       let ultimo = null;
-      for (let tentativa = 0; tentativa < 4; tentativa++) {
+      for (let tentativa = 0; tentativa < 6; tentativa++) {
         await new Promise((r) => setTimeout(r, 2200));
         try {
           const st = isCteOs
@@ -1300,6 +1348,32 @@ class TransporteService {
         }
       }
       return ultimo;
+    };
+
+    const enviarParaFocusComRetryRef = async (payloadEnvio, sufixoNovaRef = '') => {
+      try {
+        return isCteOs
+          ? await client.emitirCteOs(ref, payloadEnvio)
+          : await client.emitirCte(ref, payloadEnvio);
+      } catch (err) {
+        if (
+          /referencia|referência|ja foi autorizad|já foi autorizad|processando_autorizacao|em processamento/i.test(
+            String(err.message || '')
+          )
+        ) {
+          ref = this.gerarRef('CTE', tenantId, `${cte.id}${sufixoNovaRef}`);
+          const payloadSemNumeroFixo = { ...payloadEnvio };
+          delete payloadSemNumeroFixo.numero;
+          await db.query(
+            `UPDATE dash_ctes SET ref = $1, payload_focus = $2, updated_at = NOW() WHERE id = $3`,
+            [ref, JSON.stringify(payloadSemNumeroFixo), cteId]
+          );
+          return isCteOs
+            ? await client.emitirCteOs(ref, payloadSemNumeroFixo)
+            : await client.emitirCte(ref, payloadSemNumeroFixo);
+        }
+        throw err;
+      }
     };
 
     const montarPayloadHomologFallback = () => {
@@ -1335,26 +1409,21 @@ class TransporteService {
 
     let resFocus;
     try {
-      resFocus = isCteOs
-        ? await client.emitirCteOs(ref, payload)
-        : await client.emitirCte(ref, payload);
+      resFocus = await enviarParaFocusComRetryRef(payload);
     } catch (emitErr) {
       // Se em HOMOLOGAÇÃO a Focus NFe recusar a chave de NF-e de teste (ex: 422 em chave_nfe/infNFe), faz fallback para Declaração (tpDoc=00)
       if (
         client.ambiente === 'homologacao' &&
         !isCteOs &&
-        Array.isArray(payload.nfes) &&
-        payload.nfes.length > 0 &&
-        /chave|nfe|infnfe/i.test(String(emitErr.message || ''))
+        /chave|nfe|infnfe|documentos transportados/i.test(String(emitErr.message || ''))
       ) {
         const payloadHomologFallback = montarPayloadHomologFallback();
-        ref = this.gerarRef('CTE', tenantId, `${cte.id}_H`);
         try {
           await db.query(
             `UPDATE dash_ctes SET ref = $1, payload_focus = $2, updated_at = NOW() WHERE id = $3`,
             [ref, JSON.stringify(payloadHomologFallback), cteId]
           );
-          resFocus = await client.emitirCte(ref, payloadHomologFallback);
+          resFocus = await enviarParaFocusComRetryRef(payloadHomologFallback, '_H');
         } catch (fallbackErr) {
           await db
             .query(
@@ -1380,29 +1449,26 @@ class TransporteService {
       if (consultado) resFocus = consultado;
     }
 
-    // Em HOMOLOGAÇÃO: se a SEFAZ rejeitar com 661/662/652/216/236/616/526 (NF-e de teste ou de produção inexistente na base de homologação da SEFAZ),
+    // Em HOMOLOGAÇÃO: se a SEFAZ rejeitar com 661/662/652/216/236/616/526/693 (NF-e de teste ou de produção inexistente na base de homologação da SEFAZ),
     // reenvia automaticamente em homologação como Declaração/Outros Documentos (tpDoc=00) para concluir a homologação do CT-e.
     if (
       client.ambiente === 'homologacao' &&
       !isCteOs &&
-      Array.isArray(payload.nfes) &&
-      payload.nfes.length > 0 &&
       mapFocusStatusToDb(resFocus?.status, 'PROCESSANDO') === 'REJEITADO' &&
       (['661', '662', '652', '216', '236', '616', '526', '693'].includes(
-        String(resFocus?.status_sefaz || '').trim()
+        String(extrairStatusSefazFocus(resFocus) || '').trim()
       ) ||
         /inexistente na base|chave de acesso|nf-e|documentos transportados/i.test(
-          String(resFocus?.mensagem_sefaz || '')
+          String(extrairMensagemSefazFocus(resFocus) || '')
         ))
     ) {
       const payloadHomologFallback = montarPayloadHomologFallback();
-      ref = this.gerarRef('CTE', tenantId, `${cte.id}_H`);
       try {
         await db.query(
           `UPDATE dash_ctes SET ref = $1, payload_focus = $2, updated_at = NOW() WHERE id = $3`,
           [ref, JSON.stringify(payloadHomologFallback), cteId]
         );
-        const retryRes = await client.emitirCte(ref, payloadHomologFallback);
+        const retryRes = await enviarParaFocusComRetryRef(payloadHomologFallback, '_H');
         resFocus = retryRes;
         if (resFocus?.status === 'processando_autorizacao') {
           const consultadoRetry = await aguardarRetornoCte(ref);
@@ -1413,10 +1479,30 @@ class TransporteService {
       }
     }
 
-    const novoStatus = mapFocusStatusToDb(resFocus.status, 'PROCESSANDO');
+    let novoStatus = mapFocusStatusToDb(resFocus.status, 'PROCESSANDO');
+
+    // Garante que documentos recém-autorizados já tragam caminho_dacte (PDF oficial) e caminho_xml completos
+    if (
+      novoStatus === 'AUTORIZADO' &&
+      (!resFocus.caminho_dacte && !resFocus.caminho_danfe)
+    ) {
+      try {
+        const stCompleto = isCteOs
+          ? await client.consultarCteOs(ref, true)
+          : await client.consultarCte(ref, true);
+        if (stCompleto) {
+          resFocus = stCompleto;
+          novoStatus = mapFocusStatusToDb(resFocus.status, novoStatus);
+        }
+      } catch (_) {
+        // segue com resFocus atual
+      }
+    }
 
     const chaveCteNormalizada =
-      digitsOnly(resFocus.chave_cte || resFocus.chave || '').slice(0, 44) || null;
+      digitsOnly(
+        resFocus.chave_cte || resFocus.chave || resFocus.protocolo?.chave_cte || ''
+      ).slice(0, 44) || null;
     const caminhoXmlNormalizado = FocusClient.normalizarUrlArquivo(
       resFocus.caminho_xml_nota_fiscal || resFocus.caminho_xml,
       client.ambiente
@@ -1425,6 +1511,9 @@ class TransporteService {
       resFocus.caminho_dacte || resFocus.caminho_danfe,
       client.ambiente
     );
+    const protocoloNormalizado = extrairProtocoloFocus(resFocus);
+    const statusSefazNormalizado = extrairStatusSefazFocus(resFocus);
+    const mensagemSefazNormalizada = extrairMensagemSefazFocus(resFocus);
 
     await db.query(
       `UPDATE dash_ctes SET
@@ -1442,12 +1531,12 @@ class TransporteService {
        WHERE id = $11`,
       [
         novoStatus,
-        resFocus.status_sefaz || null,
-        resFocus.mensagem_sefaz || null,
+        statusSefazNormalizado,
+        mensagemSefazNormalizada,
         chaveCteNormalizada,
         resFocus.numero ? parseInt(resFocus.numero, 10) : null,
         resFocus.serie ? String(resFocus.serie) : null,
-        resFocus.protocolo || null,
+        protocoloNormalizado,
         caminhoXmlNormalizado,
         caminhoDacteNormalizado,
         JSON.stringify(resFocus),
@@ -1461,12 +1550,12 @@ class TransporteService {
       ambiente: client.ambiente,
       focus_ambiente: client.ambiente,
       status: novoStatus,
-      status_sefaz: resFocus.status_sefaz || null,
-      mensagem_sefaz: resFocus.mensagem_sefaz || null,
+      status_sefaz: statusSefazNormalizado,
+      mensagem_sefaz: mensagemSefazNormalizada,
       chave_cte: chaveCteNormalizada,
       numero: resFocus.numero || null,
       serie: resFocus.serie || null,
-      protocolo: resFocus.protocolo || null,
+      protocolo: protocoloNormalizado,
       caminho_xml: caminhoXmlNormalizado,
       caminho_dacte: caminhoDacteNormalizado,
       focus: resFocus,
@@ -1493,6 +1582,19 @@ class TransporteService {
       : await client.consultarCte(cte.ref, true);
 
     const novoStatus = mapFocusStatusToDb(st.status, cte.status);
+    const chaveCteNormalizada =
+      digitsOnly(st.chave_cte || st.chave || st.protocolo?.chave_cte || '').slice(0, 44) || null;
+    const protocoloNormalizado = extrairProtocoloFocus(st);
+    const statusSefazNormalizado = extrairStatusSefazFocus(st);
+    const mensagemSefazNormalizada = extrairMensagemSefazFocus(st);
+    const caminhoXmlNormalizado = FocusClient.normalizarUrlArquivo(
+      st.caminho_xml_nota_fiscal || st.caminho_xml,
+      client.ambiente
+    );
+    const caminhoDacteNormalizado = FocusClient.normalizarUrlArquivo(
+      st.caminho_dacte || st.caminho_danfe,
+      client.ambiente
+    );
 
     await db.query(
       `UPDATE dash_ctes SET
@@ -1510,26 +1612,28 @@ class TransporteService {
        WHERE id = $11`,
       [
         novoStatus,
-        st.status_sefaz || null,
-        st.mensagem_sefaz || null,
-        digitsOnly(st.chave_cte || st.chave || '').slice(0, 44) || null,
+        statusSefazNormalizado,
+        mensagemSefazNormalizada,
+        chaveCteNormalizada,
         st.numero ? parseInt(st.numero, 10) : null,
         st.serie ? String(st.serie) : null,
-        st.protocolo || null,
-        FocusClient.normalizarUrlArquivo(
-          st.caminho_xml_nota_fiscal || st.caminho_xml,
-          client.ambiente
-        ),
-        FocusClient.normalizarUrlArquivo(
-          st.caminho_dacte || st.caminho_danfe,
-          client.ambiente
-        ),
+        protocoloNormalizado,
+        caminhoXmlNormalizado,
+        caminhoDacteNormalizado,
         JSON.stringify(st),
         cteId,
       ]
     );
 
-    return { success: true, status: novoStatus, focus: st };
+    return {
+      success: true,
+      status: novoStatus,
+      chave_cte: chaveCteNormalizada,
+      protocolo: protocoloNormalizado,
+      caminho_xml: caminhoXmlNormalizado,
+      caminho_dacte: caminhoDacteNormalizado,
+      focus: st,
+    };
   }
 
   /**
@@ -2111,7 +2215,9 @@ class TransporteService {
     const novoStatus = mapFocusStatusToDb(resFocus.status, 'PROCESSANDO');
 
     const chaveMdfeNormalizada =
-      digitsOnly(resFocus.chave_mdfe || resFocus.chave || '').slice(0, 44) || null;
+      digitsOnly(
+        resFocus.chave_mdfe || resFocus.chave || resFocus.protocolo?.chave_mdfe || ''
+      ).slice(0, 44) || null;
     const caminhoXmlMdfeNormalizado = FocusClient.normalizarUrlArquivo(
       resFocus.caminho_xml_nota_fiscal || resFocus.caminho_xml,
       client.ambiente
@@ -2120,6 +2226,9 @@ class TransporteService {
       resFocus.caminho_damdfe,
       client.ambiente
     );
+    const protocoloMdfeNormalizado = extrairProtocoloFocus(resFocus);
+    const statusSefazMdfe = extrairStatusSefazFocus(resFocus);
+    const mensagemSefazMdfe = extrairMensagemSefazFocus(resFocus);
 
     await db.query(
       `UPDATE dash_mdfes SET
@@ -2137,12 +2246,12 @@ class TransporteService {
        WHERE id = $11`,
       [
         novoStatus,
-        resFocus.status_sefaz || null,
-        resFocus.mensagem_sefaz || null,
+        statusSefazMdfe,
+        mensagemSefazMdfe,
         chaveMdfeNormalizada,
         resFocus.numero ? parseInt(resFocus.numero, 10) : null,
         resFocus.serie ? String(resFocus.serie) : null,
-        resFocus.protocolo || null,
+        protocoloMdfeNormalizado,
         caminhoXmlMdfeNormalizado,
         caminhoDamdfeNormalizado,
         JSON.stringify(resFocus),
@@ -2156,12 +2265,12 @@ class TransporteService {
       ambiente: client.ambiente,
       focus_ambiente: client.ambiente,
       status: novoStatus,
-      status_sefaz: resFocus.status_sefaz || null,
-      mensagem_sefaz: resFocus.mensagem_sefaz || null,
+      status_sefaz: statusSefazMdfe,
+      mensagem_sefaz: mensagemSefazMdfe,
       chave_mdfe: chaveMdfeNormalizada,
       numero: resFocus.numero || null,
       serie: resFocus.serie || null,
-      protocolo: resFocus.protocolo || null,
+      protocolo: protocoloMdfeNormalizado,
       caminho_xml: caminhoXmlMdfeNormalizado,
       caminho_damdfe: caminhoDamdfeNormalizado,
       focus: resFocus,
@@ -2182,6 +2291,19 @@ class TransporteService {
     const { client } = await this.getFocusClient(tenantId, mdfe.emitente_id);
     const st = await client.consultarMdfe(mdfe.ref, true);
     const novoStatus = mapFocusStatusToDb(st.status, mdfe.status);
+    const chaveMdfeNormalizada =
+      digitsOnly(st.chave_mdfe || st.chave || st.protocolo?.chave_mdfe || '').slice(0, 44) || null;
+    const protocoloNormalizado = extrairProtocoloFocus(st);
+    const statusSefazNormalizado = extrairStatusSefazFocus(st);
+    const mensagemSefazNormalizada = extrairMensagemSefazFocus(st);
+    const caminhoXmlNormalizado = FocusClient.normalizarUrlArquivo(
+      st.caminho_xml_nota_fiscal || st.caminho_xml,
+      client.ambiente
+    );
+    const caminhoDamdfeNormalizado = FocusClient.normalizarUrlArquivo(
+      st.caminho_damdfe,
+      client.ambiente
+    );
 
     await db.query(
       `UPDATE dash_mdfes SET
@@ -2199,23 +2321,28 @@ class TransporteService {
        WHERE id = $11`,
       [
         novoStatus,
-        st.status_sefaz || null,
-        st.mensagem_sefaz || null,
-        digitsOnly(st.chave_mdfe || st.chave || '').slice(0, 44) || null,
+        statusSefazNormalizado,
+        mensagemSefazNormalizada,
+        chaveMdfeNormalizada,
         st.numero ? parseInt(st.numero, 10) : null,
         st.serie ? String(st.serie) : null,
-        st.protocolo || null,
-        FocusClient.normalizarUrlArquivo(
-          st.caminho_xml_nota_fiscal || st.caminho_xml,
-          client.ambiente
-        ),
-        FocusClient.normalizarUrlArquivo(st.caminho_damdfe, client.ambiente),
+        protocoloNormalizado,
+        caminhoXmlNormalizado,
+        caminhoDamdfeNormalizado,
         JSON.stringify(st),
         mdfeId,
       ]
     );
 
-    return { success: true, status: novoStatus, focus: st };
+    return {
+      success: true,
+      status: novoStatus,
+      chave_mdfe: chaveMdfeNormalizada,
+      protocolo: protocoloNormalizado,
+      caminho_xml: caminhoXmlNormalizado,
+      caminho_damdfe: caminhoDamdfeNormalizado,
+      focus: st,
+    };
   }
 
   /**
@@ -2512,17 +2639,34 @@ class TransporteService {
         const novoStatus = mapFocusStatusToDb(st.status, c.status);
         if (novoStatus !== c.status) {
           await db.query(
-            `UPDATE dash_ctes SET status = $1, status_sefaz = $2, mensagem_sefaz = $3,
-                    chave_cte = COALESCE($4, chave_cte), caminho_xml = COALESCE($5, caminho_xml),
-                    caminho_dacte = COALESCE($6, caminho_dacte), updated_at = NOW()
-             WHERE id = $7`,
+            `UPDATE dash_ctes SET
+                status = $1,
+                status_sefaz = COALESCE($2, status_sefaz),
+                mensagem_sefaz = COALESCE($3, mensagem_sefaz),
+                chave_cte = COALESCE($4, chave_cte),
+                caminho_xml = COALESCE($5, caminho_xml),
+                caminho_dacte = COALESCE($6, caminho_dacte),
+                protocolo = COALESCE($7, protocolo),
+                numero = COALESCE($8, numero),
+                serie = COALESCE($9, serie),
+                updated_at = NOW()
+             WHERE id = $10`,
             [
               novoStatus,
-              st.status_sefaz,
-              st.mensagem_sefaz,
-              st.chave_cte || st.chave,
-              st.caminho_xml_nota_fiscal || st.caminho_xml,
-              st.caminho_dacte || st.caminho_danfe,
+              extrairStatusSefazFocus(st),
+              extrairMensagemSefazFocus(st),
+              digitsOnly(st.chave_cte || st.chave || st.protocolo?.chave_cte || '').slice(0, 44) || null,
+              FocusClient.normalizarUrlArquivo(
+                st.caminho_xml_nota_fiscal || st.caminho_xml,
+                client.ambiente
+              ),
+              FocusClient.normalizarUrlArquivo(
+                st.caminho_dacte || st.caminho_danfe,
+                client.ambiente
+              ),
+              extrairProtocoloFocus(st),
+              st.numero ? parseInt(st.numero, 10) : null,
+              st.serie ? String(st.serie) : null,
               c.id,
             ]
           );
@@ -2681,9 +2825,12 @@ class TransporteService {
       authoritative.caminho_damdfe || caminho_damdfe || null,
       emitAmb
     );
-    const protocoloFinal = authoritative.protocolo || protocolo || null;
-    const statusSefazFinal = authoritative.status_sefaz || status_sefaz || null;
-    const msgSefazFinal = authoritative.mensagem_sefaz || mensagem_sefaz || null;
+    const protocoloFinal =
+      extrairProtocoloFocus(authoritative) || extrairProtocoloFocus(payload) || null;
+    const statusSefazFinal =
+      extrairStatusSefazFocus(authoritative) || status_sefaz || null;
+    const msgSefazFinal =
+      extrairMensagemSefazFocus(authoritative) || mensagem_sefaz || null;
     const errosFinal = authoritative.erros || erros || [];
 
     logger.info(`[Webhook Focus] Processando retorno verificado de ref=${ref}, status=${effStatus}`);
@@ -3555,6 +3702,7 @@ class TransporteService {
 
   /**
    * Baixa o XML ou PDF (DACTE / DAMDFE) de um documento autorizado como Buffer autenticado.
+   * Se o caminho ainda não estiver gravado no banco, sincroniza automaticamente com a Focus NFe.
    */
   static async baixarArtefatoDocumento(tenantId, tipo, docId, formato = 'pdf') {
     const tipoUpper = String(tipo || 'CTE').toUpperCase();
@@ -3567,14 +3715,43 @@ class TransporteService {
       throw new Error('Documento fiscal não encontrado.');
     }
 
-    const doc = rows[0];
+    let doc = rows[0];
     const fmt = String(formato || 'pdf').toLowerCase();
-    const rawPath =
+    const resolveRawPath = (d) =>
       fmt === 'xml'
-        ? doc.caminho_xml
+        ? d?.caminho_xml
         : tipoUpper === 'MDFE'
-        ? doc.caminho_damdfe
-        : doc.caminho_dacte;
+        ? d?.caminho_damdfe
+        : d?.caminho_dacte;
+
+    let rawPath = resolveRawPath(doc);
+
+    if (!rawPath && doc.ref) {
+      try {
+        const syncRes =
+          tipoUpper === 'MDFE'
+            ? await this.consultarMdfeFocus(tenantId, docId)
+            : await this.consultarCteFocus(tenantId, docId);
+        const refreshed = await db.query(
+          `SELECT * FROM ${tabela} WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
+          [docId, tenantId]
+        );
+        if (refreshed.rows[0]) {
+          doc = refreshed.rows[0];
+          rawPath = resolveRawPath(doc);
+        }
+        if (!rawPath && syncRes) {
+          rawPath =
+            fmt === 'xml'
+              ? syncRes.caminho_xml
+              : tipoUpper === 'MDFE'
+              ? syncRes.caminho_damdfe
+              : syncRes.caminho_dacte;
+        }
+      } catch (_) {
+        // segue para verificação de rawPath abaixo
+      }
+    }
 
     if (!rawPath) {
       throw new Error(

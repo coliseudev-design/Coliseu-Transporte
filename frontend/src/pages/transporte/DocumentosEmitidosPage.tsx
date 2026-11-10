@@ -111,9 +111,14 @@ export default function DocumentosEmitidosPage() {
         link.remove();
       }
       setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
-    } catch {
+    } catch (e: any) {
       if (fallbackUrl) {
         window.open(fallbackUrl, '_blank', 'noopener,noreferrer');
+      } else {
+        alert(
+          e?.response?.data?.error ||
+            `Arquivo ${formato.toUpperCase()} ainda não disponível para este documento.`
+        );
       }
     }
   };
@@ -362,21 +367,25 @@ export default function DocumentosEmitidosPage() {
                         <ArrowUpRight className="w-3 h-3" />
                         <span className="hidden xl:inline">Detalhes</span>
                       </button>
-                      {d.caminho_pdf && (
+                      {(d.caminho_pdf || d.status === 'AUTORIZADO') && (
                         <button
                           type="button"
                           onClick={() => handleBaixarArquivo(d.tipo_documento, d.id, 'pdf', d.caminho_pdf)}
-                          className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-200 text-[11px] font-medium transition-colors"
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 hover:bg-emerald-100 text-[11px] font-semibold transition-colors"
+                          title={d.tipo_documento === 'CTE' ? 'Visualizar / Imprimir DACTE Oficial (PDF)' : 'Visualizar / Imprimir DAMDFE Oficial (PDF)'}
                         >
                           <Eye className="w-3 h-3" />
-                          <span className="hidden xl:inline">PDF</span>
+                          <span className="hidden xl:inline">
+                            {d.tipo_documento === 'CTE' ? 'DACTE (PDF)' : 'DAMDFE (PDF)'}
+                          </span>
                         </button>
                       )}
-                      {d.caminho_xml && (
+                      {(d.caminho_xml || d.status === 'AUTORIZADO') && (
                         <button
                           type="button"
                           onClick={() => handleBaixarArquivo(d.tipo_documento, d.id, 'xml', d.caminho_xml)}
                           className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-200 text-[11px] font-medium transition-colors"
+                          title="Baixar XML Oficial Autorizado"
                         >
                           <Download className="w-3 h-3" />
                           <span className="hidden xl:inline">XML</span>
