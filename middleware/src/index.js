@@ -77,6 +77,45 @@ async function startServer() {
                     logger.warn('[App] Erro na aplicação de migrações automáticas:', migErr.message);
                 }
 
+                // Auto-reconciliação em background no boot: reemite CT-es de homologação rejeitados por 310/360/365/693 ou presos em PROCESSANDO
+                setImmediate(async () => {
+                    try {
+                        const TransporteService = require('./services/transporteService');
+                        const { rows: pendentes } = await db.query(
+                            `SELECT c.id, c.tenant_id, c.status, c.status_sefaz, c.mensagem_sefaz
+                             FROM dash_ctes c
+                             LEFT JOIN dash_emitentes e ON e.id = c.emitente_id
+                             WHERE COALESCE(e.focus_ambiente, 'homologacao') <> 'producao'
+                               AND (
+                                   c.status = 'PROCESSANDO'
+                                   OR (
+                                       c.status = 'REJEITADO'
+                                       AND (
+                                           c.status_sefaz IN ('310', '360', '365', '693')
+                                           OR c.mensagem_sefaz ~* 'dPrev|Grupo Documentos Transportados|IBS|CBS|vTotDFe'
+                                       )
+                                   )
+                               )
+                             ORDER BY c.id DESC
+                             LIMIT 5`
+                        );
+                        for (const p of pendentes) {
+                            try {
+                                if (p.status === 'PROCESSANDO') {
+                                    await TransporteService.consultarCteFocus(p.tenant_id, p.id);
+                                } else {
+                                    await TransporteService.emitirCte(p.tenant_id, p.id);
+                                }
+                                logger.info(`[App] Auto-reconciliação homologação concluída para CT-e #${p.id}`);
+                            } catch (e) {
+                                logger.warn(`[App] Aviso ao auto-reconciliar CT-e #${p.id}: ${e.message}`);
+                            }
+                        }
+                    } catch (reconcileErr) {
+                        logger.warn('[App] Aviso na auto-reconciliação inicial de CT-es:', reconcileErr.message);
+                    }
+                });
+
             } catch (dbErr) {
                 logger.error('[App] Erro ao sincronizar as tabelas do banco:', dbErr);
             }

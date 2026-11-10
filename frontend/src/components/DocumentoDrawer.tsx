@@ -292,12 +292,20 @@ export default function DocumentoDrawer({ tipo, documentoId, onClose, onVerRotei
                 <div className="space-y-5">
                   {tipo === 'CTE' && (
                     <>
-                      <div className="grid grid-cols-2 gap-3">
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                         {[
                           { label: 'Valor do Frete', value: `R$ ${Number(doc.valor_total || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}` },
                           { label: 'Valor da Carga', value: `R$ ${Number(doc.valor_carga || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}` },
                           { label: 'Peso Bruto', value: `${Number(doc.peso_bruto || 0).toLocaleString('pt-BR')} kg` },
-                          { label: 'ICMS', value: `R$ ${Number(doc.valor_icms || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}` }
+                          { label: 'ICMS', value: `R$ ${Number(doc.valor_icms || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}` },
+                          {
+                            label: 'IBS + CBS (Reforma)',
+                            value: `R$ ${(Number(doc.valor_ibs || 0) + Number(doc.valor_cbs || 0)).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`
+                          },
+                          {
+                            label: 'CST / cClassTrib',
+                            value: `${doc.ibs_cbs_cst || '000'} · ${doc.ibs_cbs_class_trib || doc.codigo_situacao_fiscal || '000001'}`
+                          }
                         ].map(k => (
                           <div key={k.label} className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-100 dark:border-slate-700/60">
                             <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">{k.label}</p>

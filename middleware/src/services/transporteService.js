@@ -958,14 +958,31 @@ class TransporteService {
             }))
         : [{ nome: 'FRETE VALOR', valor: baseCalculo.toFixed(2) }];
 
+    // Busca a regra fiscal parametrizada para a rota (UF Origem x UF Destino > Por UF > Global)
+    const { rows: regraRows } = await db.query(
+      `SELECT * FROM dash_regras_fiscais
+       WHERE tenant_id = $1 AND ativo = true
+         AND (escopo = 'GLOBAL'
+           OR (escopo = 'UF' AND (uf_origem IS NULL OR uf_origem = '' OR uf_origem = $2))
+           OR (escopo = 'UF_PAR' AND uf_origem = $2 AND uf_destino = $3))
+       ORDER BY CASE escopo WHEN 'UF_PAR' THEN 1 WHEN 'UF' THEN 2 ELSE 3 END, id DESC
+       LIMIT 1`,
+      [tenantId, ibgeInicio.uf, ibgeFim.uf]
+    );
+    const regraFiscal = regraRows[0] || null;
+
     // Tributos ICMS + DIFAL + Reforma Tributária (IBS/CBS)
-    const cstRaw = String(cte.icms_situacao_tributaria || '00').toUpperCase();
+    const cstRaw = String(
+      cte.icms_situacao_tributaria || regraFiscal?.situacao_tributaria || '00'
+    ).toUpperCase();
     const isSimples =
       cstRaw === 'SN' ||
       cstRaw.includes('SIMPLES') ||
       (String(emitente.regime_tributario) === '1' && cstRaw === 'SN');
 
-    const aliquotaIcms = parseFloat(cte.aliquota_icms ?? emitente.aliquota_icms_padrao ?? 0);
+    const aliquotaIcms = parseFloat(
+      cte.aliquota_icms ?? regraFiscal?.aliquota_icms ?? emitente.aliquota_icms_padrao ?? 0
+    );
     const valorIcms = parseFloat(cte.valor_icms || (baseCalculo * aliquotaIcms) / 100);
 
     const icmsFields = isSimples
@@ -1000,6 +1017,106 @@ class TransporteService {
 
     const dataEmissaoIso = formatarDataHoraSefaz(emitente.uf || ibgeEnvio.uf);
     const dataEmissaoYmd = dataEmissaoIso.slice(0, 10);
+
+    // Reforma Tributária do Consumo (IBS / CBS — NT 2025.001 / NT 2026.002 / LC 214/2025)
+    // Evita Rejeição SEFAZ 310 (IBS / CBS não informado), 360 (vTotDFe obrigatório) e 365 (vTotDFe = vTPrest em 2026)
+    const cstIbsCbs = String(
+      cte.ibs_cbs_cst || regraFiscal?.ibs_cbs_cst || '000'
+    )
+      .replace(/\D/g, '')
+      .padStart(3, '0')
+      .slice(0, 3);
+    const classTribDefault =
+      cstIbsCbs === '200'
+        ? '200002'
+        : cstIbsCbs === '410' || cstIbsCbs === '400'
+        ? '410001'
+        : cstIbsCbs === '510'
+        ? '510001'
+        : cstIbsCbs === '515'
+        ? '515001'
+        : '000001';
+    const classTribIbsCbs = String(
+      cte.ibs_cbs_class_trib ||
+        cte.codigo_situacao_fiscal ||
+        regraFiscal?.ibs_cbs_class_trib ||
+        regraFiscal?.codigo_situacao_fiscal ||
+        classTribDefault
+    )
+      .replace(/\D/g, '')
+      .padStart(6, '0')
+      .slice(0, 6);
+
+    const aliqIbsUfRaw =
+      Number(cte.aliquota_ibs) > 0
+        ? Number(cte.aliquota_ibs)
+        : Number(regraFiscal?.aliquota_ibs) > 0
+        ? Number(regraFiscal.aliquota_ibs)
+        : 0.1;
+    const aliqIbsMunRaw =
+      Number(cte.aliquota_ibs_mun) > 0
+        ? Number(cte.aliquota_ibs_mun)
+        : Number(regraFiscal?.aliquota_ibs_mun) > 0
+        ? Number(regraFiscal.aliquota_ibs_mun)
+        : 0.0;
+    const aliqCbsRaw =
+      Number(cte.aliquota_cbs) > 0
+        ? Number(cte.aliquota_cbs)
+        : Number(regraFiscal?.aliquota_cbs) > 0
+        ? Number(regraFiscal.aliquota_cbs)
+        : 0.9;
+    const percReducaoIbsCbs =
+      Number(cte.reducao_aliquota_ibs_cbs ?? regraFiscal?.reducao_aliquota_ibs_cbs ?? 0) || 0;
+
+    const fatorRedIbsCbs =
+      (cstIbsCbs === '200' || cstIbsCbs === '515') && percReducaoIbsCbs > 0
+        ? Math.max(0, 1 - percReducaoIbsCbs / 100)
+        : 1;
+    const aliqEfetIbsUf = aliqIbsUfRaw * fatorRedIbsCbs;
+    const aliqEfetIbsMun = aliqIbsMunRaw * fatorRedIbsCbs;
+    const aliqEfetCbs = aliqCbsRaw * fatorRedIbsCbs;
+
+    const valorIbsUfCalc = Number(((baseCalculo * aliqEfetIbsUf) / 100).toFixed(2));
+    const valorIbsMunCalc = Number(((baseCalculo * aliqEfetIbsMun) / 100).toFixed(2));
+    const valorIbsTotalCalc = Number((valorIbsUfCalc + valorIbsMunCalc).toFixed(2));
+    const valorCbsCalc = Number(((baseCalculo * aliqEfetCbs) / 100).toFixed(2));
+
+    const anoEmissaoNum = parseInt(dataEmissaoYmd.slice(0, 4), 10) || 2026;
+    const valorTotalDfeCalc =
+      anoEmissaoNum >= 2027
+        ? Number((baseCalculo + valorIbsTotalCalc + valorCbsCalc).toFixed(2))
+        : Number(baseCalculo.toFixed(2));
+
+    const ibsCbsFields =
+      cstIbsCbs === '410' || cstIbsCbs === '400'
+        ? {
+            ibs_cbs_situacao_tributaria: cstIbsCbs,
+            ibs_cbs_classificacao_tributaria: classTribIbsCbs,
+            valor_total_dfe: valorTotalDfeCalc.toFixed(2),
+          }
+        : {
+            ibs_cbs_situacao_tributaria: cstIbsCbs,
+            ibs_cbs_classificacao_tributaria: classTribIbsCbs,
+            ibs_cbs_base_calculo: baseCalculo.toFixed(2),
+            ibs_uf_aliquota: aliqIbsUfRaw.toFixed(2),
+            ibs_uf_valor: valorIbsUfCalc.toFixed(2),
+            ibs_mun_aliquota: aliqIbsMunRaw.toFixed(2),
+            ibs_mun_valor: valorIbsMunCalc.toFixed(2),
+            ibs_valor_total: valorIbsTotalCalc.toFixed(2),
+            cbs_aliquota: aliqCbsRaw.toFixed(2),
+            cbs_valor: valorCbsCalc.toFixed(2),
+            valor_total_dfe: valorTotalDfeCalc.toFixed(2),
+            ...(cstIbsCbs === '200' || cstIbsCbs === '515'
+              ? {
+                  ibs_uf_percentual_reducao_aliquota: percReducaoIbsCbs.toFixed(2),
+                  ibs_uf_aliquota_efetiva: aliqEfetIbsUf.toFixed(4),
+                  ibs_mun_percentual_reducao_aliquota: percReducaoIbsCbs.toFixed(2),
+                  ibs_mun_aliquota_efetiva: aliqEfetIbsMun.toFixed(4),
+                  cbs_percentual_reducao_aliquota: percReducaoIbsCbs.toFixed(2),
+                  cbs_aliquota_efetiva: aliqEfetCbs.toFixed(4),
+                }
+              : {}),
+          };
     const rawDataPrevista = formatarDataYmd(cte.data_prevista_entrega);
     const dataPrevistaLimpa =
       rawDataPrevista && rawDataPrevista < dataEmissaoYmd
@@ -1219,8 +1336,9 @@ class TransporteService {
       valor_receber: parseFloat(cte.valor_receber || cte.valor_total || 0).toFixed(2),
       componentes_valor: componentesFrete,
 
-      // Tributos ICMS
+      // Tributos ICMS + Reforma Tributária (IBS / CBS + vTotDFe)
       ...icmsFields,
+      ...ibsCbsFields,
 
       // Carga e Modal
       ...(!isCteOs
@@ -1320,15 +1438,35 @@ class TransporteService {
     // caso a Focus NFe recuse a ref por conflito/processamento, gera uma nova ref automaticamente no bloco de envio.
     let ref = cte.ref || this.gerarRef('CTE', tenantId, cte.id);
 
-    // Salva o payload enviado e marca como PROCESSANDO
+    // Salva o payload enviado, campos fiscais IBS/CBS calculados e marca como PROCESSANDO
     await db.query(
       `UPDATE dash_ctes SET
           ref = $1,
           payload_focus = $2,
+          ibs_cbs_cst = $4,
+          ibs_cbs_class_trib = $5,
+          aliquota_ibs = $6,
+          aliquota_ibs_mun = $7,
+          aliquota_cbs = $8,
+          valor_ibs = $9,
+          valor_cbs = $10,
+          valor_total_dfe = $11,
           status = 'PROCESSANDO',
           updated_at = NOW()
        WHERE id = $3`,
-      [ref, JSON.stringify(payload), cteId]
+      [
+        ref,
+        JSON.stringify(payload),
+        cteId,
+        cstIbsCbs,
+        classTribIbsCbs,
+        aliqIbsUfRaw,
+        aliqIbsMunRaw,
+        aliqCbsRaw,
+        valorIbsTotalCalc,
+        valorCbsCalc,
+        valorTotalDfeCalc,
+      ]
     );
 
     const aguardarRetornoCte = async (refConsulta) => {
@@ -1357,7 +1495,7 @@ class TransporteService {
           : await client.emitirCte(ref, payloadEnvio);
       } catch (err) {
         if (
-          /referencia|referência|ja foi autorizad|já foi autorizad|processando_autorizacao|em processamento/i.test(
+          /referencia|referência|ja foi autorizad|já foi autorizad|ja existe|já existe|duplicad|conflito|processando_autorizacao|em processamento/i.test(
             String(err.message || '')
           )
         ) {
@@ -1577,9 +1715,36 @@ class TransporteService {
     const isCteOs =
       String(cte.modelo) === '67' || String(cte.modelo_cte || '').toLowerCase() === 'cteos';
 
-    const st = isCteOs
-      ? await client.consultarCteOs(cte.ref, true)
-      : await client.consultarCte(cte.ref, true);
+    let st;
+    try {
+      st = isCteOs
+        ? await client.consultarCteOs(cte.ref, true)
+        : await client.consultarCte(cte.ref, true);
+    } catch (err) {
+      // Se o CT-e estava travado em PROCESSANDO ou REJEITADO em homologação mas a ref nunca chegou a existir na Focus NFe (404),
+      // dispara automaticamente a emissão completa para destravar o documento
+      if (
+        client.ambiente === 'homologacao' &&
+        (err.statusCode === 404 || /404|nao_encontrad|não encontrad|not found/i.test(String(err.message || '')))
+      ) {
+        return await this.emitirCte(tenantId, cteId);
+      }
+      throw err;
+    }
+
+    const statusSefazConsulta = String(extrairStatusSefazFocus(st) || '').trim();
+    const mensagemSefazConsulta = String(extrairMensagemSefazFocus(st) || '');
+
+    // Se em homologação o documento na Focus ainda estiver com rejeição antiga (310 IBS/CBS, 360/365 vTotDFe, 693 Doc Transportados),
+    // reemite automaticamente com o payload atualizado da Reforma Tributária
+    if (
+      client.ambiente === 'homologacao' &&
+      mapFocusStatusToDb(st.status, cte.status) === 'REJEITADO' &&
+      (['310', '360', '365', '693', '661', '662', '652'].includes(statusSefazConsulta) ||
+        /IBS|CBS|vTotDFe|Documentos Transportados/i.test(mensagemSefazConsulta))
+    ) {
+      return await this.emitirCte(tenantId, cteId);
+    }
 
     const novoStatus = mapFocusStatusToDb(st.status, cte.status);
     const chaveCteNormalizada =
@@ -2520,21 +2685,50 @@ class TransporteService {
     );
 
     const r = regra[0];
+    const valorFreteNum = Number(c.valor_total || 0);
     const aliqRef = r ? Number(r.aliquota_icms) : Number(c.aliquota_icms || emitente?.aliquota_icms_padrao || 0);
-    const icmsCalculado = (Number(c.valor_total || 0) * aliqRef) / 100;
+    const icmsCalculado = (valorFreteNum * aliqRef) / 100;
+    const aliqIbsUfRef =
+      Number(c.aliquota_ibs) > 0
+        ? Number(c.aliquota_ibs)
+        : Number(r?.aliquota_ibs) > 0
+        ? Number(r.aliquota_ibs)
+        : 0.1;
+    const aliqIbsMunRef =
+      Number(c.aliquota_ibs_mun) > 0
+        ? Number(c.aliquota_ibs_mun)
+        : Number(r?.aliquota_ibs_mun) > 0
+        ? Number(r.aliquota_ibs_mun)
+        : 0.0;
+    const aliqCbsRef =
+      Number(c.aliquota_cbs) > 0
+        ? Number(c.aliquota_cbs)
+        : Number(r?.aliquota_cbs) > 0
+        ? Number(r.aliquota_cbs)
+        : 0.9;
+    const ibsEstimado = Math.round(((valorFreteNum * (aliqIbsUfRef + aliqIbsMunRef)) / 100) * 100) / 100;
+    const cbsEstimado = Math.round(((valorFreteNum * aliqCbsRef) / 100) * 100) / 100;
 
     return {
       valido: impedimentos.length === 0,
       impedimentos,
       alertas,
       calculos: {
-        valor_frete: Number(c.valor_total || 0),
+        valor_frete: valorFreteNum,
         valor_carga: valorCargas || Number(c.valor_carga || 0),
         peso_cte: Number(c.peso_bruto || 0),
         peso_nfes: pesoCargas,
         icms_estimado: Math.round(icmsCalculado * 100) / 100,
         aliquota_aplicada: aliqRef,
         situacao_tributaria: r ? r.situacao_tributaria : c.icms_situacao_tributaria || '00',
+        ibs_cbs_cst: c.ibs_cbs_cst || r?.ibs_cbs_cst || '000',
+        ibs_cbs_class_trib: c.ibs_cbs_class_trib || r?.ibs_cbs_class_trib || '000001',
+        aliquota_ibs_uf: aliqIbsUfRef,
+        aliquota_ibs_mun: aliqIbsMunRef,
+        aliquota_cbs: aliqCbsRef,
+        ibs_estimado: ibsEstimado,
+        cbs_estimado: cbsEstimado,
+        valor_total_dfe: valorFreteNum,
       },
       resumo: {
         nfes_vinculadas: totalDocs,

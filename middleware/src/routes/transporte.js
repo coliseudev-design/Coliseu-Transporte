@@ -441,17 +441,17 @@ router.get('/documentos', async (req, res) => {
 
         let { rows } = await db.query(finalSql, params);
 
-        // Se houver CT-es em HOMOLOGAÇÃO rejeitados pelos erros antigos de dPrev ou 693, re-emite automaticamente com a correção
+        // Se houver CT-es em HOMOLOGAÇÃO rejeitados pelos erros antigos de dPrev, 693 ou 310/360/365 (IBS/CBS), re-emite automaticamente com a correção
         const autoRetryHomologRows = rows
             .filter(
                 (r) =>
                     r.tipo_documento === 'CTE' &&
                     r.status === 'REJEITADO' &&
                     String(r.focus_ambiente || 'homologacao').toLowerCase() !== 'producao' &&
-                    (String(r.status_sefaz || '').trim() === '693' ||
-                        /dPrev|Grupo Documentos Transportados/i.test(String(r.mensagem_sefaz || '')))
+                    (['310', '360', '365', '693'].includes(String(r.status_sefaz || '').trim()) ||
+                        /dPrev|Grupo Documentos Transportados|IBS|CBS|vTotDFe/i.test(String(r.mensagem_sefaz || '')))
             )
-            .slice(0, 2);
+            .slice(0, 3);
 
         if (autoRetryHomologRows.length > 0) {
             await Promise.all(
@@ -726,7 +726,8 @@ router.post('/ctes', async (req, res) => {
                 seguro_responsavel, seguro_nome, seguro_apolice, seguro_averbacao,
                 observacoes, chave_cte_referenciado,
                 remetente_dados, destinatario_dados, expedidor_dados, recebedor_dados, tomador_dados,
-                documentos_json, quantidades_carga, modal_os_dados
+                documentos_json, quantidades_carga, modal_os_dados,
+                ibs_cbs_cst, ibs_cbs_class_trib, aliquota_ibs_mun, reducao_aliquota_ibs_cbs
              ) VALUES (
                 $1, $2, $3, 'RASCUNHO', $4, $5, $6,
                 $7, $8, $9, $10, $11, $12, $13,
@@ -741,7 +742,8 @@ router.post('/ctes', async (req, res) => {
                 $44, $45, $46, $47,
                 $48, $49,
                 $50::jsonb, $51::jsonb, $52::jsonb, $53::jsonb, $54::jsonb,
-                $55::jsonb, $56::jsonb, $57::jsonb
+                $55::jsonb, $56::jsonb, $57::jsonb,
+                $58, $59, $60, $61
              ) RETURNING *`,
             [
                 tenantId,
@@ -778,9 +780,9 @@ router.post('/ctes', async (req, res) => {
                 parseFloat(b.base_icms ?? b.valor_total ?? 0),
                 parseFloat(b.aliquota_icms || 0),
                 parseFloat(b.valor_icms || 0),
-                parseFloat(b.aliquota_ibs || 0),
-                parseFloat(b.aliquota_cbs || 0),
-                b.codigo_situacao_fiscal || null,
+                parseFloat(b.aliquota_ibs ?? 0.1),
+                parseFloat(b.aliquota_cbs ?? 0.9),
+                b.codigo_situacao_fiscal || b.ibs_cbs_class_trib || '000001',
                 parseFloat(b.aliquota_fcp || 0),
                 parseFloat(b.part_fcp_origem || 0),
                 parseFloat(b.part_fcp_destino || 0),
@@ -801,6 +803,10 @@ router.post('/ctes', async (req, res) => {
                 JSON.stringify(b.documentos || b.documentos_json || []),
                 JSON.stringify(b.quantidades_carga || []),
                 JSON.stringify(b.modal_os_dados || {}),
+                b.ibs_cbs_cst || '000',
+                b.ibs_cbs_class_trib || b.codigo_situacao_fiscal || '000001',
+                parseFloat(b.aliquota_ibs_mun || 0),
+                parseFloat(b.reducao_aliquota_ibs_cbs || 0),
             ]
         );
 
@@ -899,6 +905,10 @@ router.put('/ctes/:id', async (req, res) => {
                 documentos_json = COALESCE($53::jsonb, documentos_json),
                 quantidades_carga = COALESCE($54::jsonb, quantidades_carga),
                 modal_os_dados = COALESCE($55::jsonb, modal_os_dados),
+                ibs_cbs_cst = COALESCE($58, ibs_cbs_cst),
+                ibs_cbs_class_trib = COALESCE($59, ibs_cbs_class_trib),
+                aliquota_ibs_mun = COALESCE($60, aliquota_ibs_mun),
+                reducao_aliquota_ibs_cbs = COALESCE($61, reducao_aliquota_ibs_cbs),
                 updated_at = NOW()
              WHERE id = $56 AND tenant_id = $57
              RETURNING *`,
@@ -937,7 +947,7 @@ router.put('/ctes/:id', async (req, res) => {
                 b.valor_icms !== undefined ? parseFloat(b.valor_icms || 0) : null,
                 b.aliquota_ibs !== undefined ? parseFloat(b.aliquota_ibs || 0) : null,
                 b.aliquota_cbs !== undefined ? parseFloat(b.aliquota_cbs || 0) : null,
-                b.codigo_situacao_fiscal ?? null,
+                b.codigo_situacao_fiscal ?? b.ibs_cbs_class_trib ?? null,
                 b.aliquota_fcp !== undefined ? parseFloat(b.aliquota_fcp || 0) : null,
                 b.part_fcp_origem !== undefined ? parseFloat(b.part_fcp_origem || 0) : null,
                 b.part_fcp_destino !== undefined ? parseFloat(b.part_fcp_destino || 0) : null,
@@ -960,6 +970,10 @@ router.put('/ctes/:id', async (req, res) => {
                 b.modal_os_dados ? JSON.stringify(b.modal_os_dados) : null,
                 cteId,
                 tenantId,
+                b.ibs_cbs_cst || null,
+                b.ibs_cbs_class_trib || b.codigo_situacao_fiscal || null,
+                b.aliquota_ibs_mun !== undefined ? parseFloat(b.aliquota_ibs_mun || 0) : null,
+                b.reducao_aliquota_ibs_cbs !== undefined ? parseFloat(b.reducao_aliquota_ibs_cbs || 0) : null,
             ]
         );
 
@@ -2547,7 +2561,11 @@ router.post('/regras', async (req, res) => {
         part_icms_origem = 0, part_icms_destino = 0,
         is_final_consumer = false,
         criterio_rateio = 'PESO', valor_minimo = null, valor_maximo = null,
-        percentual_adicional = 0, emitente_id = null, ativo = true
+        percentual_adicional = 0, emitente_id = null, ativo = true,
+        ibs_cbs_cst = '000', ibs_cbs_class_trib = '000001',
+        aliquota_ibs = 0.10, aliquota_ibs_mun = 0.00, aliquota_cbs = 0.90,
+        reducao_aliquota_ibs_cbs = 0, diferimento_ibs_cbs = 0,
+        codigo_situacao_fiscal = null, vigente_de = null, vigente_ate = null
     } = req.body || {};
 
     try {
@@ -2557,18 +2575,37 @@ router.post('/regras', async (req, res) => {
                 situacao_tributaria, cfop, aliquota_icms, percentual_fcp,
                 part_fcp_origem, part_fcp_destino, part_icms_origem, part_icms_destino,
                 is_final_consumer, criterio_rateio, valor_minimo, valor_maximo,
-                percentual_adicional, ativo
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+                percentual_adicional, ativo,
+                ibs_cbs_cst, ibs_cbs_class_trib, aliquota_ibs, aliquota_ibs_mun, aliquota_cbs,
+                reducao_aliquota_ibs_cbs, diferimento_ibs_cbs, codigo_situacao_fiscal,
+                vigente_de, vigente_ate
+             ) VALUES (
+                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
+                $21,$22,$23,$24,$25,$26,$27,$28,$29,$30
+             )
              RETURNING *`,
             [
-                tenantId, emitente_id, escopo, uf_origem, uf_destino, tipo_servico,
+                tenantId, emitente_id, escopo,
+                uf_origem ? String(uf_origem).toUpperCase().trim() : null,
+                uf_destino ? String(uf_destino).toUpperCase().trim() : null,
+                tipo_servico,
                 situacao_tributaria, cfop, parseFloat(aliquota_icms || 0), parseFloat(percentual_fcp || 0),
                 parseFloat(part_fcp_origem || 0), parseFloat(part_fcp_destino || 0),
                 parseFloat(part_icms_origem || 0), parseFloat(part_icms_destino || 0),
                 is_final_consumer, criterio_rateio,
                 valor_minimo !== null && valor_minimo !== '' ? parseFloat(valor_minimo) : null,
                 valor_maximo !== null && valor_maximo !== '' ? parseFloat(valor_maximo) : null,
-                parseFloat(percentual_adicional || 0), ativo
+                parseFloat(percentual_adicional || 0), ativo,
+                String(ibs_cbs_cst || '000').padStart(3, '0').slice(0, 3),
+                String(ibs_cbs_class_trib || codigo_situacao_fiscal || '000001').padStart(6, '0').slice(0, 6),
+                parseFloat(aliquota_ibs ?? 0.10),
+                parseFloat(aliquota_ibs_mun ?? 0.00),
+                parseFloat(aliquota_cbs ?? 0.90),
+                parseFloat(reducao_aliquota_ibs_cbs || 0),
+                parseFloat(diferimento_ibs_cbs || 0),
+                codigo_situacao_fiscal || ibs_cbs_class_trib || '000001',
+                vigente_de || null,
+                vigente_ate || null
             ]
         );
         return res.status(201).json({ success: true, data: rows[0] });
@@ -2577,14 +2614,17 @@ router.post('/regras', async (req, res) => {
     }
 });
 
-router.patch('/regras/:id', async (req, res) => {
+const atualizarRegraHandler = async (req, res) => {
     const tenantId = req.tenant.id;
     const regraId = req.params.id;
     const camposPermitidos = [
         'escopo', 'uf_origem', 'uf_destino', 'tipo_servico', 'situacao_tributaria', 'cfop',
         'aliquota_icms', 'percentual_fcp', 'part_fcp_origem', 'part_fcp_destino',
         'part_icms_origem', 'part_icms_destino', 'is_final_consumer',
-        'criterio_rateio', 'valor_minimo', 'valor_maximo', 'percentual_adicional', 'ativo'
+        'criterio_rateio', 'valor_minimo', 'valor_maximo', 'percentual_adicional', 'ativo',
+        'ibs_cbs_cst', 'ibs_cbs_class_trib', 'aliquota_ibs', 'aliquota_ibs_mun', 'aliquota_cbs',
+        'reducao_aliquota_ibs_cbs', 'diferimento_ibs_cbs', 'codigo_situacao_fiscal',
+        'vigente_de', 'vigente_ate'
     ];
 
     try {
@@ -2593,7 +2633,11 @@ router.patch('/regras/:id', async (req, res) => {
         const params = [tenantId, regraId];
         for (const c of camposPermitidos) {
             if (body[c] !== undefined) {
-                params.push(body[c]);
+                let val = body[c];
+                if ((c === 'valor_minimo' || c === 'valor_maximo' || c === 'vigente_de' || c === 'vigente_ate') && val === '') {
+                    val = null;
+                }
+                params.push(val);
                 sets.push(`${c} = $${params.length}`);
             }
         }
@@ -2609,7 +2653,10 @@ router.patch('/regras/:id', async (req, res) => {
     } catch (err) {
         return res.status(500).json({ error: err.message });
     }
-});
+};
+
+router.patch('/regras/:id', atualizarRegraHandler);
+router.put('/regras/:id', atualizarRegraHandler);
 
 router.delete('/regras/:id', async (req, res) => {
     const tenantId = req.tenant.id;
@@ -3327,8 +3374,8 @@ router.get('/timeline/:tipo/:id', async (req, res) => {
             tipo === 'CTE' &&
             doc.status === 'REJEITADO' &&
             String(emitAmb).toLowerCase() !== 'producao' &&
-            (String(doc.status_sefaz || '').trim() === '693' ||
-                /dPrev|Grupo Documentos Transportados/i.test(String(doc.mensagem_sefaz || '')))
+            (['310', '360', '365', '693'].includes(String(doc.status_sefaz || '').trim()) ||
+                /dPrev|Grupo Documentos Transportados|IBS|CBS|vTotDFe/i.test(String(doc.mensagem_sefaz || '')))
         ) {
             try {
                 await TransporteService.emitirCte(tenantId, docId);

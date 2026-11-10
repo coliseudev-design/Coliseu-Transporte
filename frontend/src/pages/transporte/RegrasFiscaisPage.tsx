@@ -19,18 +19,57 @@ interface Regra {
   percentual_adicional: number;
   is_final_consumer: boolean;
   ativo: boolean;
+  ibs_cbs_cst?: string;
+  ibs_cbs_class_trib?: string;
+  aliquota_ibs?: number;
+  aliquota_ibs_mun?: number;
+  aliquota_cbs?: number;
+  reducao_aliquota_ibs_cbs?: number;
+  diferimento_ibs_cbs?: number;
+  codigo_situacao_fiscal?: string;
+  vigente_de?: string;
+  vigente_ate?: string;
 }
 
-const VAZIO = {
+interface FormRegra {
+  id?: number;
+  escopo: string;
+  uf_origem: string;
+  uf_destino: string;
+  tipo_servico: string;
+  situacao_tributaria: string;
+  cfop: string;
+  aliquota_icms: string;
+  percentual_fcp: string;
+  criterio_rateio: string;
+  valor_minimo: string;
+  valor_maximo: string;
+  percentual_adicional: string;
+  is_final_consumer: boolean;
+  ativo: boolean;
+  ibs_cbs_cst: string;
+  ibs_cbs_class_trib: string;
+  aliquota_ibs: string;
+  aliquota_ibs_mun: string;
+  aliquota_cbs: string;
+  reducao_aliquota_ibs_cbs: string;
+  vigente_de: string;
+  vigente_ate: string;
+}
+
+const VAZIO: FormRegra = {
   escopo: 'GLOBAL', uf_origem: '', uf_destino: '', tipo_servico: '0',
   situacao_tributaria: '00', cfop: '5353', aliquota_icms: '12.00',
   percentual_fcp: '0.00', criterio_rateio: 'PESO',
   valor_minimo: '', valor_maximo: '', percentual_adicional: '0',
-  is_final_consumer: false, ativo: true
+  is_final_consumer: false, ativo: true,
+  ibs_cbs_cst: '000', ibs_cbs_class_trib: '000001',
+  aliquota_ibs: '0.10', aliquota_ibs_mun: '0.00', aliquota_cbs: '0.90',
+  reducao_aliquota_ibs_cbs: '0.00', vigente_de: '2026-01-01', vigente_ate: ''
 };
 
 export default function RegrasFiscaisPage() {
-  const [editando, setEditando] = useState<typeof VAZIO | null>(null);
+  const [editando, setEditando] = useState<FormRegra | null>(null);
   const [salvando, setSalvando] = useState(false);
 
   const { data, isLoading, refetch } = useQuery({
@@ -45,7 +84,15 @@ export default function RegrasFiscaisPage() {
     if (!editando) return;
     setSalvando(true);
     try {
-      await api.post('/transporte/regras', editando);
+      const payload = {
+        ...editando,
+        codigo_situacao_fiscal: editando.ibs_cbs_class_trib,
+      };
+      if (editando.id) {
+        await api.patch(`/transporte/regras/${editando.id}`, payload);
+      } else {
+        await api.post('/transporte/regras', payload);
+      }
       setEditando(null);
       refetch();
       alert('Regra fiscal salva com sucesso!');
@@ -78,7 +125,7 @@ export default function RegrasFiscaisPage() {
             Regras Fiscais por UF
           </h1>
           <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
-            Alíquotas de ICMS, FCP, partilha e critério de rateio do frete. Parametrizável sem deploy.
+            Alíquotas de ICMS, Reforma Tributária (IBS / CBS — LC 214/2025), FCP, partilha e critério de rateio do frete. Parametrizável sem deploy.
           </p>
         </div>
         <button
@@ -90,7 +137,7 @@ export default function RegrasFiscaisPage() {
         </button>
       </div>
 
-      <div className="flex items-start gap-3 p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:amber-800/50">
+      <div className="flex items-start gap-3 p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/50">
         <Info className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
         <p className="text-xs text-amber-900 dark:text-amber-200">
           A regra mais específica sempre prevalece: <strong>UF Origem × Destino</strong> tem prioridade sobre
@@ -106,7 +153,7 @@ export default function RegrasFiscaisPage() {
           <Scale className="w-12 h-12 mx-auto text-slate-400 mb-3" />
           <h3 className="text-base font-semibold text-slate-800 dark:text-slate-200">Nenhuma regra configurada</h3>
           <p className="text-sm text-slate-500 dark:text-slate-400 mt-1 max-w-md mx-auto">
-            Crie regras por rota (UF origem × destino) para calcular ICMS, FCP e rateio automaticamente
+            Crie regras por rota (UF origem × destino) para calcular ICMS, IBS/CBS, FCP e rateio automaticamente
             na emissão do CT-e.
           </p>
         </div>
@@ -120,6 +167,7 @@ export default function RegrasFiscaisPage() {
                   <th className="px-5 py-3.5">Rota</th>
                   <th className="px-5 py-3.5">CST / CFOP</th>
                   <th className="px-5 py-3.5">ICMS</th>
+                  <th className="px-5 py-3.5">IBS / CBS (Reforma)</th>
                   <th className="px-5 py-3.5">FCP</th>
                   <th className="px-5 py-3.5">Rateio</th>
                   <th className="px-5 py-3.5 text-right">Ações</th>
@@ -140,6 +188,14 @@ export default function RegrasFiscaisPage() {
                     <td className="px-5 py-3.5 font-semibold text-slate-900 dark:text-white">
                       {Number(r.aliquota_icms || 0).toLocaleString('pt-BR')}%
                     </td>
+                    <td className="px-5 py-3.5 text-xs">
+                      <div className="font-semibold text-emerald-700 dark:text-emerald-400">
+                        IBS {Number(r.aliquota_ibs ?? 0.1).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}% + CBS {Number(r.aliquota_cbs ?? 0.9).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}%
+                      </div>
+                      <div className="font-mono text-[11px] text-slate-500">
+                        CST {r.ibs_cbs_cst || '000'} · cClassTrib {r.ibs_cbs_class_trib || r.codigo_situacao_fiscal || '000001'}
+                      </div>
+                    </td>
                     <td className="px-5 py-3.5 text-slate-600 dark:text-slate-400">
                       {Number(r.percentual_fcp || 0).toLocaleString('pt-BR')}%
                     </td>
@@ -151,6 +207,7 @@ export default function RegrasFiscaisPage() {
                     <td className="px-5 py-3.5 text-right space-x-1">
                       <button
                         onClick={() => setEditando({
+                          id: r.id,
                           escopo: r.escopo, uf_origem: r.uf_origem || '', uf_destino: r.uf_destino || '',
                           tipo_servico: r.tipo_servico || '0', situacao_tributaria: r.situacao_tributaria,
                           cfop: r.cfop || '', aliquota_icms: String(r.aliquota_icms ?? ''),
@@ -158,7 +215,15 @@ export default function RegrasFiscaisPage() {
                           valor_minimo: r.valor_minimo ? String(r.valor_minimo) : '',
                           valor_maximo: r.valor_maximo ? String(r.valor_maximo) : '',
                           percentual_adicional: String(r.percentual_adicional ?? 0),
-                          is_final_consumer: r.is_final_consumer, ativo: r.ativo
+                          is_final_consumer: r.is_final_consumer, ativo: r.ativo,
+                          ibs_cbs_cst: r.ibs_cbs_cst || '000',
+                          ibs_cbs_class_trib: r.ibs_cbs_class_trib || r.codigo_situacao_fiscal || '000001',
+                          aliquota_ibs: String(r.aliquota_ibs ?? '0.10'),
+                          aliquota_ibs_mun: String(r.aliquota_ibs_mun ?? '0.00'),
+                          aliquota_cbs: String(r.aliquota_cbs ?? '0.90'),
+                          reducao_aliquota_ibs_cbs: String(r.reducao_aliquota_ibs_cbs ?? '0.00'),
+                          vigente_de: r.vigente_de ? String(r.vigente_de).slice(0, 10) : '2026-01-01',
+                          vigente_ate: r.vigente_ate ? String(r.vigente_ate).slice(0, 10) : '',
                         })}
                         className="inline-flex p-1.5 rounded-lg bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 text-slate-600 dark:text-slate-300"
                       >
@@ -184,7 +249,7 @@ export default function RegrasFiscaisPage() {
           <div className="bg-white dark:bg-slate-800 w-full max-w-2xl rounded-2xl p-6 shadow-xl border border-slate-200 dark:border-slate-700 my-8">
             <h2 className="text-lg font-bold text-slate-900 dark:text-white flex items-center gap-2">
               <Scale className="w-5 h-5 text-brand-600" />
-              Regra Fiscal
+              {editando.id ? `Editar Regra Fiscal #${editando.id}` : 'Nova Regra Fiscal'}
             </h2>
 
             <form onSubmit={handleSalvar} className="space-y-4 mt-5 text-sm">
@@ -225,7 +290,7 @@ export default function RegrasFiscaisPage() {
 
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                 <div>
-                  <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1">CST *</label>
+                  <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1">CST ICMS *</label>
                   <input
                     type="text" required maxLength={2}
                     value={editando.situacao_tributaria}
@@ -303,6 +368,142 @@ export default function RegrasFiscaisPage() {
                     onChange={e => setEditando({ ...editando, percentual_adicional: e.target.value })}
                     className="w-full px-3.5 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white"
                   />
+                </div>
+              </div>
+
+              <div className="p-4 rounded-xl bg-emerald-50/70 dark:bg-emerald-950/20 border border-emerald-200 dark:border-emerald-800/50 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h3 className="text-xs font-bold uppercase tracking-wider text-emerald-900 dark:text-emerald-300 flex items-center gap-1.5">
+                      <Percent className="w-3.5 h-3.5 text-emerald-600" />
+                      Reforma Tributária do Consumo — IBS / CBS (LC 214/2025 · NT 2025.001 / 2026.002)
+                    </h3>
+                    <p className="text-[11px] text-emerald-800/80 dark:text-emerald-400/80 mt-0.5">
+                      Obrigatório na emissão de CT-e 4.00 (evita Rejeição SEFAZ 310 — IBS/CBS não informado).
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setEditando({
+                        ...editando,
+                        ibs_cbs_cst: '000',
+                        ibs_cbs_class_trib: '000001',
+                        aliquota_ibs: '0.10',
+                        aliquota_ibs_mun: '0.00',
+                        aliquota_cbs: '0.90',
+                        reducao_aliquota_ibs_cbs: '0.00',
+                      })
+                    }
+                    className="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm"
+                  >
+                    Aplicar Padrão Transição 2026 (IBS 0,10% + CBS 0,90%)
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                  <div>
+                    <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1">
+                      CST IBS/CBS *
+                    </label>
+                    <select
+                      value={editando.ibs_cbs_cst}
+                      onChange={e => {
+                        const cst = e.target.value;
+                        const classSug =
+                          cst === '200'
+                            ? '200002'
+                            : cst === '410'
+                            ? '410001'
+                            : cst === '510'
+                            ? '510001'
+                            : cst === '515'
+                            ? '515001'
+                            : '000001';
+                        setEditando({
+                          ...editando,
+                          ibs_cbs_cst: cst,
+                          ibs_cbs_class_trib: classSug,
+                        });
+                      }}
+                      className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white text-xs font-mono"
+                    >
+                      <option value="000">000 — Tributação integral</option>
+                      <option value="200">200 — Alíquota reduzida</option>
+                      <option value="410">410 — Imunidade e não incidência</option>
+                      <option value="510">510 — Diferimento</option>
+                      <option value="515">515 — Diferimento com redução de alíquota</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1">
+                      Classificação Tributária (cClassTrib) *
+                    </label>
+                    <input
+                      type="text"
+                      maxLength={6}
+                      required
+                      placeholder="000001"
+                      value={editando.ibs_cbs_class_trib}
+                      onChange={e => setEditando({ ...editando, ibs_cbs_class_trib: e.target.value.replace(/\D/g, '').slice(0, 6) })}
+                      className="w-full px-3.5 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white font-mono text-xs"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1">
+                      Redução Alíquota IBS/CBS (%)
+                    </label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={editando.reducao_aliquota_ibs_cbs}
+                      onChange={e => setEditando({ ...editando, reducao_aliquota_ibs_cbs: e.target.value })}
+                      className="w-full px-3.5 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white text-xs"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1">
+                      Alíquota IBS UF (%)
+                    </label>
+                    <input
+                      type="number"
+                      step="0.0001"
+                      value={editando.aliquota_ibs}
+                      onChange={e => setEditando({ ...editando, aliquota_ibs: e.target.value })}
+                      className="w-full px-3.5 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white text-xs"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1">
+                      Alíquota IBS Municipal (%)
+                    </label>
+                    <input
+                      type="number"
+                      step="0.0001"
+                      value={editando.aliquota_ibs_mun}
+                      onChange={e => setEditando({ ...editando, aliquota_ibs_mun: e.target.value })}
+                      className="w-full px-3.5 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white text-xs"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1">
+                      Alíquota CBS Federal (%)
+                    </label>
+                    <input
+                      type="number"
+                      step="0.0001"
+                      value={editando.aliquota_cbs}
+                      onChange={e => setEditando({ ...editando, aliquota_cbs: e.target.value })}
+                      className="w-full px-3.5 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white text-xs"
+                    />
+                  </div>
                 </div>
               </div>
 

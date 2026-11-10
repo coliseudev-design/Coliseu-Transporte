@@ -164,9 +164,12 @@ export default function CteWizardPage() {
     valor_receber: '',
     icms_situacao_tributaria: '00',
     aliquota_icms: '12.00',
+    ibs_cbs_cst: '000',
+    ibs_cbs_class_trib: '000001',
     aliquota_ibs: '0.10',
+    aliquota_ibs_mun: '0.00',
     aliquota_cbs: '0.90',
-    codigo_situacao_fiscal: '',
+    codigo_situacao_fiscal: '000001',
     aliquota_fcp: '0.00',
     part_fcp_origem: '50.00',
     part_fcp_destino: '50.00',
@@ -1187,11 +1190,53 @@ export default function CteWizardPage() {
                 <InputFiscal type="number" step="0.01" value={form.aliquota_icms} onChange={v => setCampo('aliquota_icms', v)} />
               </CampoFiscal>
 
-              <CampoFiscal rotulo="IBS — Alíquota (%)" dica="Reforma Tributária — opcional">
+              <CampoFiscal rotulo="IBS / CBS — Situação Tributária (CST)" obrigatorio dica="Reforma Tributária (LC 214/2025)">
+                <SelectFiscal
+                  value={form.ibs_cbs_cst}
+                  onChange={v => {
+                    const classSug =
+                      v === '200'
+                        ? '200002'
+                        : v === '410'
+                        ? '410001'
+                        : v === '510'
+                        ? '510001'
+                        : v === '515'
+                        ? '515001'
+                        : '000001';
+                    setForm(f => ({
+                      ...f,
+                      ibs_cbs_cst: v,
+                      ibs_cbs_class_trib: classSug,
+                      codigo_situacao_fiscal: classSug,
+                    }));
+                  }}
+                  opcoes={[
+                    { valor: '000', rotulo: '000 — Tributação Integral (Padrão 2026)' },
+                    { valor: '200', rotulo: '200 — Alíquota Reduzida' },
+                    { valor: '410', rotulo: '410 — Imunidade / Não Incidência' },
+                    { valor: '510', rotulo: '510 — Diferimento' },
+                    { valor: '515', rotulo: '515 — Diferimento com Redução de Alíquota' }
+                  ]}
+                />
+              </CampoFiscal>
+
+              <CampoFiscal rotulo="Classificação Tributária (cClassTrib)" obrigatorio dica="6 dígitos (ex: 000001)">
+                <InputFiscal
+                  value={form.ibs_cbs_class_trib}
+                  onChange={v => {
+                    const limpo = v.replace(/\D/g, '').slice(0, 6);
+                    setForm(f => ({ ...f, ibs_cbs_class_trib: limpo, codigo_situacao_fiscal: limpo }));
+                  }}
+                  placeholder="000001"
+                />
+              </CampoFiscal>
+
+              <CampoFiscal rotulo="IBS UF — Alíquota (%)" obrigatorio dica="Transição 2026: 0,10%">
                 <InputFiscal type="number" step="0.0001" value={form.aliquota_ibs} onChange={v => setCampo('aliquota_ibs', v)} />
               </CampoFiscal>
 
-              <CampoFiscal rotulo="CBS — Alíquota (%)" dica="Reforma Tributária — opcional">
+              <CampoFiscal rotulo="CBS Federal — Alíquota (%)" obrigatorio dica="Transição 2026: 0,90%">
                 <InputFiscal type="number" step="0.0001" value={form.aliquota_cbs} onChange={v => setCampo('aliquota_cbs', v)} />
               </CampoFiscal>
             </GradeCampos>
@@ -1199,13 +1244,14 @@ export default function CteWizardPage() {
             <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900/40 border border-slate-100 dark:border-slate-800">
               <div className="flex items-center gap-2 mb-2">
                 <ShieldCheck className="w-4 h-4 text-slate-400" />
-                <span className="text-xs font-bold text-slate-600 dark:text-slate-300">Memória de cálculo fiscal</span>
+                <span className="text-xs font-bold text-slate-600 dark:text-slate-300">Memória de cálculo fiscal (ICMS + Reforma Tributária IBS/CBS)</span>
               </div>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
-                <div className="flex justify-between"><span className="text-slate-500">Base ICMS</span><span className="font-bold text-slate-900 dark:text-white">R$ {baseCalculo.toFixed(2)}</span></div>
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-xs">
+                <div className="flex justify-between"><span className="text-slate-500">Base Fiscal</span><span className="font-bold text-slate-900 dark:text-white">R$ {baseCalculo.toFixed(2)}</span></div>
                 <div className="flex justify-between"><span className="text-slate-500">ICMS ({aliquotaIcms}%)</span><span className="font-bold text-slate-900 dark:text-white">R$ {valorIcms.toFixed(2)}</span></div>
-                <div className="flex justify-between"><span className="text-slate-500">IBS ({aliquotaIbs}%)</span><span className="font-bold text-slate-900 dark:text-white">R$ {valorIbs.toFixed(2)}</span></div>
-                <div className="flex justify-between"><span className="text-slate-500">CBS ({aliquotaCbs}%)</span><span className="font-bold text-slate-900 dark:text-white">R$ {valorCbs.toFixed(2)}</span></div>
+                <div className="flex justify-between"><span className="text-slate-500">IBS ({aliquotaIbs}%)</span><span className="font-bold text-emerald-700 dark:text-emerald-400">R$ {valorIbs.toFixed(2)}</span></div>
+                <div className="flex justify-between"><span className="text-slate-500">CBS ({aliquotaCbs}%)</span><span className="font-bold text-emerald-700 dark:text-emerald-400">R$ {valorCbs.toFixed(2)}</span></div>
+                <div className="flex justify-between"><span className="text-slate-500">Total DFe (vTotDFe)</span><span className="font-bold text-brand-600 dark:text-brand-400">R$ {baseCalculo.toFixed(2)}</span></div>
               </div>
             </div>
           </div>
