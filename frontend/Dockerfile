@@ -1,10 +1,11 @@
-# Estágio de Build (Node)
-FROM node:20-alpine AS builder
+# Estágio de Build (Node) — Exclusivo Coliseu Transporte
+FROM node:20-alpine AS transporte_builder
 
 WORKDIR /app
 
 # Força instalação de devDependencies (Vite, TypeScript, Tailwind) para a etapa de compilação
 ENV NODE_ENV=development
+ENV APP_ID=coliseu-transporte
 
 # Copia os arquivos de dependência
 COPY package*.json ./
@@ -19,7 +20,7 @@ COPY . .
 RUN npm run build
 
 
-# Estágio de Serviço (Nginx)
+# Estágio de Serviço (Nginx) — Exclusivo Coliseu Transporte
 FROM nginx:alpine
 
 # Remove o default config
@@ -28,8 +29,8 @@ RUN rm /etc/nginx/conf.d/default.conf
 # Copia o config customizado para SPA
 COPY nginx.conf /etc/nginx/conf.d/
 
-# Copia os arquivos estáticos do builder passado
-COPY --from=builder /app/dist /usr/share/nginx/html
+# Copia os arquivos estáticos do builder exclusivo do Coliseu Transporte
+COPY --from=transporte_builder /app/dist /usr/share/nginx/html
 
 EXPOSE 80
 

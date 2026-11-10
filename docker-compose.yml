@@ -7,6 +7,9 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     container_name: coliseu-transporte-frontend
+    hostname: coliseu-transporte-frontend
+    labels:
+      com.coliseu.app: "coliseu-transporte"
     restart: unless-stopped
     ports:
       - "80"  # Permitir que Coolify mapie dinamicamente via Traefik
