@@ -2533,19 +2533,212 @@ router.get('/relatorios', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────
-// 9. REGRAS FISCAIS (ICMS / FCP / Rateio)
+// 9. REGRAS FISCAIS (ICMS / FCP / Rateio / Reforma Tributária SEFAZ-MS)
 // ─────────────────────────────────────────────────────────────
+
+async function aplicarRegrasPadraoSefazMs(tenantId, { incluirCorredores = false } = {}) {
+    // 1. Regra Interna MS -> MS (Art. 41, III da Lei Estadual MS nº 1.810/1997 e RICMS/MS: ICMS 17%, CFOP 5353, FCP 0%)
+    //    Reforma Tributária 2026 (LC 214/2025 · NT 2025.001 / 2026.002): CST 000, cClassTrib 000001, IBS UF 0,10%, IBS Mun 0,00%, CBS 0,90%
+    const { rows: msInterna } = await db.query(
+        `SELECT id FROM dash_regras_fiscais
+         WHERE tenant_id = $1 AND escopo = 'UF_PAR' AND uf_origem = 'MS' AND uf_destino = 'MS'
+         LIMIT 1`,
+        [tenantId]
+    );
+    if (msInterna.length > 0) {
+        await db.query(
+            `UPDATE dash_regras_fiscais
+             SET situacao_tributaria = '00',
+                 cfop = COALESCE(NULLIF(cfop, ''), '5353'),
+                 aliquota_icms = 17.0000,
+                 percentual_fcp = 0.0000,
+                 ibs_cbs_cst = COALESCE(NULLIF(ibs_cbs_cst, ''), '000'),
+                 ibs_cbs_class_trib = COALESCE(NULLIF(ibs_cbs_class_trib, ''), '000001'),
+                 codigo_situacao_fiscal = COALESCE(NULLIF(codigo_situacao_fiscal, ''), '000001'),
+                 aliquota_ibs = COALESCE(aliquota_ibs, 0.1000),
+                 aliquota_ibs_mun = COALESCE(aliquota_ibs_mun, 0.0000),
+                 aliquota_cbs = COALESCE(aliquota_cbs, 0.9000),
+                 reducao_aliquota_ibs_cbs = COALESCE(reducao_aliquota_ibs_cbs, 0.00),
+                 vigente_de = COALESCE(vigente_de, DATE '2026-01-01'),
+                 ativo = TRUE,
+                 updated_at = NOW()
+             WHERE id = $1`,
+            [msInterna[0].id]
+        );
+    } else {
+        await db.query(
+            `INSERT INTO dash_regras_fiscais (
+                tenant_id, escopo, uf_origem, uf_destino, tipo_servico,
+                situacao_tributaria, cfop, aliquota_icms, percentual_fcp,
+                part_fcp_origem, part_fcp_destino, part_icms_origem, part_icms_destino,
+                is_final_consumer, criterio_rateio, percentual_adicional, ativo,
+                ibs_cbs_cst, ibs_cbs_class_trib, aliquota_ibs, aliquota_ibs_mun, aliquota_cbs,
+                reducao_aliquota_ibs_cbs, diferimento_ibs_cbs, codigo_situacao_fiscal, vigente_de
+             ) VALUES (
+                $1, 'UF_PAR', 'MS', 'MS', '0',
+                '00', '5353', 17.0000, 0.0000,
+                0, 0, 0, 0,
+                FALSE, 'PESO', 0, TRUE,
+                '000', '000001', 0.1000, 0.0000, 0.9000,
+                0.00, 0.00, '000001', DATE '2026-01-01'
+             )`,
+            [tenantId]
+        );
+    }
+
+    // 2. Regra Por UF de Origem MS -> Demais UFs (Resolução do Senado nº 22/1989: ICMS Interestadual Centro-Oeste = 12%, CFOP 6353)
+    const { rows: msOrigem } = await db.query(
+        `SELECT id FROM dash_regras_fiscais
+         WHERE tenant_id = $1 AND escopo = 'UF' AND uf_origem = 'MS' AND (uf_destino IS NULL OR uf_destino = '')
+         LIMIT 1`,
+        [tenantId]
+    );
+    if (msOrigem.length > 0) {
+        await db.query(
+            `UPDATE dash_regras_fiscais
+             SET situacao_tributaria = '00',
+                 cfop = '6353',
+                 aliquota_icms = 12.0000,
+                 percentual_fcp = 0.0000,
+                 ibs_cbs_cst = COALESCE(NULLIF(ibs_cbs_cst, ''), '000'),
+                 ibs_cbs_class_trib = COALESCE(NULLIF(ibs_cbs_class_trib, ''), '000001'),
+                 codigo_situacao_fiscal = COALESCE(NULLIF(codigo_situacao_fiscal, ''), '000001'),
+                 aliquota_ibs = COALESCE(aliquota_ibs, 0.1000),
+                 aliquota_ibs_mun = COALESCE(aliquota_ibs_mun, 0.0000),
+                 aliquota_cbs = COALESCE(aliquota_cbs, 0.9000),
+                 vigente_de = COALESCE(vigente_de, DATE '2026-01-01'),
+                 ativo = TRUE,
+                 updated_at = NOW()
+             WHERE id = $1`,
+            [msOrigem[0].id]
+        );
+    } else {
+        await db.query(
+            `INSERT INTO dash_regras_fiscais (
+                tenant_id, escopo, uf_origem, uf_destino, tipo_servico,
+                situacao_tributaria, cfop, aliquota_icms, percentual_fcp,
+                part_fcp_origem, part_fcp_destino, part_icms_origem, part_icms_destino,
+                is_final_consumer, criterio_rateio, percentual_adicional, ativo,
+                ibs_cbs_cst, ibs_cbs_class_trib, aliquota_ibs, aliquota_ibs_mun, aliquota_cbs,
+                reducao_aliquota_ibs_cbs, diferimento_ibs_cbs, codigo_situacao_fiscal, vigente_de
+             ) VALUES (
+                $1, 'UF', 'MS', NULL, '0',
+                '00', '6353', 12.0000, 0.0000,
+                0, 0, 0, 0,
+                FALSE, 'PESO', 0, TRUE,
+                '000', '000001', 0.1000, 0.0000, 0.9000,
+                0.00, 0.00, '000001', DATE '2026-01-01'
+             )`,
+            [tenantId]
+        );
+    }
+
+    // 3. Regra Global (contingência interestadual padrão: ICMS 12%, CFOP 6353, IBS 0,10% + CBS 0,90%)
+    const { rows: globalRows } = await db.query(
+        `SELECT id FROM dash_regras_fiscais
+         WHERE tenant_id = $1 AND escopo = 'GLOBAL'
+         LIMIT 1`,
+        [tenantId]
+    );
+    if (globalRows.length === 0) {
+        await db.query(
+            `INSERT INTO dash_regras_fiscais (
+                tenant_id, escopo, uf_origem, uf_destino, tipo_servico,
+                situacao_tributaria, cfop, aliquota_icms, percentual_fcp,
+                part_fcp_origem, part_fcp_destino, part_icms_origem, part_icms_destino,
+                is_final_consumer, criterio_rateio, percentual_adicional, ativo,
+                ibs_cbs_cst, ibs_cbs_class_trib, aliquota_ibs, aliquota_ibs_mun, aliquota_cbs,
+                reducao_aliquota_ibs_cbs, diferimento_ibs_cbs, codigo_situacao_fiscal, vigente_de
+             ) VALUES (
+                $1, 'GLOBAL', NULL, NULL, '0',
+                '00', '6353', 12.0000, 0.0000,
+                0, 0, 0, 0,
+                FALSE, 'PESO', 0, TRUE,
+                '000', '000001', 0.1000, 0.0000, 0.9000,
+                0.00, 0.00, '000001', DATE '2026-01-01'
+             )`,
+            [tenantId]
+        );
+    }
+
+    // 4. Corredores interestaduais explícitos a partir do MS (opcional no botão "Aplicar Legislação SEFAZ/MS")
+    if (incluirCorredores) {
+        const ufsDestino = ['SP', 'PR', 'MT', 'GO', 'MG', 'SC', 'RS', 'RJ', 'BA', 'DF'];
+        for (const ufDest of ufsDestino) {
+            const { rows: parRows } = await db.query(
+                `SELECT id FROM dash_regras_fiscais
+                 WHERE tenant_id = $1 AND escopo = 'UF_PAR' AND uf_origem = 'MS' AND uf_destino = $2
+                 LIMIT 1`,
+                [tenantId, ufDest]
+            );
+            if (parRows.length === 0) {
+                await db.query(
+                    `INSERT INTO dash_regras_fiscais (
+                        tenant_id, escopo, uf_origem, uf_destino, tipo_servico,
+                        situacao_tributaria, cfop, aliquota_icms, percentual_fcp,
+                        part_fcp_origem, part_fcp_destino, part_icms_origem, part_icms_destino,
+                        is_final_consumer, criterio_rateio, percentual_adicional, ativo,
+                        ibs_cbs_cst, ibs_cbs_class_trib, aliquota_ibs, aliquota_ibs_mun, aliquota_cbs,
+                        reducao_aliquota_ibs_cbs, diferimento_ibs_cbs, codigo_situacao_fiscal, vigente_de
+                     ) VALUES (
+                        $1, 'UF_PAR', 'MS', $2, '0',
+                        '00', '6353', 12.0000, 0.0000,
+                        0, 0, 0, 0,
+                        FALSE, 'PESO', 0, TRUE,
+                        '000', '000001', 0.1000, 0.0000, 0.9000,
+                        0.00, 0.00, '000001', DATE '2026-01-01'
+                     )`,
+                    [tenantId, ufDest]
+                );
+            }
+        }
+    }
+}
 
 router.get('/regras', async (req, res) => {
     const tenantId = req.tenant.id;
     try {
+        let { rows } = await db.query(
+            `SELECT * FROM dash_regras_fiscais WHERE tenant_id = $1 ORDER BY
+                CASE escopo WHEN 'UF_PAR' THEN 1 WHEN 'UF' THEN 2 ELSE 3 END,
+                uf_origem, uf_destino, id`,
+            [tenantId]
+        );
+        const temRegraMsInterna = rows.some(
+            r => r.escopo === 'UF_PAR' && r.uf_origem === 'MS' && r.uf_destino === 'MS'
+        );
+        if (rows.length === 0 || !temRegraMsInterna) {
+            await aplicarRegrasPadraoSefazMs(tenantId, { incluirCorredores: false });
+            const recarregado = await db.query(
+                `SELECT * FROM dash_regras_fiscais WHERE tenant_id = $1 ORDER BY
+                    CASE escopo WHEN 'UF_PAR' THEN 1 WHEN 'UF' THEN 2 ELSE 3 END,
+                    uf_origem, uf_destino, id`,
+                [tenantId]
+            );
+            rows = recarregado.rows;
+        }
+        return res.json({ success: true, data: rows });
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+});
+
+router.post('/regras/padrao-ms', async (req, res) => {
+    const tenantId = req.tenant.id;
+    const incluirCorredores = req.body?.incluir_corredores !== false;
+    try {
+        await aplicarRegrasPadraoSefazMs(tenantId, { incluirCorredores });
         const { rows } = await db.query(
             `SELECT * FROM dash_regras_fiscais WHERE tenant_id = $1 ORDER BY
                 CASE escopo WHEN 'UF_PAR' THEN 1 WHEN 'UF' THEN 2 ELSE 3 END,
                 uf_origem, uf_destino, id`,
             [tenantId]
         );
-        return res.json({ success: true, data: rows });
+        return res.json({
+            success: true,
+            message: 'Regras fiscais SEFAZ/MS (Lei Estadual MS nº 1.810/1997 + Resolução SF nº 22/1989 + Reforma Tributária LC 214/2025) aplicadas com sucesso.',
+            data: rows
+        });
     } catch (err) {
         return res.status(500).json({ error: err.message });
     }

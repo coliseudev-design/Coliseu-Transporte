@@ -163,7 +163,7 @@ export default function CteWizardPage() {
     valor_total: '',
     valor_receber: '',
     icms_situacao_tributaria: '00',
-    aliquota_icms: '12.00',
+    aliquota_icms: '17.00',
     ibs_cbs_cst: '000',
     ibs_cbs_class_trib: '000001',
     aliquota_ibs: '0.10',
@@ -216,11 +216,69 @@ export default function CteWizardPage() {
   });
   const cargas = cargasData?.data || [];
 
+  const { data: regrasFiscaisData } = useQuery({
+    queryKey: ['regras-fiscais-wizard'],
+    queryFn: async () => (await api.get('/transporte/regras')).data
+  });
+  const regrasFiscais = regrasFiscaisData?.data || [];
+
   const { data: cteExistente } = useQuery({
     queryKey: ['cte-wizard', cteId],
     queryFn: async () => (await api.get(`/transporte/ctes/${cteId}`)).data,
     enabled: !!cteId
   });
+
+  // Aplica automaticamente a regra fiscal parametrizada (UF_PAR > UF > GLOBAL) conforme UF início/fim
+  React.useEffect(() => {
+    if (cteId) return;
+    const ufIni = String(form.uf_inicio || '').toUpperCase().trim();
+    const ufFim = String(form.uf_fim || '').toUpperCase().trim();
+    if (!ufIni) return;
+
+    const ativas = regrasFiscais.filter((r: any) => r.ativo !== false);
+    const regraPar = ufFim
+      ? ativas.find(
+          (r: any) =>
+            r.escopo === 'UF_PAR' &&
+            String(r.uf_origem || '').toUpperCase() === ufIni &&
+            String(r.uf_destino || '').toUpperCase() === ufFim
+        )
+      : null;
+    const regraUf =
+      ufFim && ufIni !== ufFim
+        ? ativas.find(
+            (r: any) =>
+              r.escopo === 'UF' &&
+              String(r.uf_origem || '').toUpperCase() === ufIni &&
+              (!r.uf_destino || String(r.uf_destino).toUpperCase() === ufFim)
+          )
+        : null;
+    const regraGlobal = ativas.find((r: any) => r.escopo === 'GLOBAL');
+    const regra = regraPar || regraUf || regraGlobal;
+
+    const isInternoMs = ufIni === 'MS' && (!ufFim || ufFim === 'MS');
+    const cfopSugerido = regra?.cfop || (ufFim && ufIni !== ufFim ? '6353' : '5353');
+    const aliqSugerida =
+      regra?.aliquota_icms != null
+        ? Number(regra.aliquota_icms).toFixed(2)
+        : isInternoMs
+        ? '17.00'
+        : '12.00';
+
+    setForm(f => ({
+      ...f,
+      cfop: cfopSugerido,
+      icms_situacao_tributaria: regra?.situacao_tributaria || f.icms_situacao_tributaria || '00',
+      aliquota_icms: aliqSugerida,
+      aliquota_fcp: regra?.percentual_fcp != null ? Number(regra.percentual_fcp).toFixed(2) : f.aliquota_fcp,
+      ibs_cbs_cst: regra?.ibs_cbs_cst || f.ibs_cbs_cst || '000',
+      ibs_cbs_class_trib: regra?.ibs_cbs_class_trib || regra?.codigo_situacao_fiscal || f.ibs_cbs_class_trib || '000001',
+      codigo_situacao_fiscal: regra?.ibs_cbs_class_trib || regra?.codigo_situacao_fiscal || f.codigo_situacao_fiscal || '000001',
+      aliquota_ibs: regra?.aliquota_ibs != null ? Number(regra.aliquota_ibs).toFixed(2) : f.aliquota_ibs || '0.10',
+      aliquota_ibs_mun: regra?.aliquota_ibs_mun != null ? Number(regra.aliquota_ibs_mun).toFixed(2) : f.aliquota_ibs_mun || '0.00',
+      aliquota_cbs: regra?.aliquota_cbs != null ? Number(regra.aliquota_cbs).toFixed(2) : f.aliquota_cbs || '0.90',
+    }));
+  }, [form.uf_inicio, form.uf_fim, regrasFiscais.length, cteId]);
 
   // Carrega o emitente padrão e preenche Remetente padrão com o emitente se vazio
   React.useEffect(() => {

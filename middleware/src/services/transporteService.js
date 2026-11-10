@@ -980,10 +980,22 @@ class TransporteService {
       cstRaw.includes('SIMPLES') ||
       (String(emitente.regime_tributario) === '1' && cstRaw === 'SN');
 
+    const isInternoMsComDefaultAntigo =
+      ibgeInicio.uf === 'MS' &&
+      ibgeFim.uf === 'MS' &&
+      (cte.aliquota_icms == null || Number(cte.aliquota_icms) === 12) &&
+      Number(regraFiscal?.aliquota_icms || 17) === 17;
+
     const aliquotaIcms = parseFloat(
-      cte.aliquota_icms ?? regraFiscal?.aliquota_icms ?? emitente.aliquota_icms_padrao ?? 0
+      isInternoMsComDefaultAntigo
+        ? regraFiscal?.aliquota_icms ?? 17
+        : cte.aliquota_icms ?? regraFiscal?.aliquota_icms ?? emitente.aliquota_icms_padrao ?? (ibgeInicio.uf === 'MS' && ibgeFim.uf === 'MS' ? 17 : 12)
     );
-    const valorIcms = parseFloat(cte.valor_icms || (baseCalculo * aliquotaIcms) / 100);
+    const valorIcms = parseFloat(
+      isInternoMsComDefaultAntigo
+        ? (baseCalculo * aliquotaIcms) / 100
+        : cte.valor_icms || (baseCalculo * aliquotaIcms) / 100
+    );
 
     const icmsFields = isSimples
       ? {
@@ -1438,7 +1450,7 @@ class TransporteService {
     // caso a Focus NFe recuse a ref por conflito/processamento, gera uma nova ref automaticamente no bloco de envio.
     let ref = cte.ref || this.gerarRef('CTE', tenantId, cte.id);
 
-    // Salva o payload enviado, campos fiscais IBS/CBS calculados e marca como PROCESSANDO
+    // Salva o payload enviado, campos fiscais ICMS + IBS/CBS calculados e marca como PROCESSANDO
     await db.query(
       `UPDATE dash_ctes SET
           ref = $1,
@@ -1451,6 +1463,8 @@ class TransporteService {
           valor_ibs = $9,
           valor_cbs = $10,
           valor_total_dfe = $11,
+          aliquota_icms = $12,
+          valor_icms = $13,
           status = 'PROCESSANDO',
           updated_at = NOW()
        WHERE id = $3`,
@@ -1466,6 +1480,8 @@ class TransporteService {
         valorIbsTotalCalc,
         valorCbsCalc,
         valorTotalDfeCalc,
+        aliquotaIcms,
+        valorIcms,
       ]
     );
 

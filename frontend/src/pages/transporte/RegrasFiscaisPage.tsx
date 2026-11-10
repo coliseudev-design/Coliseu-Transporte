@@ -58,8 +58,8 @@ interface FormRegra {
 }
 
 const VAZIO: FormRegra = {
-  escopo: 'GLOBAL', uf_origem: '', uf_destino: '', tipo_servico: '0',
-  situacao_tributaria: '00', cfop: '5353', aliquota_icms: '12.00',
+  escopo: 'UF_PAR', uf_origem: 'MS', uf_destino: 'MS', tipo_servico: '0',
+  situacao_tributaria: '00', cfop: '5353', aliquota_icms: '17.00',
   percentual_fcp: '0.00', criterio_rateio: 'PESO',
   valor_minimo: '', valor_maximo: '', percentual_adicional: '0',
   is_final_consumer: false, ativo: true,
@@ -71,6 +71,7 @@ const VAZIO: FormRegra = {
 export default function RegrasFiscaisPage() {
   const [editando, setEditando] = useState<FormRegra | null>(null);
   const [salvando, setSalvando] = useState(false);
+  const [aplicandoMs, setAplicandoMs] = useState(false);
 
   const { data, isLoading, refetch } = useQuery({
     queryKey: ['regras-fiscais'],
@@ -78,6 +79,19 @@ export default function RegrasFiscaisPage() {
   });
 
   const regras: Regra[] = data?.data || [];
+
+  const handleAplicarLegislacaoMs = async () => {
+    setAplicandoMs(true);
+    try {
+      const resp = await api.post('/transporte/regras/padrao-ms', { incluir_corredores: true });
+      await refetch();
+      alert(resp.data?.message || 'Regras fiscais SEFAZ/MS aplicadas com sucesso!');
+    } catch (err: any) {
+      alert('Erro ao aplicar legislação SEFAZ/MS: ' + (err.response?.data?.error || err.message));
+    } finally {
+      setAplicandoMs(false);
+    }
+  };
 
   const handleSalvar = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -128,21 +142,34 @@ export default function RegrasFiscaisPage() {
             Alíquotas de ICMS, Reforma Tributária (IBS / CBS — LC 214/2025), FCP, partilha e critério de rateio do frete. Parametrizável sem deploy.
           </p>
         </div>
-        <button
-          onClick={() => setEditando({ ...VAZIO })}
-          className="inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold text-white bg-brand-600 hover:bg-brand-700 shadow-sm transition-all"
-        >
-          <Plus className="w-4 h-4" />
-          Nova Regra
-        </button>
+        <div className="flex flex-wrap items-center gap-2.5">
+          <button
+            type="button"
+            onClick={handleAplicarLegislacaoMs}
+            disabled={aplicandoMs}
+            className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-xs font-semibold text-emerald-800 dark:text-emerald-200 bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/40 dark:hover:bg-emerald-900/50 border border-emerald-200 dark:border-emerald-800/60 shadow-sm transition-all disabled:opacity-50"
+          >
+            <Scale className="w-4 h-4 text-emerald-600" />
+            {aplicandoMs ? 'Aplicando SEFAZ/MS...' : 'Aplicar Legislação SEFAZ/MS'}
+          </button>
+          <button
+            onClick={() => setEditando({ ...VAZIO })}
+            className="inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold text-white bg-brand-600 hover:bg-brand-700 shadow-sm transition-all"
+          >
+            <Plus className="w-4 h-4" />
+            Nova Regra
+          </button>
+        </div>
       </div>
 
       <div className="flex items-start gap-3 p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/50">
         <Info className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
         <p className="text-xs text-amber-900 dark:text-amber-200">
-          A regra mais específica sempre prevalece: <strong>UF Origem × Destino</strong> tem prioridade sobre
-          <strong> Por UF</strong>, que tem prioridade sobre <strong>Global</strong>. Alterar alíquotas aqui
-          evita qualquer alteração de código.
+          <strong>Legislação SEFAZ/MS vigente:</strong> Operações internas no Mato Grosso do Sul (<strong>MS → MS</strong>) utilizam
+          <strong> CFOP 5353</strong>, <strong>CST 00</strong> e <strong>ICMS 17,00%</strong> (Art. 41, III da Lei Estadual MS nº 1.810/1997, FCP 0,00%).
+          Operações interestaduais iniciadas no MS (<strong>MS → Outra UF</strong>) utilizam <strong>CFOP 6353</strong> e
+          <strong> ICMS 12,00%</strong> (Resolução SF nº 22/1989). Na Reforma Tributária 2026 (LC 214/2025): <strong>CST 000</strong>,
+          <strong> cClassTrib 000001</strong>, <strong>IBS UF 0,10%</strong> e <strong>CBS 0,90%</strong>.
         </p>
       </div>
 
@@ -252,7 +279,63 @@ export default function RegrasFiscaisPage() {
               {editando.id ? `Editar Regra Fiscal #${editando.id}` : 'Nova Regra Fiscal'}
             </h2>
 
-            <form onSubmit={handleSalvar} className="space-y-4 mt-5 text-sm">
+            <div className="mt-3 p-3 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-700/70">
+              <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-2">
+                Preenchimento Rápido — Legislação Vigente SEFAZ/MS
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() =>
+                    setEditando({
+                      ...editando,
+                      escopo: 'UF_PAR',
+                      uf_origem: 'MS',
+                      uf_destino: 'MS',
+                      situacao_tributaria: '00',
+                      cfop: '5353',
+                      aliquota_icms: '17.00',
+                      percentual_fcp: '0.00',
+                      ibs_cbs_cst: '000',
+                      ibs_cbs_class_trib: '000001',
+                      aliquota_ibs: '0.10',
+                      aliquota_ibs_mun: '0.00',
+                      aliquota_cbs: '0.90',
+                      reducao_aliquota_ibs_cbs: '0.00',
+                    })
+                  }
+                  className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-brand-50 hover:bg-brand-100 text-brand-700 border border-brand-200 transition-all"
+                >
+                  MS Interno (MS → MS · CFOP 5353 · ICMS 17%)
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setEditando({
+                      ...editando,
+                      escopo: 'UF',
+                      uf_origem: 'MS',
+                      uf_destino: '',
+                      situacao_tributaria: '00',
+                      cfop: '6353',
+                      aliquota_icms: '12.00',
+                      percentual_fcp: '0.00',
+                      ibs_cbs_cst: '000',
+                      ibs_cbs_class_trib: '000001',
+                      aliquota_ibs: '0.10',
+                      aliquota_ibs_mun: '0.00',
+                      aliquota_cbs: '0.90',
+                      reducao_aliquota_ibs_cbs: '0.00',
+                    })
+                  }
+                  className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 transition-all"
+                >
+                  MS Interestadual (MS → Outra UF · CFOP 6353 · ICMS 12%)
+                </button>
+              </div>
+            </div>
+
+            <form onSubmit={handleSalvar} className="space-y-4 mt-4 text-sm">
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div>
                   <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1">Escopo *</label>
