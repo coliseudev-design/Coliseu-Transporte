@@ -68,6 +68,65 @@ function formatarDataHoraSefaz(uf = 'MS') {
   return `${adjusted.toISOString().slice(0, 19)}${offsetStr}`;
 }
 
+/**
+ * Converte qualquer valor de data (objeto Date do PostgreSQL, ISO string ou DD/MM/YYYY)
+ * estritamente para o formato YYYY-MM-DD exigido pelo XSD da SEFAZ (TData).
+ */
+function formatarDataYmd(valor) {
+  if (!valor) return null;
+  if (valor instanceof Date) {
+    if (isNaN(valor.getTime())) return null;
+    const isUtcMidnight =
+      valor.getUTCHours() === 0 && valor.getUTCMinutes() === 0 && valor.getUTCSeconds() === 0;
+    const y = isUtcMidnight ? valor.getUTCFullYear() : valor.getFullYear();
+    const m = String((isUtcMidnight ? valor.getUTCMonth() : valor.getMonth()) + 1).padStart(2, '0');
+    const d = String(isUtcMidnight ? valor.getUTCDate() : valor.getDate()).padStart(2, '0');
+    const out = `${y}-${m}-${d}`;
+    return /^20\d{2}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(out) ? out : null;
+  }
+  const s = String(valor).trim();
+  const isoMatch = s.match(/^(20\d{2})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])/);
+  if (isoMatch) return `${isoMatch[1]}-${isoMatch[2]}-${isoMatch[3]}`;
+  const brMatch = s.match(/^(0[1-9]|[12]\d|3[01])\/(0[1-9]|1[0-2])\/(20\d{2})/);
+  if (brMatch) return `${brMatch[3]}-${brMatch[2]}-${brMatch[1]}`;
+  const parsed = new Date(s);
+  if (!isNaN(parsed.getTime())) {
+    const y = parsed.getFullYear();
+    const m = String(parsed.getMonth() + 1).padStart(2, '0');
+    const d = String(parsed.getDate()).padStart(2, '0');
+    const out = `${y}-${m}-${d}`;
+    return /^20\d{2}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(out) ? out : null;
+  }
+  return null;
+}
+
+/**
+ * Calcula o Dígito Verificador Módulo 11 (44º dígito) de uma chave de acesso SEFAZ de 43 dígitos.
+ */
+function calcularDvChaveSefaz(base43) {
+  const d = String(base43 || '').replace(/\D/g, '');
+  if (d.length !== 43) return null;
+  let peso = 2;
+  let soma = 0;
+  for (let i = 42; i >= 0; i--) {
+    soma += Number(d[i]) * peso;
+    peso = peso === 9 ? 2 : peso + 1;
+  }
+  const resto = soma % 11;
+  return String(resto === 0 || resto === 1 ? 0 : 11 - resto);
+}
+
+/**
+ * Em homologação, garante que uma chave de 44 dígitos informada manualmente para teste tenha DV Módulo 11 válido.
+ */
+function normalizarChaveDfeParaAmbiente(chaveRaw, ambiente = 'homologacao') {
+  const ch = String(chaveRaw || '').replace(/\D/g, '');
+  if (ch.length !== 44) return ch;
+  if (ambiente === 'producao') return ch;
+  const dvCalculado = calcularDvChaveSefaz(ch.slice(0, 43));
+  return dvCalculado ? `${ch.slice(0, 43)}${dvCalculado}` : ch;
+}
+
 const KNOWN_ANTT_FISCAL_REGISTRY = {
   '03272053000150': {
     cnpj: '03272053000150',
@@ -886,17 +945,31 @@ class TransporteService {
       icmsFields.icms_valor_partilha_uf_inicio = '0.00';
     }
 
+    const dataEmissaoIso = formatarDataHoraSefaz(emitente.uf || ibgeEnvio.uf);
+    const dataEmissaoYmd = dataEmissaoIso.slice(0, 10);
+    const rawDataPrevista = formatarDataYmd(cte.data_prevista_entrega);
+    const dataPrevistaLimpa =
+      rawDataPrevista && rawDataPrevista < dataEmissaoYmd
+        ? dataEmissaoYmd
+        : rawDataPrevista;
+
     // NF-es e Outros Documentos vinculados (tabela dash_cte_cargas + documentos_json do wizard)
     const chavesNfeSet = new Set();
     const outrosDocsList = [];
     for (const c of cargas) {
-      const ch = digitsOnly(c.chave_nfe || c.chave_acesso);
+      const ch = normalizarChaveDfeParaAmbiente(
+        c.chave_nfe || c.chave_acesso,
+        emitente.focus_ambiente
+      );
       if (ch.length === 44) chavesNfeSet.add(ch);
     }
     if (Array.isArray(docsManuais)) {
       for (const d of docsManuais) {
         const tipoDocItem = String(d?.tipo || 'NFE').toUpperCase();
-        const ch = digitsOnly(d?.chave || d?.chave_nfe || d?.chave_acesso);
+        const ch = normalizarChaveDfeParaAmbiente(
+          d?.chave || d?.chave_nfe || d?.chave_acesso,
+          emitente.focus_ambiente
+        );
         if (tipoDocItem === 'OUTRO' || tipoDocItem === 'DECLARACAO' || tipoDocItem === '00' || tipoDocItem === '99') {
           outrosDocsList.push({
             tipo_documento: tipoDocItem === '99' ? '99' : '00',
@@ -910,9 +983,6 @@ class TransporteService {
         }
       }
     }
-    const dataPrevistaLimpa = cte.data_prevista_entrega
-      ? String(cte.data_prevista_entrega).slice(0, 10)
-      : null;
     const nfesPayload = Array.from(chavesNfeSet).map((chave_nfe) => ({
       chave_nfe,
       ...(dataPrevistaLimpa ? { data_prevista: dataPrevistaLimpa } : {}),
@@ -978,8 +1048,6 @@ class TransporteService {
       }
     }
 
-    const dataEmissaoIso = formatarDataHoraSefaz(emitente.uf || ibgeEnvio.uf);
-    const dataEmissaoYmd = dataEmissaoIso.slice(0, 10);
     const outrosDocumentosPayload = outrosDocsList.map((od) => ({
       ...od,
       data_emissao: dataEmissaoYmd,
@@ -1002,7 +1070,7 @@ class TransporteService {
       tipo_documento: finalidadeCte,
       modal: modalCodigo,
       tipo_servico: isCteOs ? (tipoServico === '0' ? '6' : tipoServico) : tipoServico,
-      ...(Number(cte.numero) > 0 && (cte.serie || emitente.serie_cte)
+      ...(cte.status !== 'REJEITADO' && Number(cte.numero) > 0 && (cte.serie || emitente.serie_cte)
         ? { serie: Number(cte.serie || emitente.serie_cte), numero: Number(cte.numero) }
         : {}),
       ...(cte.modelo_cte === 'globalizado' ? { indicador_globalizado: '1' } : {}),
@@ -1172,9 +1240,9 @@ class TransporteService {
       }
     }
 
-    // Se o CT-e estava REJEITADO anteriormente, gera uma nova ref limpa para evitar conflito na Focus NFe
+    // Gera sempre uma nova ref limpa ao transmitir rascunho ou reenviar rejeitado, evitando cache de erro 422/erro_autorizacao na Focus NFe
     let ref =
-      cte.ref && cte.status !== 'REJEITADO'
+      cte.ref && cte.status === 'AUTORIZADO'
         ? cte.ref
         : this.gerarRef('CTE', tenantId, cte.id);
 
@@ -1208,43 +1276,13 @@ class TransporteService {
       return ultimo;
     };
 
-    let resFocus;
-    try {
-      resFocus = isCteOs
-        ? await client.emitirCteOs(ref, payload)
-        : await client.emitirCte(ref, payload);
-    } catch (emitErr) {
-      await db
-        .query(
-          `UPDATE dash_ctes SET status = 'REJEITADO', mensagem_sefaz = $1, updated_at = NOW() WHERE id = $2`,
-          [String(emitErr.message || 'Erro de validação Focus NFe').slice(0, 500), cteId]
-        )
-        .catch(() => {});
-      throw emitErr;
-    }
-
-    if (resFocus?.status === 'processando_autorizacao') {
-      const consultado = await aguardarRetornoCte(ref);
-      if (consultado) resFocus = consultado;
-    }
-
-    // Em HOMOLOGAÇÃO: se a SEFAZ rejeitar com 661/662/652/216 (NF-e de teste ou de produção inexistente na base de homologação da SEFAZ),
-    // reenvia automaticamente em homologação como Declaração/Outros Documentos (tpDoc=00) para concluir a homologação do CT-e.
-    if (
-      client.ambiente === 'homologacao' &&
-      !isCteOs &&
-      Array.isArray(payload.nfes) &&
-      payload.nfes.length > 0 &&
-      mapFocusStatusToDb(resFocus?.status, 'PROCESSANDO') === 'REJEITADO' &&
-      (['661', '662', '652', '216', '526'].includes(String(resFocus?.status_sefaz || '').trim()) ||
-        /inexistente na base|chave de acesso da nf-e/i.test(String(resFocus?.mensagem_sefaz || '')))
-    ) {
-      const chOriginal = payload.nfes[0]?.chave_nfe || '';
+    const montarPayloadHomologFallback = () => {
+      const chOriginal = payload.nfes?.[0]?.chave_nfe || '';
       const numDocFallback =
         primeiraCarga?.numero ||
         docsManuais?.[0]?.numero ||
         (chOriginal.length === 44 ? String(parseInt(chOriginal.slice(25, 34), 10) || 1) : '1');
-      const payloadHomologFallback = {
+      const fallback = {
         ...payload,
         data_emissao: formatarDataHoraSefaz(emitente.uf || ibgeEnvio.uf),
         outros_documentos: [
@@ -1264,8 +1302,72 @@ class TransporteService {
           .join(' | ')
           .slice(0, 2000),
       };
-      delete payloadHomologFallback.nfes;
+      delete fallback.nfes;
+      delete fallback.numero;
+      return fallback;
+    };
 
+    let resFocus;
+    try {
+      resFocus = isCteOs
+        ? await client.emitirCteOs(ref, payload)
+        : await client.emitirCte(ref, payload);
+    } catch (emitErr) {
+      // Se em HOMOLOGAÇÃO a Focus NFe recusar a chave de NF-e de teste (ex: 422 em chave_nfe/infNFe), faz fallback para Declaração (tpDoc=00)
+      if (
+        client.ambiente === 'homologacao' &&
+        !isCteOs &&
+        Array.isArray(payload.nfes) &&
+        payload.nfes.length > 0 &&
+        /chave|nfe|infnfe/i.test(String(emitErr.message || ''))
+      ) {
+        const payloadHomologFallback = montarPayloadHomologFallback();
+        ref = this.gerarRef('CTE', tenantId, `${cte.id}_H`);
+        try {
+          await db.query(
+            `UPDATE dash_ctes SET ref = $1, payload_focus = $2, updated_at = NOW() WHERE id = $3`,
+            [ref, JSON.stringify(payloadHomologFallback), cteId]
+          );
+          resFocus = await client.emitirCte(ref, payloadHomologFallback);
+        } catch (fallbackErr) {
+          await db
+            .query(
+              `UPDATE dash_ctes SET status = 'REJEITADO', mensagem_sefaz = $1, updated_at = NOW() WHERE id = $2`,
+              [String(fallbackErr.message || 'Erro de validação Focus NFe').slice(0, 500), cteId]
+            )
+            .catch(() => {});
+          throw fallbackErr;
+        }
+      } else {
+        await db
+          .query(
+            `UPDATE dash_ctes SET status = 'REJEITADO', mensagem_sefaz = $1, updated_at = NOW() WHERE id = $2`,
+            [String(emitErr.message || 'Erro de validação Focus NFe').slice(0, 500), cteId]
+          )
+          .catch(() => {});
+        throw emitErr;
+      }
+    }
+
+    if (resFocus?.status === 'processando_autorizacao') {
+      const consultado = await aguardarRetornoCte(ref);
+      if (consultado) resFocus = consultado;
+    }
+
+    // Em HOMOLOGAÇÃO: se a SEFAZ rejeitar com 661/662/652/216/236/616/526 (NF-e de teste ou de produção inexistente na base de homologação da SEFAZ),
+    // reenvia automaticamente em homologação como Declaração/Outros Documentos (tpDoc=00) para concluir a homologação do CT-e.
+    if (
+      client.ambiente === 'homologacao' &&
+      !isCteOs &&
+      Array.isArray(payload.nfes) &&
+      payload.nfes.length > 0 &&
+      mapFocusStatusToDb(resFocus?.status, 'PROCESSANDO') === 'REJEITADO' &&
+      (['661', '662', '652', '216', '236', '616', '526'].includes(
+        String(resFocus?.status_sefaz || '').trim()
+      ) ||
+        /inexistente na base|chave de acesso|nf-e/i.test(String(resFocus?.mensagem_sefaz || '')))
+    ) {
+      const payloadHomologFallback = montarPayloadHomologFallback();
       ref = this.gerarRef('CTE', tenantId, `${cte.id}_H`);
       try {
         await db.query(
@@ -1842,7 +1944,7 @@ class TransporteService {
       tipo_transporte: String(mdfe.tipo_transporte || '1'),
       modal: '1',
       data_emissao: formatarDataHoraSefaz(emitente.uf || ufInicio),
-      ...(Number(mdfe.numero) > 0 && (mdfe.serie || emitente.serie_mdfe)
+      ...(mdfe.status !== 'REJEITADO' && Number(mdfe.numero) > 0 && (mdfe.serie || emitente.serie_mdfe)
         ? { serie: Number(mdfe.serie || emitente.serie_mdfe), numero: Number(mdfe.numero) }
         : {}),
       uf_inicio: ufInicio,
@@ -1941,7 +2043,7 @@ class TransporteService {
     };
 
     const ref =
-      mdfe.ref && mdfe.status !== 'REJEITADO'
+      mdfe.ref && mdfe.status === 'AUTORIZADO'
         ? mdfe.ref
         : this.gerarRef('MDFE', tenantId, mdfe.id);
 
@@ -2142,7 +2244,7 @@ class TransporteService {
     );
 
     const resFocus = await client.encerrarMdfe(mdfe.ref, {
-      data: dataEncerramento || data || new Date().toISOString().split('T')[0],
+      data: formatarDataYmd(dataEncerramento || data) || new Date().toISOString().split('T')[0],
       sigla_uf: ibgeEnc.uf,
       nome_municipio: ibgeEnc.nome,
       codigo_municipio: ibgeEnc.codigo,

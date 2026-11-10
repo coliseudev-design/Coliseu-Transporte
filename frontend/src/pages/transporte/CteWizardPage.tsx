@@ -261,10 +261,19 @@ export default function CteWizardPage() {
           if (c[k] !== undefined && c[k] !== null) acc[k] = c[k];
           return acc;
         }, {} as any),
+        data_prevista_entrega: c.data_prevista_entrega
+          ? String(c.data_prevista_entrega).slice(0, 10)
+          : f.data_prevista_entrega,
+        valor_total_carga:
+          c.valor_total_carga != null
+            ? String(c.valor_total_carga)
+            : c.valor_carga != null
+            ? String(c.valor_carga)
+            : f.valor_total_carga,
         remetente_dados: c.remetente_dados || f.remetente_dados,
         destinatario_dados: c.destinatario_dados || f.destinatario_dados,
         componentes_valor: c.componentes_valor || [],
-        documentos: c.documentos || []
+        documentos: c.documentos || c.documentos_json || []
       }));
     }
   }, [cteExistente]);
