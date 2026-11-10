@@ -1446,9 +1446,12 @@ class TransporteService {
       }
     }
 
-    // Reaproveita a mesma referência (ref) se o documento estiver em RASCUNHO ou REJEITADO (conforme boas práticas Focus NFe v2 para manter numeração);
-    // caso a Focus NFe recuse a ref por conflito/processamento, gera uma nova ref automaticamente no bloco de envio.
-    let ref = cte.ref || this.gerarRef('CTE', tenantId, cte.id);
+    // Em homologação, se o documento estava REJEITADO ou preso em PROCESSANDO, gera uma nova ref limpa para garantir
+    // que a Focus NFe monte um novo XML 4.00 completo (com <IBSCBS>, <vTotDFe> e alíquota SEFAZ/MS atualizada).
+    let ref =
+      (emitente.focus_ambiente !== 'producao' && (cte.status === 'REJEITADO' || cte.status === 'PROCESSANDO')) || !cte.ref
+        ? this.gerarRef('CTE', tenantId, cte.id)
+        : cte.ref;
 
     // Salva o payload enviado, campos fiscais ICMS + IBS/CBS calculados e marca como PROCESSANDO
     await db.query(

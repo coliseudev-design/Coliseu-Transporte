@@ -234,30 +234,29 @@ export default function CteWizardPage() {
     const ufIni = String(form.uf_inicio || '').toUpperCase().trim();
     const ufFim = String(form.uf_fim || '').toUpperCase().trim();
     if (!ufIni) return;
+    const ufFimEfetiva = ufFim || ufIni;
 
     const ativas = regrasFiscais.filter((r: any) => r.ativo !== false);
-    const regraPar = ufFim
-      ? ativas.find(
-          (r: any) =>
-            r.escopo === 'UF_PAR' &&
-            String(r.uf_origem || '').toUpperCase() === ufIni &&
-            String(r.uf_destino || '').toUpperCase() === ufFim
-        )
-      : null;
+    const regraPar = ativas.find(
+      (r: any) =>
+        r.escopo === 'UF_PAR' &&
+        String(r.uf_origem || '').toUpperCase() === ufIni &&
+        String(r.uf_destino || '').toUpperCase() === ufFimEfetiva
+    );
     const regraUf =
-      ufFim && ufIni !== ufFim
+      ufIni !== ufFimEfetiva
         ? ativas.find(
             (r: any) =>
               r.escopo === 'UF' &&
               String(r.uf_origem || '').toUpperCase() === ufIni &&
-              (!r.uf_destino || String(r.uf_destino).toUpperCase() === ufFim)
+              (!r.uf_destino || String(r.uf_destino).toUpperCase() === ufFimEfetiva)
           )
         : null;
     const regraGlobal = ativas.find((r: any) => r.escopo === 'GLOBAL');
     const regra = regraPar || regraUf || regraGlobal;
 
-    const isInternoMs = ufIni === 'MS' && (!ufFim || ufFim === 'MS');
-    const cfopSugerido = regra?.cfop || (ufFim && ufIni !== ufFim ? '6353' : '5353');
+    const isInternoMs = ufIni === 'MS' && ufFimEfetiva === 'MS';
+    const cfopSugerido = regra?.cfop || (ufIni !== ufFimEfetiva ? '6353' : '5353');
     const aliqSugerida =
       regra?.aliquota_icms != null
         ? Number(regra.aliquota_icms).toFixed(2)
@@ -284,13 +283,20 @@ export default function CteWizardPage() {
   React.useEffect(() => {
     if (emitentes.length > 0 && !form.emitente_id) {
       const em = emitentes[0];
+      const ufEm = String(em.uf || 'MS').toUpperCase();
+      const aliqEm =
+        ufEm === 'MS' && Number(em.aliquota_icms_padrao ?? 12) === 12
+          ? '17.00'
+          : em.aliquota_icms_padrao != null
+          ? Number(em.aliquota_icms_padrao).toFixed(2)
+          : '17.00';
       setForm(f => ({
         ...f,
         emitente_id: String(em.id),
         rntrc: f.rntrc || em.rntrc || '',
-        cfop: em.cfop_padrao_cte || f.cfop,
+        cfop: em.cfop_padrao_cte || f.cfop || '5353',
         natureza_operacao: em.natureza_padrao_cte || f.natureza_operacao,
-        aliquota_icms: em.aliquota_icms_padrao != null ? String(em.aliquota_icms_padrao) : f.aliquota_icms,
+        aliquota_icms: aliqEm,
         codigo_municipio_inicio: f.codigo_municipio_inicio || em.codigo_municipio || '',
         municipio_inicio: f.municipio_inicio || em.municipio || '',
         uf_inicio: f.uf_inicio || em.uf || '',
@@ -440,27 +446,6 @@ export default function CteWizardPage() {
   };
 
   // ── Ações ──
-  const montarPayload = () => {
-    const cargasIds = form.documentos.map(d => d.carga_id).filter(Boolean);
-    return {
-      ...form,
-      emitente_id: form.emitente_id ? Number(form.emitente_id) : undefined,
-      componentes_valor: form.componentes_valor.map(c => ({ nome: c.nome, valor: parseFloat(c.valor || '0') || 0 })),
-      valor_total: baseCalculo,
-      valor_receber: parseFloat(form.valor_receber || '0') || totalComponentes,
-      base_icms: baseCalculo,
-      valor_icms: valorIcms,
-      valor_carga: parseFloat(form.valor_total_carga || '0') || 0,
-      peso_bruto: parseFloat(form.peso_bruto || '0') || 0,
-      quantidade_volumes: parseFloat(form.quantidade_volumes || '1') || 1,
-      remetente_dados: form.remetente_dados,
-      destinatario_dados: form.destinatario_dados,
-      modal_os_dados: form.modelo === '67' ? { taf: form.taf, numero_registro_estadual: form.numero_registro_estadual } : undefined,
-      documentos: form.documentos,
-      cargas_ids: cargasIds
-    };
-  };
-
   const emitenteSelecionado = useMemo(
     () => emitentes.find((x: any) => String(x.id) === String(form.emitente_id)) || emitentes[0] || null,
     [emitentes, form.emitente_id]
@@ -470,49 +455,53 @@ export default function CteWizardPage() {
       ? 'producao'
       : 'homologacao';
 
-  const preencherTesteHomologacao = () => {
+  const construirFormTesteHomologacao = (f: typeof form) => {
     const em = emitenteSelecionado || {};
     const amanha = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
-    setForm(f => ({
+    return {
       ...f,
       emitente_id: String(em.id || f.emitente_id || ''),
       cfop: '5353',
       natureza_operacao: em.natureza_padrao_cte || 'PRESTACAO DE SERVICO DE TRANSPORTE',
-      codigo_municipio_inicio: em.codigo_municipio || '5003702',
-      municipio_inicio: em.municipio || 'Dourados',
-      uf_inicio: em.uf || 'MS',
-      codigo_municipio_fim: '5002704',
-      municipio_fim: 'Campo Grande',
-      uf_fim: 'MS',
-      tomador: '0',
-      remetente_dados: {
-        documento: em.cnpj || '03272053000150',
-        razao_social: em.razao_social || 'PANTANAL COMERCIO DE ALIMENTOS LTDA',
-        nome_fantasia: em.nome_fantasia || 'PANTANAL',
-        inscricao_estadual: em.inscricao_estadual || '283100630',
-        logradouro: em.logradouro || 'RUA ARGENTINA',
-        numero: em.numero || '715',
-        bairro: em.bairro || 'PARQUE DAS NACOES',
-        cep: em.cep || '79841270',
-        municipio: em.municipio || 'Dourados',
-        codigo_municipio: em.codigo_municipio || '5003702',
-        uf: em.uf || 'MS',
-        telefone: em.telefone || '6734164605'
-      },
-      destinatario_dados: {
-        documento: '11144477735',
-        razao_social: 'CT-E EMITIDO EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL',
-        nome_fantasia: 'DESTINATARIO HOMOLOGACAO',
-        inscricao_estadual: 'ISENTO',
-        logradouro: 'AVENIDA AFONSO PENA',
-        numero: '1000',
-        bairro: 'CENTRO',
-        cep: '79002070',
-        municipio: 'Campo Grande',
-        codigo_municipio: '5002704',
-        uf: 'MS',
-        telefone: '6734164605'
-      },
+      codigo_municipio_inicio: f.codigo_municipio_inicio || em.codigo_municipio || '5003702',
+      municipio_inicio: f.municipio_inicio || em.municipio || 'Dourados',
+      uf_inicio: f.uf_inicio || em.uf || 'MS',
+      codigo_municipio_fim: f.codigo_municipio_fim || '5002704',
+      municipio_fim: f.municipio_fim || 'Campo Grande',
+      uf_fim: f.uf_fim || 'MS',
+      tomador: f.tomador || '0',
+      remetente_dados: f.remetente_dados?.documento
+        ? f.remetente_dados
+        : {
+            documento: em.cnpj || '03272053000150',
+            razao_social: em.razao_social || 'PANTANAL COMERCIO DE ALIMENTOS LTDA',
+            nome_fantasia: em.nome_fantasia || 'PANTANAL',
+            inscricao_estadual: em.inscricao_estadual || '283100630',
+            logradouro: em.logradouro || 'RUA ARGENTINA',
+            numero: em.numero || '715',
+            bairro: em.bairro || 'PARQUE DAS NACOES',
+            cep: em.cep || '79841270',
+            municipio: em.municipio || 'Dourados',
+            codigo_municipio: em.codigo_municipio || '5003702',
+            uf: em.uf || 'MS',
+            telefone: em.telefone || '6734164605'
+          },
+      destinatario_dados: f.destinatario_dados?.documento
+        ? f.destinatario_dados
+        : {
+            documento: '11144477735',
+            razao_social: 'CT-E EMITIDO EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL',
+            nome_fantasia: 'DESTINATARIO HOMOLOGACAO',
+            inscricao_estadual: 'ISENTO',
+            logradouro: 'AVENIDA AFONSO PENA',
+            numero: '1000',
+            bairro: 'CENTRO',
+            cep: '79002070',
+            municipio: 'Campo Grande',
+            codigo_municipio: '5002704',
+            uf: 'MS',
+            telefone: '6734164605'
+          },
       componentes_valor:
         f.componentes_valor.length > 0 && parseFloat(f.componentes_valor[0]?.valor || '0') > 0
           ? f.componentes_valor
@@ -520,7 +509,13 @@ export default function CteWizardPage() {
       valor_total: f.valor_total && parseFloat(f.valor_total) > 0 ? f.valor_total : '150.00',
       valor_receber: f.valor_receber && parseFloat(f.valor_receber) > 0 ? f.valor_receber : '150.00',
       icms_situacao_tributaria: '00',
-      aliquota_icms: em.aliquota_icms_padrao != null ? String(em.aliquota_icms_padrao) : '12.00',
+      aliquota_icms: '17.00',
+      ibs_cbs_cst: f.ibs_cbs_cst || '000',
+      ibs_cbs_class_trib: f.ibs_cbs_class_trib || '000001',
+      codigo_situacao_fiscal: f.codigo_situacao_fiscal || '000001',
+      aliquota_ibs: f.aliquota_ibs || '0.10',
+      aliquota_ibs_mun: f.aliquota_ibs_mun || '0.00',
+      aliquota_cbs: f.aliquota_cbs || '0.90',
       valor_total_carga: f.valor_total_carga && parseFloat(f.valor_total_carga) > 0 ? f.valor_total_carga : '1000.00',
       peso_bruto: f.peso_bruto && parseFloat(f.peso_bruto) > 0 ? f.peso_bruto : '100',
       quantidade_volumes: f.quantidade_volumes || '1',
@@ -540,7 +535,39 @@ export default function CteWizardPage() {
             ],
       rntrc: f.rntrc || em.rntrc || '04755410',
       observacoes: f.observacoes || 'CT-E EMITIDO EM AMBIENTE DE HOMOLOGACAO SEFAZ - SEM VALOR FISCAL'
-    }));
+    };
+  };
+
+  const montarPayload = (formBase = form) => {
+    const cargasIds = formBase.documentos.map(d => d.carga_id).filter(Boolean);
+    const totalComp = formBase.componentes_valor.reduce(
+      (acc, c) => acc + (parseFloat(c.valor || '0') || 0),
+      0
+    );
+    const baseCalc = parseFloat(formBase.valor_total || '0') || totalComp;
+    const aliqIcmsNum = parseFloat(formBase.aliquota_icms || '0') || 0;
+    const vlrIcms = (baseCalc * aliqIcmsNum) / 100;
+    return {
+      ...formBase,
+      emitente_id: formBase.emitente_id ? Number(formBase.emitente_id) : undefined,
+      componentes_valor: formBase.componentes_valor.map(c => ({ nome: c.nome, valor: parseFloat(c.valor || '0') || 0 })),
+      valor_total: baseCalc,
+      valor_receber: parseFloat(formBase.valor_receber || '0') || totalComp,
+      base_icms: baseCalc,
+      valor_icms: vlrIcms,
+      valor_carga: parseFloat(formBase.valor_total_carga || '0') || 0,
+      peso_bruto: parseFloat(formBase.peso_bruto || '0') || 0,
+      quantidade_volumes: parseFloat(formBase.quantidade_volumes || '1') || 1,
+      remetente_dados: formBase.remetente_dados,
+      destinatario_dados: formBase.destinatario_dados,
+      modal_os_dados: formBase.modelo === '67' ? { taf: formBase.taf, numero_registro_estadual: formBase.numero_registro_estadual } : undefined,
+      documentos: formBase.documentos,
+      cargas_ids: cargasIds
+    };
+  };
+
+  const preencherTesteHomologacao = () => {
+    setForm(f => construirFormTesteHomologacao(f));
     setVisitados(new Set(STEPS.map(s => s.id)));
   };
 
@@ -548,7 +575,17 @@ export default function CteWizardPage() {
     setSalvando(true);
     setErroSalvar('');
     try {
-      const payload = montarPayload();
+      const formEfetivo =
+        transmitir &&
+        ambienteAtivo === 'homologacao' &&
+        (!form.codigo_municipio_fim || form.componentes_valor.length === 0 || form.documentos.length === 0)
+          ? construirFormTesteHomologacao(form)
+          : form;
+      if (formEfetivo !== form) {
+        setForm(formEfetivo);
+        setVisitados(new Set(STEPS.map(s => s.id)));
+      }
+      const payload = montarPayload(formEfetivo);
       const res = cteId
         ? await api.put(`/transporte/ctes/${cteId}`, payload)
         : await api.post('/transporte/ctes', payload);

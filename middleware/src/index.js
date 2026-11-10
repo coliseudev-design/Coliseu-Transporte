@@ -77,7 +77,7 @@ async function startServer() {
                     logger.warn('[App] Erro na aplicação de migrações automáticas:', migErr.message);
                 }
 
-                // Auto-reconciliação em background no boot: reemite CT-es de homologação rejeitados por 310/360/365/693 ou presos em PROCESSANDO
+                // Auto-reconciliação em background no boot: reemite CT-es de homologação rejeitados ou presos em PROCESSANDO
                 setImmediate(async () => {
                     try {
                         const TransporteService = require('./services/transporteService');
@@ -86,23 +86,17 @@ async function startServer() {
                              FROM dash_ctes c
                              LEFT JOIN dash_emitentes e ON e.id = c.emitente_id
                              WHERE COALESCE(e.focus_ambiente, 'homologacao') <> 'producao'
-                               AND (
-                                   c.status = 'PROCESSANDO'
-                                   OR (
-                                       c.status = 'REJEITADO'
-                                       AND (
-                                           c.status_sefaz IN ('310', '360', '365', '693')
-                                           OR c.mensagem_sefaz ~* 'dPrev|Grupo Documentos Transportados|IBS|CBS|vTotDFe'
-                                       )
-                                   )
-                               )
+                               AND c.status IN ('REJEITADO', 'PROCESSANDO', 'RASCUNHO')
                              ORDER BY c.id DESC
                              LIMIT 5`
                         );
                         for (const p of pendentes) {
                             try {
                                 if (p.status === 'PROCESSANDO') {
-                                    await TransporteService.consultarCteFocus(p.tenant_id, p.id);
+                                    const resCons = await TransporteService.consultarCteFocus(p.tenant_id, p.id).catch(() => null);
+                                    if (!resCons || resCons.status !== 'AUTORIZADO') {
+                                        await TransporteService.emitirCte(p.tenant_id, p.id);
+                                    }
                                 } else {
                                     await TransporteService.emitirCte(p.tenant_id, p.id);
                                 }

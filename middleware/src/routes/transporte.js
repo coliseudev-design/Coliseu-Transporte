@@ -441,15 +441,13 @@ router.get('/documentos', async (req, res) => {
 
         let { rows } = await db.query(finalSql, params);
 
-        // Se houver CT-es em HOMOLOGAÇÃO rejeitados pelos erros antigos de dPrev, 693 ou 310/360/365 (IBS/CBS), re-emite automaticamente com a correção
+        // Se houver CT-es em HOMOLOGAÇÃO rejeitados, re-emite automaticamente com as regras SEFAZ/MS e IBS/CBS atualizadas
         const autoRetryHomologRows = rows
             .filter(
                 (r) =>
                     r.tipo_documento === 'CTE' &&
                     r.status === 'REJEITADO' &&
-                    String(r.focus_ambiente || 'homologacao').toLowerCase() !== 'producao' &&
-                    (['310', '360', '365', '693'].includes(String(r.status_sefaz || '').trim()) ||
-                        /dPrev|Grupo Documentos Transportados|IBS|CBS|vTotDFe/i.test(String(r.mensagem_sefaz || '')))
+                    String(r.focus_ambiente || 'homologacao').toLowerCase() !== 'producao'
             )
             .slice(0, 3);
 
@@ -1673,7 +1671,10 @@ router.get('/emitentes', async (req, res) => {
                 cfop_padrao_cte: r.cfop_padrao_cte || cfg.focus_cfop_padrao || '5353',
                 natureza_padrao_cte:
                     r.natureza_padrao_cte || cfg.focus_natureza_padrao || 'PRESTACAO DE SERVICO DE TRANSPORTE',
-                aliquota_icms_padrao: r.aliquota_icms_padrao ?? cfg.focus_aliquota_icms_padrao ?? 12.0,
+                aliquota_icms_padrao:
+                    String(r.uf || 'MS').toUpperCase() === 'MS' && Number(r.aliquota_icms_padrao ?? 12) === 12
+                        ? 17.0
+                        : r.aliquota_icms_padrao ?? cfg.focus_aliquota_icms_padrao ?? 17.0,
             };
         });
 
