@@ -15,6 +15,15 @@ const {
     encryptBuffer,
     resolveSecretForSave
 } = require('../utils/cryptoVault');
+const {
+    consolidarCargasErpTenant,
+    consolidarCargasSeNecessario,
+} = require('../services/cargaConsolidatorService');
+const {
+    resolverIbgeMunicipioAsync,
+    normalizarUf,
+    listarMunicipiosDicionario,
+} = require('../utils/ibgeMunicipios');
 
 let _transporteColsReady = false;
 async function ensureTransporteColumns() {
@@ -53,7 +62,34 @@ async function ensureTransporteColumns() {
               ADD COLUMN IF NOT EXISTS aliquota_pis NUMERIC(7,4),
               ADD COLUMN IF NOT EXISTS cofins_cst VARCHAR(2),
               ADD COLUMN IF NOT EXISTS aliquota_cofins NUMERIC(7,4),
-              ADD COLUMN IF NOT EXISTS excluir_icms_base_pis_cofins BOOLEAN DEFAULT TRUE;
+              ADD COLUMN IF NOT EXISTS excluir_icms_base_pis_cofins BOOLEAN DEFAULT TRUE,
+              ADD COLUMN IF NOT EXISTS perfil_operacional VARCHAR(30) DEFAULT 'HIBRIDO',
+              ADD COLUMN IF NOT EXISTS mdfe_tipo_emitente_padrao VARCHAR(2) DEFAULT '1';
+
+            ALTER TABLE dash_cargas
+              ADD COLUMN IF NOT EXISTS modelo_documento VARCHAR(2) DEFAULT '55',
+              ADD COLUMN IF NOT EXISTS destinatario_codigo_ibge VARCHAR(7),
+              ADD COLUMN IF NOT EXISTS destinatario_bairro VARCHAR(120),
+              ADD COLUMN IF NOT EXISTS destinatario_cep VARCHAR(10),
+              ADD COLUMN IF NOT EXISTS remetente_codigo_ibge VARCHAR(7),
+              ADD COLUMN IF NOT EXISTS produto_ncm VARCHAR(10),
+              ADD COLUMN IF NOT EXISTS regiao_nome VARCHAR(120),
+              ADD COLUMN IF NOT EXISTS cliente_id_firebird INTEGER,
+              ADD COLUMN IF NOT EXISTS venda_id_firebird INTEGER;
+
+            CREATE TABLE IF NOT EXISTS dash_transporte_regioes (
+              id SERIAL PRIMARY KEY,
+              tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+              nome VARCHAR(120) NOT NULL,
+              cor VARCHAR(20) DEFAULT '#0284c7',
+              uf_padrao VARCHAR(2) DEFAULT 'MS',
+              cidades JSONB NOT NULL DEFAULT '[]'::jsonb,
+              descricao VARCHAR(255),
+              ativo BOOLEAN NOT NULL DEFAULT TRUE,
+              created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+              updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+              UNIQUE(tenant_id, nome)
+            );
 
             ALTER TABLE dash_regras_fiscais
               ADD COLUMN IF NOT EXISTS pis_cofins_modo VARCHAR(20) DEFAULT 'NAO_APURADO',
@@ -251,54 +287,499 @@ router.post('/focus/master-testar', requireSuperAdminMaster, async (req, res) =>
 
 router.get('/cargas', async (req, res) => {
     const tenantId = req.tenant.id;
-    const { status, search, cliente, data_inicio, data_fim, limit = 200, offset = 0 } = req.query;
+    const {
+        status,
+        search,
+        cliente,
+        data_inicio,
+        data_fim,
+        regiao,
+        uf_destino,
+        municipio,
+        municipios,
+        modelo,
+        modo,
+        apenas_nfe55,
+        incluir_nfce,
+        incluir_resumo = 'true',
+        limit = 300,
+        offset = 0,
+    } = req.query;
 
     try {
-        let sql = `SELECT * FROM dash_cargas WHERE tenant_id = $1`;
-        const params = [tenantId];
+        await consolidarCargasSeNecessario(tenantId).catch(() => null);
 
-        if (status && status !== 'TODAS') {
-            params.push(status.toUpperCase());
-            sql += ` AND status = $${params.length}`;
+        const baseClauses = [`tenant_id = $1`];
+        const baseParams = [tenantId];
+
+        const statusUpper = status ? String(status).toUpperCase().trim() : '';
+        if (statusUpper && statusUpper !== 'TODAS') {
+            if (statusUpper === 'DISPONIVEIS') {
+                baseClauses.push(`status = 'PENDENTE'`);
+            } else {
+                baseParams.push(statusUpper);
+                baseClauses.push(`status = $${baseParams.length}`);
+            }
         }
 
-        if (cliente) {
-            params.push(`%${cliente}%`);
-            sql += ` AND (destinatario_nome ILIKE $${params.length} OR destinatario_documento ILIKE $${params.length})`;
+        const exigirModelo55 =
+            incluir_nfce !== 'true' &&
+            (modelo === '55' ||
+                apenas_nfe55 === 'true' ||
+                ['MDFE', 'CTE'].includes(String(modo || '').toUpperCase()));
+
+        if (exigirModelo55) {
+            baseClauses.push(
+                `COALESCE(NULLIF(modelo_documento, ''), SUBSTRING(regexp_replace(COALESCE(chave_acesso, ''), '\\D', '', 'g') FROM 21 FOR 2), '55') = '55'`
+            );
+            baseClauses.push(
+                `LENGTH(regexp_replace(COALESCE(chave_acesso, ''), '\\D', '', 'g')) = 44`
+            );
+        } else if (modelo && modelo !== 'TODAS') {
+            baseParams.push(String(modelo).trim().slice(0, 2));
+            baseClauses.push(`COALESCE(NULLIF(modelo_documento, ''), '55') = $${baseParams.length}`);
         }
 
         if (data_inicio) {
-            params.push(`${data_inicio} 00:00:00`);
-            sql += ` AND data_emissao >= $${params.length}::timestamptz`;
+            baseParams.push(`${data_inicio} 00:00:00`);
+            baseClauses.push(`data_emissao >= $${baseParams.length}::timestamptz`);
         }
 
         if (data_fim) {
-            params.push(`${data_fim} 23:59:59`);
-            sql += ` AND data_emissao <= $${params.length}::timestamptz`;
+            baseParams.push(`${data_fim} 23:59:59`);
+            baseClauses.push(`data_emissao <= $${baseParams.length}::timestamptz`);
+        }
+
+        const filterClauses = [...baseClauses];
+        const filterParams = [...baseParams];
+
+        if (uf_destino && uf_destino !== 'TODAS') {
+            const ufNorm = normalizarUf(uf_destino) || String(uf_destino).toUpperCase().trim().slice(0, 2);
+            filterParams.push(ufNorm);
+            filterClauses.push(`UPPER(TRIM(COALESCE(destinatario_uf, ''))) = $${filterParams.length}`);
+        }
+
+        if (regiao && regiao !== 'TODAS') {
+            const regTrim = String(regiao).trim();
+            if (regTrim === 'SEM_REGIAO') {
+                filterClauses.push(`COALESCE(TRIM(regiao_nome), '') = ''`);
+            } else {
+                // Busca também cidades vinculadas a esta região customizada ou do ERP para filtro imediato
+                const cidadesRegiaoSet = new Set();
+                const [regCustomRes, regErpRes] = await Promise.all([
+                    db
+                        .query(
+                            `SELECT cidades FROM dash_transporte_regioes WHERE tenant_id = $1 AND UPPER(TRIM(nome)) = UPPER(TRIM($2)) AND ativo = TRUE`,
+                            [tenantId, regTrim]
+                        )
+                        .catch(() => ({ rows: [] })),
+                    db
+                        .query(
+                            `SELECT cidade FROM dash_regioes WHERE tenant_id = $1 AND UPPER(TRIM(nome)) = UPPER(TRIM($2))`,
+                            [tenantId, regTrim]
+                        )
+                        .catch(() => ({ rows: [] })),
+                ]);
+                for (const r of regCustomRes.rows) {
+                    const arr = Array.isArray(r.cidades) ? r.cidades : [];
+                    for (const c of arr) {
+                        const mun = String(typeof c === 'string' ? c : c?.municipio || c?.cidade || c?.nome || '')
+                            .toUpperCase()
+                            .trim();
+                        if (mun) cidadesRegiaoSet.add(mun);
+                    }
+                }
+                for (const r of regErpRes.rows) {
+                    const mun = String(r.cidade || '').toUpperCase().trim();
+                    if (mun) cidadesRegiaoSet.add(mun);
+                }
+
+                filterParams.push(regTrim);
+                const idxReg = filterParams.length;
+                if (cidadesRegiaoSet.size > 0) {
+                    filterParams.push(Array.from(cidadesRegiaoSet));
+                    const idxCids = filterParams.length;
+                    filterClauses.push(
+                        `(UPPER(TRIM(COALESCE(regiao_nome, ''))) = UPPER(TRIM($${idxReg})) OR UPPER(TRIM(COALESCE(destinatario_municipio, ''))) = ANY($${idxCids}::text[]))`
+                    );
+                } else {
+                    filterClauses.push(`UPPER(TRIM(COALESCE(regiao_nome, ''))) = UPPER(TRIM($${idxReg}))`);
+                }
+            }
+        }
+
+        const listaMunicipiosRaw = municipios || municipio || '';
+        if (listaMunicipiosRaw && listaMunicipiosRaw !== 'TODOS') {
+            const muns = String(listaMunicipiosRaw)
+                .split(',')
+                .map((m) => m.trim().toUpperCase())
+                .filter(Boolean);
+            if (muns.length > 0) {
+                filterParams.push(muns);
+                filterClauses.push(
+                    `UPPER(TRIM(COALESCE(destinatario_municipio, ''))) = ANY($${filterParams.length}::text[])`
+                );
+            }
+        }
+
+        if (cliente) {
+            filterParams.push(`%${String(cliente).trim()}%`);
+            filterClauses.push(
+                `(destinatario_nome ILIKE $${filterParams.length} OR destinatario_documento ILIKE $${filterParams.length})`
+            );
         }
 
         if (search) {
-            params.push(`%${search.trim()}%`);
-            sql += ` AND (chave_acesso ILIKE $${params.length} OR numero ILIKE $${params.length} OR remetente_nome ILIKE $${params.length} OR destinatario_nome ILIKE $${params.length})`;
+            filterParams.push(`%${String(search).trim()}%`);
+            filterClauses.push(
+                `(chave_acesso ILIKE $${filterParams.length} OR numero ILIKE $${filterParams.length} OR remetente_nome ILIKE $${filterParams.length} OR destinatario_nome ILIKE $${filterParams.length} OR destinatario_documento ILIKE $${filterParams.length} OR destinatario_municipio ILIKE $${filterParams.length} OR regiao_nome ILIKE $${filterParams.length})`
+            );
         }
 
-        // Contagem filtrada
-        const countSql = sql.replace('SELECT *', 'SELECT COUNT(*)::int as total');
-        const countRes = await db.query(countSql, params);
+        const whereFiltered = filterClauses.join(' AND ');
+        const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 300, 1), 1000);
+        const safeOffset = Math.max(parseInt(offset, 10) || 0, 0);
 
-        sql += ` ORDER BY data_emissao DESC, id DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
-        params.push(parseInt(limit, 10), parseInt(offset, 10));
+        const countRes = await db.query(
+            `SELECT COUNT(*)::int AS total,
+                    COALESCE(SUM(valor_total), 0)::numeric(15,2) AS valor_total,
+                    COALESCE(SUM(peso_bruto), 0)::numeric(15,3) AS peso_total
+             FROM dash_cargas
+             WHERE ${whereFiltered}`,
+            filterParams
+        );
 
-        const { rows } = await db.query(sql, params);
+        const listParams = [...filterParams, safeLimit, safeOffset];
+        const { rows } = await db.query(
+            `SELECT *
+             FROM dash_cargas
+             WHERE ${whereFiltered}
+             ORDER BY data_emissao DESC NULLS LAST, id DESC
+             LIMIT $${filterParams.length + 1} OFFSET $${filterParams.length + 2}`,
+            listParams
+        );
+
+        let resumo = null;
+        if (incluir_resumo !== 'false') {
+            const whereBase = baseClauses.join(' AND ');
+            const [regFacets, cidFacets, ufFacets, customRegs] = await Promise.all([
+                db.query(
+                    `SELECT COALESCE(NULLIF(TRIM(regiao_nome), ''), 'SEM_REGIAO') AS nome,
+                            COUNT(*)::int AS qtd,
+                            COALESCE(SUM(valor_total), 0)::numeric(15,2) AS valor_total,
+                            COALESCE(SUM(peso_bruto), 0)::numeric(15,3) AS peso_total
+                     FROM dash_cargas
+                     WHERE ${whereBase}
+                     GROUP BY 1
+                     ORDER BY qtd DESC, nome ASC`,
+                    baseParams
+                ),
+                db.query(
+                    `SELECT TRIM(destinatario_municipio) AS municipio,
+                            UPPER(TRIM(COALESCE(destinatario_uf, 'MS'))) AS uf,
+                            MAX(destinatario_codigo_ibge) AS codigo_ibge,
+                            MAX(regiao_nome) AS regiao,
+                            COUNT(*)::int AS qtd,
+                            COALESCE(SUM(valor_total), 0)::numeric(15,2) AS valor_total,
+                            COALESCE(SUM(peso_bruto), 0)::numeric(15,3) AS peso_total
+                     FROM dash_cargas
+                     WHERE ${whereBase} AND COALESCE(TRIM(destinatario_municipio), '') <> ''
+                     GROUP BY 1, 2
+                     ORDER BY qtd DESC, 1 ASC
+                     LIMIT 200`,
+                    baseParams
+                ),
+                db.query(
+                    `SELECT UPPER(TRIM(COALESCE(destinatario_uf, 'MS'))) AS uf,
+                            COUNT(*)::int AS qtd
+                     FROM dash_cargas
+                     WHERE ${whereBase} AND COALESCE(TRIM(destinatario_uf), '') <> ''
+                     GROUP BY 1
+                     ORDER BY qtd DESC, 1 ASC`,
+                    baseParams
+                ),
+                db
+                    .query(
+                        `SELECT id, nome, cor, uf_padrao, cidades FROM dash_transporte_regioes WHERE tenant_id = $1 AND ativo = TRUE ORDER BY nome ASC`,
+                        [tenantId]
+                    )
+                    .catch(() => ({ rows: [] })),
+            ]);
+
+            const regioesMap = new Map();
+            for (const r of regFacets.rows) {
+                regioesMap.set(String(r.nome).toUpperCase(), {
+                    nome: r.nome,
+                    qtd: Number(r.qtd || 0),
+                    valor_total: Number(r.valor_total || 0),
+                    peso_total: Number(r.peso_total || 0),
+                });
+            }
+            for (const cr of customRegs.rows) {
+                const key = String(cr.nome || '').toUpperCase().trim();
+                if (key && !regioesMap.has(key)) {
+                    regioesMap.set(key, {
+                        nome: cr.nome,
+                        cor: cr.cor,
+                        qtd: 0,
+                        valor_total: 0,
+                        peso_total: 0,
+                    });
+                } else if (key && regioesMap.has(key)) {
+                    regioesMap.get(key).cor = cr.cor;
+                }
+            }
+
+            resumo = {
+                total_filtrado: Number(countRes.rows[0]?.total || 0),
+                valor_total_filtrado: Number(countRes.rows[0]?.valor_total || 0),
+                peso_total_filtrado: Number(countRes.rows[0]?.peso_total || 0),
+                regioes: Array.from(regioesMap.values()),
+                cidades: cidFacets.rows.map((c) => ({
+                    municipio: c.municipio,
+                    uf: c.uf,
+                    codigo_ibge: c.codigo_ibge,
+                    regiao: c.regiao,
+                    qtd: Number(c.qtd || 0),
+                    valor_total: Number(c.valor_total || 0),
+                    peso_total: Number(c.peso_total || 0),
+                })),
+                ufs: ufFacets.rows.map((u) => ({
+                    uf: u.uf,
+                    qtd: Number(u.qtd || 0),
+                })),
+            };
+        }
 
         return res.json({
             success: true,
             data: rows,
-            total: countRes.rows[0]?.total || 0
+            total: countRes.rows[0]?.total || 0,
+            resumo,
         });
     } catch (err) {
         logger.error('[Transporte API] Erro ao listar cargas:', err.message);
         return res.status(500).json({ error: 'Erro ao buscar cargas' });
+    }
+});
+
+/**
+ * POST /api/transporte/cargas/consolidar-erp
+ * Consolida e enriquece 100% das NF-es vindas do ERP (dash_cargas + dash_vendas + dash_clientes + dash_vendas_itens + dash_regioes).
+ */
+router.post('/cargas/consolidar-erp', async (req, res) => {
+    const tenantId = req.tenant.id;
+    try {
+        const resultado = await consolidarCargasErpTenant(tenantId);
+        const totaisRes = await db.query(
+            `SELECT COUNT(*)::int AS total,
+                    COUNT(*) FILTER (WHERE status = 'PENDENTE')::int AS pendentes,
+                    COUNT(*) FILTER (WHERE COALESCE(modelo_documento, '55') = '55' AND status = 'PENDENTE')::int AS nfe55_pendentes
+             FROM dash_cargas WHERE tenant_id = $1`,
+            [tenantId]
+        );
+        return res.json({
+            success: true,
+            data: {
+                ...resultado,
+                ...(totaisRes.rows[0] || {}),
+            },
+        });
+    } catch (err) {
+        logger.error('[Transporte API] Erro ao consolidar cargas do ERP:', err.message);
+        return res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * CRUD de Regiões / Rotas de Entrega do Transporte (dash_transporte_regioes)
+ * integrado às regiões originais do ERP (dash_regioes / dash_clientes.classificacao).
+ */
+router.get('/regioes-entrega', async (req, res) => {
+    const tenantId = req.tenant.id;
+    try {
+        const [customRes, erpRegsRes, cidadesErpRes] = await Promise.all([
+            db.query(
+                `SELECT * FROM dash_transporte_regioes WHERE tenant_id = $1 ORDER BY ativo DESC, nome ASC`,
+                [tenantId]
+            ),
+            db
+                .query(
+                    `SELECT TRIM(nome) AS nome, COUNT(DISTINCT cidade)::int AS qtd_cidades,
+                            ARRAY_AGG(DISTINCT TRIM(cidade)) FILTER (WHERE COALESCE(TRIM(cidade), '') <> '') AS cidades
+                     FROM dash_regioes
+                     WHERE tenant_id = $1 AND COALESCE(TRIM(nome), '') <> ''
+                     GROUP BY TRIM(nome)
+                     ORDER BY 1 ASC`,
+                    [tenantId]
+                )
+                .catch(() => ({ rows: [] })),
+            db.query(
+                `SELECT TRIM(destinatario_municipio) AS municipio,
+                        UPPER(TRIM(COALESCE(destinatario_uf, 'MS'))) AS uf,
+                        MAX(destinatario_codigo_ibge) AS codigo_ibge,
+                        MAX(regiao_nome) AS regiao_atual,
+                        COUNT(*) FILTER (WHERE status = 'PENDENTE')::int AS pendentes,
+                        COUNT(*)::int AS total
+                 FROM dash_cargas
+                 WHERE tenant_id = $1 AND COALESCE(TRIM(destinatario_municipio), '') <> ''
+                 GROUP BY 1, 2
+                 ORDER BY pendentes DESC, 1 ASC`,
+                [tenantId]
+            ),
+        ]);
+
+        return res.json({
+            success: true,
+            data: {
+                regioes_customizadas: customRes.rows,
+                regioes_erp: erpRegsRes.rows,
+                cidades_cargas: cidadesErpRes.rows,
+            },
+        });
+    } catch (err) {
+        logger.error('[Transporte API] Erro ao listar regiões de entrega:', err.message);
+        return res.status(500).json({ error: err.message });
+    }
+});
+
+router.post('/regioes-entrega', async (req, res) => {
+    const tenantId = req.tenant.id;
+    const b = req.body || {};
+    const nome = String(b.nome || '').trim();
+    if (!nome) {
+        return res.status(400).json({ error: 'Informe o nome da Região / Rota de Entrega.' });
+    }
+
+    try {
+        const ufPadrao = normalizarUf(b.uf_padrao || 'MS') || 'MS';
+        const cidadesRaw = Array.isArray(b.cidades) ? b.cidades : [];
+        const cidadesNorm = [];
+        const vistas = new Set();
+
+        for (const c of cidadesRaw) {
+            const munNome = String(typeof c === 'string' ? c : c?.municipio || c?.cidade || c?.nome || '').trim();
+            if (!munNome) continue;
+            const ufCid = normalizarUf((typeof c === 'object' && c?.uf) || ufPadrao) || ufPadrao;
+            const chaveUnica = `${munNome.toUpperCase()}|${ufCid}`;
+            if (vistas.has(chaveUnica)) continue;
+            vistas.add(chaveUnica);
+            const ibge = await resolverIbgeMunicipioAsync(
+                db,
+                typeof c === 'object' ? c?.codigo_ibge || c?.ibge : '',
+                munNome,
+                ufCid
+            );
+            cidadesNorm.push({
+                municipio: ibge.exato ? ibge.nome : munNome,
+                uf: ibge.uf || ufCid,
+                codigo_ibge: ibge.codigo,
+            });
+        }
+
+        const { rows } = await db.query(
+            `INSERT INTO dash_transporte_regioes (tenant_id, nome, cor, uf_padrao, cidades, descricao, ativo, updated_at)
+             VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, NOW())
+             ON CONFLICT (tenant_id, nome) DO UPDATE SET
+               cor = EXCLUDED.cor,
+               uf_padrao = EXCLUDED.uf_padrao,
+               cidades = EXCLUDED.cidades,
+               descricao = EXCLUDED.descricao,
+               ativo = EXCLUDED.ativo,
+               updated_at = NOW()
+             RETURNING *`,
+            [
+                tenantId,
+                nome.slice(0, 120),
+                String(b.cor || '#0284c7').slice(0, 20),
+                ufPadrao,
+                JSON.stringify(cidadesNorm),
+                b.descricao ? String(b.descricao).slice(0, 255) : null,
+                b.ativo !== false,
+            ]
+        );
+
+        await consolidarCargasErpTenant(tenantId).catch(() => null);
+
+        return res.status(201).json({ success: true, data: rows[0] });
+    } catch (err) {
+        logger.error('[Transporte API] Erro ao salvar região de entrega:', err.message);
+        return res.status(500).json({ error: err.message });
+    }
+});
+
+router.put('/regioes-entrega/:id', async (req, res) => {
+    const tenantId = req.tenant.id;
+    const id = parseInt(req.params.id, 10);
+    const b = req.body || {};
+    const nome = String(b.nome || '').trim();
+    if (!nome) {
+        return res.status(400).json({ error: 'Informe o nome da Região / Rota de Entrega.' });
+    }
+
+    try {
+        const ufPadrao = normalizarUf(b.uf_padrao || 'MS') || 'MS';
+        const cidadesRaw = Array.isArray(b.cidades) ? b.cidades : [];
+        const cidadesNorm = [];
+        const vistas = new Set();
+
+        for (const c of cidadesRaw) {
+            const munNome = String(typeof c === 'string' ? c : c?.municipio || c?.cidade || c?.nome || '').trim();
+            if (!munNome) continue;
+            const ufCid = normalizarUf((typeof c === 'object' && c?.uf) || ufPadrao) || ufPadrao;
+            const chaveUnica = `${munNome.toUpperCase()}|${ufCid}`;
+            if (vistas.has(chaveUnica)) continue;
+            vistas.add(chaveUnica);
+            const ibge = await resolverIbgeMunicipioAsync(
+                db,
+                typeof c === 'object' ? c?.codigo_ibge || c?.ibge : '',
+                munNome,
+                ufCid
+            );
+            cidadesNorm.push({
+                municipio: ibge.exato ? ibge.nome : munNome,
+                uf: ibge.uf || ufCid,
+                codigo_ibge: ibge.codigo,
+            });
+        }
+
+        const { rows } = await db.query(
+            `UPDATE dash_transporte_regioes
+             SET nome = $1, cor = $2, uf_padrao = $3, cidades = $4::jsonb, descricao = $5, ativo = $6, updated_at = NOW()
+             WHERE id = $7 AND tenant_id = $8
+             RETURNING *`,
+            [
+                nome.slice(0, 120),
+                String(b.cor || '#0284c7').slice(0, 20),
+                ufPadrao,
+                JSON.stringify(cidadesNorm),
+                b.descricao ? String(b.descricao).slice(0, 255) : null,
+                b.ativo !== false,
+                id,
+                tenantId,
+            ]
+        );
+        if (!rows[0]) {
+            return res.status(404).json({ error: 'Região não encontrada.' });
+        }
+
+        await consolidarCargasErpTenant(tenantId).catch(() => null);
+        return res.json({ success: true, data: rows[0] });
+    } catch (err) {
+        logger.error('[Transporte API] Erro ao atualizar região:', err.message);
+        return res.status(500).json({ error: err.message });
+    }
+});
+
+router.delete('/regioes-entrega/:id', async (req, res) => {
+    const tenantId = req.tenant.id;
+    const id = parseInt(req.params.id, 10);
+    try {
+        await db.query(`DELETE FROM dash_transporte_regioes WHERE id = $1 AND tenant_id = $2`, [id, tenantId]);
+        await consolidarCargasErpTenant(tenantId).catch(() => null);
+        return res.json({ success: true });
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
     }
 });
 
@@ -909,6 +1390,236 @@ router.post('/ctes', async (req, res) => {
     }
 });
 
+/**
+ * POST /api/transporte/ctes/lote
+ * Gera 1 rascunho de CT-e por Destinatário a partir de uma seleção de NF-es do ERP
+ * (respeitando a regra SEFAZ de 1 Remetente + 1 Destinatário por CT-e Normal).
+ */
+router.post('/ctes/lote', async (req, res) => {
+    const tenantId = req.tenant.id;
+    const b = req.body || {};
+    const cargasIds = Array.isArray(b.cargas_ids)
+        ? b.cargas_ids.map((x) => parseInt(x, 10)).filter((x) => Number.isFinite(x) && x > 0)
+        : [];
+
+    if (cargasIds.length === 0) {
+        return res.status(400).json({ error: 'Selecione ao menos uma NF-e do ERP para gerar CT-es em lote.' });
+    }
+
+    try {
+        const emitente = await TransporteService.getEmitente(tenantId, b.emitente_id || null);
+        const { rows: cgRows } = await db.query(
+            `SELECT * FROM dash_cargas WHERE tenant_id = $1 AND id = ANY($2::int[]) ORDER BY id ASC`,
+            [tenantId, cargasIds]
+        );
+
+        const validas = cgRows.filter(
+            (r) => String(r.chave_acesso || '').replace(/\D/g, '').length === 44
+        );
+        if (validas.length === 0) {
+            return res.status(400).json({
+                error: 'Nenhuma das cargas selecionadas possui chave de acesso de 44 dígitos válida.',
+            });
+        }
+
+        // Agrupa NF-es por destinatário (CNPJ/CPF ou Nome + Município)
+        const gruposMap = new Map();
+        for (const cg of validas) {
+            const docDest = String(cg.destinatario_documento || '').replace(/\D/g, '');
+            const chaveGrupo =
+                docDest.length >= 11
+                    ? `DOC:${docDest}`
+                    : `NOME:${String(cg.destinatario_nome || 'DESTINATARIO').toUpperCase().trim()}|${String(cg.destinatario_municipio || '').toUpperCase().trim()}`;
+            if (!gruposMap.has(chaveGrupo)) {
+                gruposMap.set(chaveGrupo, []);
+            }
+            gruposMap.get(chaveGrupo).push(cg);
+        }
+
+        const grupos = Array.from(gruposMap.values());
+        const somaGeralMercadorias = validas.reduce((acc, c) => acc + (parseFloat(c.valor_total || 0) || 0), 0);
+        const valorFreteLoteTotal = parseFloat(b.valor_frete_total_lote || 0) || 0;
+        const valorFretePadraoUnit = parseFloat(b.valor_frete_padrao || 0) || 0;
+        const ratearProporcional = Boolean(b.ratear_frete_proporcional && valorFreteLoteTotal > 0);
+
+        const ctesCriados = [];
+        let freteAcumulado = 0;
+
+        for (let idx = 0; idx < grupos.length; idx++) {
+            const nfsGrupo = grupos[idx];
+            const c0 = nfsGrupo[0];
+            const nfe0 = c0.dados_nfe || {};
+
+            const valorCargaGrupo = nfsGrupo.reduce((acc, c) => acc + (parseFloat(c.valor_total || 0) || 0), 0);
+            const pesoGrupo = nfsGrupo.reduce(
+                (acc, c) => acc + (parseFloat(c.peso_bruto || 0) || 0),
+                0
+            );
+            const pesoFinalGrupo = pesoGrupo > 0 ? pesoGrupo : Math.max(nfsGrupo.length * 10, 10);
+
+            let valorFreteGrupo = valorFretePadraoUnit;
+            if (ratearProporcional) {
+                if (idx === grupos.length - 1) {
+                    valorFreteGrupo = Math.max(0, Number((valorFreteLoteTotal - freteAcumulado).toFixed(2)));
+                } else {
+                    const prop = somaGeralMercadorias > 0 ? valorCargaGrupo / somaGeralMercadorias : 1 / grupos.length;
+                    valorFreteGrupo = Number((valorFreteLoteTotal * prop).toFixed(2));
+                    freteAcumulado += valorFreteGrupo;
+                }
+            }
+
+            const ufInicio = normalizarUf(c0.remetente_uf || emitente.uf || 'MS') || 'MS';
+            const ufFim = normalizarUf(c0.destinatario_uf || nfe0?.destinatario?.uf || ufInicio) || ufInicio;
+            const ibgeIni = await resolverIbgeMunicipioAsync(
+                db,
+                c0.remetente_codigo_ibge || emitente.codigo_municipio,
+                c0.remetente_municipio || emitente.municipio,
+                ufInicio
+            );
+            const ibgeFim = await resolverIbgeMunicipioAsync(
+                db,
+                c0.destinatario_codigo_ibge || nfe0?.destinatario?.codigo_municipio || nfe0?.destinatario?.cMun,
+                c0.destinatario_municipio || nfe0?.destinatario?.municipio,
+                ufFim
+            );
+
+            const cfopAuto = b.cfop || (ufInicio === ufFim ? emitente.cfop_padrao_cte || '5353' : '6353');
+            const aliqIcms = parseFloat(emitente.aliquota_icms_padrao ?? 12.0) || 0;
+            const valorIcms = Number(((valorFreteGrupo * aliqIcms) / 100).toFixed(2));
+
+            const remetenteDados = {
+                documento: emitente.cnpj || String(c0.remetente_documento || '').replace(/\D/g, ''),
+                razao_social: emitente.razao_social || c0.remetente_nome || 'EMITENTE',
+                inscricao_estadual: emitente.inscricao_estadual || '',
+                logradouro: emitente.logradouro || 'RUA PRINCIPAL',
+                numero: emitente.numero || 'SN',
+                bairro: emitente.bairro || 'CENTRO',
+                cep: emitente.cep || '',
+                municipio: ibgeIni.nome,
+                codigo_municipio: ibgeIni.codigo,
+                uf: ufInicio,
+            };
+
+            const destinatarioDados = {
+                documento: String(c0.destinatario_documento || nfe0?.destinatario?.cnpj || nfe0?.destinatario?.cpf || '').replace(/\D/g, ''),
+                razao_social: c0.destinatario_nome || nfe0?.destinatario?.razao_social || 'DESTINATARIO',
+                inscricao_estadual: nfe0?.destinatario?.inscricao_estadual || nfe0?.destinatario?.ie || '',
+                logradouro: nfe0?.destinatario?.logradouro || 'ENDERECO CADASTRADO',
+                numero: nfe0?.destinatario?.numero || 'SN',
+                bairro: c0.destinatario_bairro || nfe0?.destinatario?.bairro || 'CENTRO',
+                cep: String(c0.destinatario_cep || nfe0?.destinatario?.cep || '').replace(/\D/g, ''),
+                municipio: ibgeFim.nome,
+                codigo_municipio: ibgeFim.codigo,
+                uf: ufFim,
+            };
+
+            const documentosJson = nfsGrupo.map((nf) => ({
+                tipo: 'nfe',
+                chave: String(nf.chave_acesso).replace(/\D/g, ''),
+                numero: nf.numero || '',
+                serie: nf.serie || '1',
+                valor: parseFloat(nf.valor_total || 0) || 0,
+                peso_bruto: parseFloat(nf.peso_bruto || 0) || 0,
+            }));
+
+            const tomadorTipo = String(b.tomador || '0');
+            const tomadorDoc =
+                tomadorTipo === '3'
+                    ? destinatarioDados.documento || remetenteDados.documento
+                    : remetenteDados.documento;
+
+            const ref = TransporteService.gerarRef('CTE', tenantId, `${Date.now().toString().slice(-5)}_${idx + 1}`);
+            const componentesValor =
+                valorFreteGrupo > 0
+                    ? [{ nome: 'FRETE VALOR', valor: valorFreteGrupo }]
+                    : [];
+
+            const { rows: insRows } = await db.query(
+                `INSERT INTO dash_ctes (
+                    tenant_id, emitente_id, ref, status, serie, modelo,
+                    formato_dacte, finalidade, cfop, natureza_operacao, modelo_cte, tipo_servico, modal,
+                    tomador, tomador_documento,
+                    uf_inicio, municipio_inicio, codigo_municipio_inicio,
+                    uf_fim, municipio_fim, codigo_municipio_fim,
+                    valor_total, valor_receber, peso_bruto, quantidade_volumes, unidade_medida, valor_carga,
+                    componentes_valor, icms_situacao_tributaria, base_icms, aliquota_icms, valor_icms,
+                    produto_predominante, regiao,
+                    remetente_dados, destinatario_dados, documentos_json, quantidades_carga
+                 ) VALUES (
+                    $1, $2, $3, 'RASCUNHO', $4, '57',
+                    'retrato', '0', $5, $6, 'normal', '0', '01',
+                    $7, $8,
+                    $9, $10, $11,
+                    $12, $13, $14,
+                    $15, $15, $16, $17, '01', $18,
+                    $19::jsonb, '00', $15, $20, $21,
+                    $22, $23,
+                    $24::jsonb, $25::jsonb, $26::jsonb, $27::jsonb
+                 ) RETURNING *`,
+                [
+                    tenantId,
+                    emitente.id,
+                    ref,
+                    emitente.serie_cte || '1',
+                    cfopAuto,
+                    b.natureza_operacao || emitente.natureza_padrao_cte || 'PRESTACAO DE SERVICO DE TRANSPORTE',
+                    tomadorTipo,
+                    tomadorDoc || null,
+                    ufInicio,
+                    ibgeIni.nome,
+                    ibgeIni.codigo,
+                    ufFim,
+                    ibgeFim.nome,
+                    ibgeFim.codigo,
+                    valorFreteGrupo,
+                    pesoFinalGrupo,
+                    Math.max(nfsGrupo.length, 1),
+                    valorCargaGrupo,
+                    JSON.stringify(componentesValor),
+                    aliqIcms,
+                    valorIcms,
+                    c0.produto_predominante || 'MERCADORIA EM GERAL',
+                    c0.regiao_nome || null,
+                    JSON.stringify(remetenteDados),
+                    JSON.stringify(destinatarioDados),
+                    JSON.stringify(documentosJson),
+                    JSON.stringify([{ codigo_unidade: '01', tipo_medida: 'PESO BRUTO', quantidade: pesoFinalGrupo }]),
+                ]
+            );
+
+            const cteCriado = insRows[0];
+            for (const nf of nfsGrupo) {
+                await db.query(
+                    `INSERT INTO dash_cte_cargas (tenant_id, cte_id, carga_id, chave_nfe, valor_nfe, peso_nfe)
+                     VALUES ($1, $2, $3, $4, $5, $6)
+                     ON CONFLICT (tenant_id, cte_id, carga_id) DO NOTHING`,
+                    [tenantId, cteCriado.id, nf.id, nf.chave_acesso, nf.valor_total, nf.peso_bruto]
+                );
+                await db.query(
+                    `UPDATE dash_cargas SET status = 'EM_CTE', cte_id = $1 WHERE id = $2 AND tenant_id = $3`,
+                    [cteCriado.id, nf.id, tenantId]
+                );
+            }
+
+            ctesCriados.push({
+                ...cteCriado,
+                qtd_nfes: nfsGrupo.length,
+                destinatario_resumo: `${destinatarioDados.razao_social} (${ibgeFim.nome}/${ufFim})`,
+            });
+        }
+
+        return res.status(201).json({
+            success: true,
+            total_ctes: ctesCriados.length,
+            total_nfes: validas.length,
+            data: ctesCriados,
+        });
+    } catch (err) {
+        logger.error('[Transporte API] Erro ao gerar CT-es em lote:', err.message);
+        return res.status(500).json({ error: err.message });
+    }
+});
+
 router.put('/ctes/:id', async (req, res) => {
     const tenantId = req.tenant.id;
     const cteId = req.params.id;
@@ -1337,29 +2048,95 @@ router.post('/mdfes', async (req, res) => {
             }
         }
 
-        if ((!codMunDesc || !nomeMunDesc || !ufFimResolvida) && cargasIds.length > 0) {
-            const cgFirst = await db.query(
-                `SELECT destinatario_municipio, destinatario_uf, dados_nfe
-                 FROM dash_cargas WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
-                [cargasIds[0], tenantId]
+        let cargasSelecionadasRows = [];
+        if (cargasIds.length > 0) {
+            const cgAll = await db.query(
+                `SELECT id, chave_acesso, destinatario_municipio, destinatario_uf,
+                        destinatario_codigo_ibge, destinatario_cep,
+                        produto_predominante, produto_ncm, valor_total, peso_bruto, dados_nfe
+                 FROM dash_cargas
+                 WHERE id = ANY($1::int[]) AND tenant_id = $2
+                 ORDER BY id ASC`,
+                [cargasIds, tenantId]
             );
-            if (cgFirst.rows[0]) {
-                const dNfe = cgFirst.rows[0].dados_nfe || {};
-                codMunDesc =
-                    codMunDesc ||
-                    dNfe?.destinatario?.codigo_municipio ||
-                    dNfe?.destinatario?.cMun ||
-                    null;
-                nomeMunDesc =
-                    nomeMunDesc ||
-                    cgFirst.rows[0].destinatario_municipio ||
-                    dNfe?.destinatario?.municipio ||
-                    null;
+            cargasSelecionadasRows = cgAll.rows;
+
+            const ufsCargas = Array.from(
+                new Set(
+                    cargasSelecionadasRows
+                        .map((r) => normalizarUf(r.destinatario_uf || r.dados_nfe?.destinatario?.uf || ''))
+                        .filter((u) => u && u.length === 2)
+                )
+            );
+            if (ufsCargas.length > 1) {
+                return res.status(400).json({
+                    error: `Regra SEFAZ MDF-e: um único Manifesto não pode misturar NF-es de UFs de destino diferentes (${ufsCargas.join(', ')}). Filtre uma UF por vez para emitir.`,
+                });
+            }
+
+            if (cargasSelecionadasRows[0]) {
+                const c0 = cargasSelecionadasRows[0];
+                const dNfe = c0.dados_nfe || {};
                 ufFimResolvida =
-                    ufFimResolvida ||
-                    String(cgFirst.rows[0].destinatario_uf || dNfe?.destinatario?.uf || 'MS').toUpperCase();
+                    normalizarUf(ufFimResolvida || ufsCargas[0] || c0.destinatario_uf || dNfe?.destinatario?.uf || 'MS') || 'MS';
+                const ibgeFirst = await resolverIbgeMunicipioAsync(
+                    db,
+                    codMunDesc || c0.destinatario_codigo_ibge || dNfe?.destinatario?.codigo_municipio || dNfe?.destinatario?.cMun,
+                    nomeMunDesc || c0.destinatario_municipio || dNfe?.destinatario?.municipio,
+                    ufFimResolvida
+                );
+                codMunDesc = codMunDesc || ibgeFirst.codigo;
+                nomeMunDesc = nomeMunDesc || ibgeFirst.nome;
             }
         }
+
+        // Pré-agrupa municípios de descarregamento (<infMunDescarga>) com código IBGE real de 7 dígitos por cidade
+        const munDescAgrupadosMap = new Map();
+        const cargasIbgeResolvidoMap = new Map();
+        for (const cg of cargasSelecionadasRows) {
+            const dNfe = cg.dados_nfe || {};
+            const ufDoc = normalizarUf(cg.destinatario_uf || dNfe?.destinatario?.uf || ufFimResolvida || 'MS') || 'MS';
+            const ibge = await resolverIbgeMunicipioAsync(
+                db,
+                cg.destinatario_codigo_ibge || dNfe?.destinatario?.codigo_municipio || dNfe?.destinatario?.cMun,
+                cg.destinatario_municipio || dNfe?.destinatario?.municipio,
+                ufDoc
+            );
+            cargasIbgeResolvidoMap.set(cg.id, ibge);
+            if (!munDescAgrupadosMap.has(ibge.codigo)) {
+                munDescAgrupadosMap.set(ibge.codigo, {
+                    codigo: ibge.codigo,
+                    nome: ibge.nome,
+                    notas_fiscais: [],
+                });
+            }
+            const chLimpa = String(cg.chave_acesso || '').replace(/\D/g, '');
+            if (chLimpa.length === 44) {
+                munDescAgrupadosMap.get(ibge.codigo).notas_fiscais.push({ chave_nfe: chLimpa });
+            }
+        }
+
+        const munDescFinal =
+            Array.isArray(b.municipios_descarregamento) && b.municipios_descarregamento.length > 0
+                ? b.municipios_descarregamento
+                : Array.from(munDescAgrupadosMap.values());
+
+        const somaValorCargas = cargasSelecionadasRows.reduce(
+            (acc, r) => acc + (parseFloat(r.valor_total || 0) || 0),
+            0
+        );
+        const somaPesoCargas = cargasSelecionadasRows.reduce(
+            (acc, r) => acc + (parseFloat(r.peso_bruto || 0) || 0),
+            0
+        );
+        const valorCargaSalvar =
+            parseFloat(b.valor_carga ?? b.valor_total_carga ?? 0) > 0
+                ? parseFloat(b.valor_carga ?? b.valor_total_carga ?? 0)
+                : somaValorCargas;
+        const pesoBrutoSalvar =
+            parseFloat(b.peso_bruto ?? b.peso_bruto_kg ?? 0) > 0
+                ? parseFloat(b.peso_bruto ?? b.peso_bruto_kg ?? 0)
+                : somaPesoCargas;
 
         const tipoEmitenteFinal = String(
             b.tipo_emitente ||
@@ -1403,11 +2180,11 @@ router.post('/mdfes', async (req, res) => {
                 b.numero ? parseInt(b.numero, 10) : null,
                 tipoEmitenteFinal,
                 String(b.tipo_transporte || '1'),
-                (b.uf_inicio || 'MS').toUpperCase(),
-                ufFimResolvida || 'MS',
+                normalizarUf(b.uf_inicio || 'MS') || 'MS',
+                normalizarUf(ufFimResolvida || 'MS') || 'MS',
                 JSON.stringify(b.ufs_percurso || []),
                 JSON.stringify(munCarregArray),
-                JSON.stringify(b.municipios_descarregamento || []),
+                JSON.stringify(munDescFinal),
                 codMunCarreg,
                 nomeMunCarreg,
                 codMunDesc,
@@ -1434,8 +2211,8 @@ router.post('/mdfes', async (req, res) => {
                 JSON.stringify(b.vale_pedagio || {}),
                 ctesIds.length,
                 cargasIds.length + chavesNfeManuais.length,
-                parseFloat(b.valor_carga ?? b.valor_total_carga ?? 0),
-                parseFloat(b.peso_bruto ?? b.peso_bruto_kg ?? 0),
+                valorCargaSalvar,
+                pesoBrutoSalvar,
             ]
         );
 
@@ -1457,25 +2234,25 @@ router.post('/mdfes', async (req, res) => {
             }
         }
 
-        for (const cargaId of cargasIds) {
-            const cargaRes = await db.query(
-                `SELECT chave_acesso, destinatario_municipio, dados_nfe FROM dash_cargas WHERE id = $1 AND tenant_id = $2`,
-                [cargaId, tenantId]
+        for (const cg of cargasSelecionadasRows) {
+            if (!cg.chave_acesso) continue;
+            const ibge = cargasIbgeResolvidoMap.get(cg.id);
+            await db.query(
+                `INSERT INTO dash_mdfe_documentos (tenant_id, mdfe_id, tipo_documento, chave, codigo_municipio_descarregamento, nome_municipio_descarregamento)
+                 VALUES ($1, $2, 'NFE', $3, $4, $5)
+                 ON CONFLICT (tenant_id, mdfe_id, chave) DO NOTHING`,
+                [
+                    tenantId,
+                    novoMdfe.id,
+                    cg.chave_acesso,
+                    ibge?.codigo || cg.destinatario_codigo_ibge || null,
+                    ibge?.nome || cg.destinatario_municipio || null,
+                ]
             );
-            if (cargaRes.rows.length > 0 && cargaRes.rows[0].chave_acesso) {
-                const cg = cargaRes.rows[0];
-                const codIbge = cg.dados_nfe?.destinatario?.codigo_municipio || cg.dados_nfe?.destinatario?.cMun || null;
-                await db.query(
-                    `INSERT INTO dash_mdfe_documentos (tenant_id, mdfe_id, tipo_documento, chave, codigo_municipio_descarregamento, nome_municipio_descarregamento)
-                     VALUES ($1, $2, 'NFE', $3, $4, $5)
-                     ON CONFLICT (tenant_id, mdfe_id, chave) DO NOTHING`,
-                    [tenantId, novoMdfe.id, cg.chave_acesso, codIbge, cg.destinatario_municipio]
-                );
-                await db.query(
-                    `UPDATE dash_cargas SET status = 'EM_MDFE', mdfe_id = $1 WHERE id = $2`,
-                    [novoMdfe.id, cargaId]
-                );
-            }
+            await db.query(
+                `UPDATE dash_cargas SET status = 'EM_MDFE', mdfe_id = $1 WHERE id = $2 AND tenant_id = $3`,
+                [novoMdfe.id, cg.id, tenantId]
+            );
         }
 
         for (const chaveNfeManual of chavesNfeManuais) {
@@ -1877,6 +2654,19 @@ router.get('/emitentes', async (req, res) => {
                     ? `data:${r.logo_mime || 'image/png'};base64,${r.logo_base64}`
                     : null,
                 regime_tributario: r.regime_tributario || cfg.focus_regime_tributario || '1',
+                perfil_operacional: ['CARGA_PROPRIA', 'TRANSPORTADORA', 'HIBRIDO'].includes(
+                    String(r.perfil_operacional || '').toUpperCase()
+                )
+                    ? String(r.perfil_operacional).toUpperCase()
+                    : 'HIBRIDO',
+                mdfe_tipo_emitente_padrao:
+                    String(r.perfil_operacional || '').toUpperCase() === 'CARGA_PROPRIA'
+                        ? '2'
+                        : String(r.perfil_operacional || '').toUpperCase() === 'TRANSPORTADORA'
+                        ? '1'
+                        : String(r.mdfe_tipo_emitente_padrao || '1') === '2'
+                        ? '2'
+                        : '1',
                 serie_cte: r.serie_cte || cfg.focus_serie_cte || '1',
                 serie_mdfe: r.serie_mdfe || cfg.focus_serie_mdfe || '1',
                 cfop_padrao_cte: r.cfop_padrao_cte || cfg.focus_cfop_padrao || '5353',
@@ -1983,7 +2773,7 @@ router.get('/diagnostico', async (req, res) => {
 
 router.get('/municipios', async (req, res) => {
     const tenantId = req.tenant.id;
-    const { search = '' } = req.query;
+    const { search = '', uf = '' } = req.query;
 
     try {
         let sql = `
@@ -1997,6 +2787,12 @@ router.get('/municipios', async (req, res) => {
         `;
         const params = [tenantId];
 
+        if (uf) {
+            const ufNorm = normalizarUf(uf) || String(uf).toUpperCase().trim().slice(0, 2);
+            params.push(ufNorm);
+            sql += ` AND (UPPER(TRIM(r.uf)) = $${params.length} OR UPPER(TRIM(c.uf)) = $${params.length})`;
+        }
+
         if (search) {
             params.push(`%${search.trim()}%`);
             sql += ` AND (r.cidade ILIKE $${params.length} OR c.nome ILIKE $${params.length} OR r.cod_ibge ILIKE $${params.length} OR c.codigo_ibge ILIKE $${params.length})`;
@@ -2004,8 +2800,34 @@ router.get('/municipios', async (req, res) => {
 
         sql += ` ORDER BY cidade ASC LIMIT 100`;
 
-        const { rows } = await db.query(sql, params);
-        return res.json({ success: true, data: rows });
+        const { rows } = await db.query(sql, params).catch(() => ({ rows: [] }));
+        const dictList = listarMunicipiosDicionario(uf, search);
+
+        const merged = new Map();
+        for (const r of rows) {
+            if (!r.cidade) continue;
+            const key = `${String(r.cidade).toUpperCase().trim()}|${String(r.uf || '').toUpperCase().trim()}`;
+            merged.set(key, {
+                cidade: r.cidade,
+                uf: normalizarUf(r.uf) || r.uf,
+                codigo_ibge: r.codigo_ibge,
+            });
+        }
+        for (const d of dictList) {
+            const key = `${String(d.nome).toUpperCase().trim()}|${d.uf}`;
+            if (!merged.has(key) || !merged.get(key).codigo_ibge) {
+                merged.set(key, {
+                    cidade: d.nome,
+                    uf: d.uf,
+                    codigo_ibge: d.codigo,
+                });
+            }
+        }
+
+        return res.json({
+            success: true,
+            data: Array.from(merged.values()).slice(0, 150),
+        });
     } catch (err) {
         logger.error('[Transporte] Erro ao buscar municípios:', err.message);
         return res.status(500).json({ error: 'Erro ao buscar municípios' });
@@ -2062,6 +2884,21 @@ router.post('/emitentes', async (req, res) => {
             (ambiente === 'producao' ? tokProd : tokHomolog) ||
             resolveSecretForSave(null, existingEmit.focus_token);
 
+        const perfilOpRaw = String(b.perfil_operacional || existingEmit.perfil_operacional || 'HIBRIDO')
+            .toUpperCase()
+            .trim();
+        const perfilOperacional = ['CARGA_PROPRIA', 'TRANSPORTADORA', 'HIBRIDO'].includes(perfilOpRaw)
+            ? perfilOpRaw
+            : 'HIBRIDO';
+        const mdfeTipoEmitentePadrao =
+            perfilOperacional === 'CARGA_PROPRIA'
+                ? '2'
+                : perfilOperacional === 'TRANSPORTADORA'
+                ? '1'
+                : String(b.mdfe_tipo_emitente_padrao || existingEmit.mdfe_tipo_emitente_padrao || '1') === '2'
+                ? '2'
+                : '1';
+
         let saved = null;
 
         // Se está editando o emitente atual (ex: corrigindo CNPJ placeholder 00000000000100 ou "1"), atualiza in-place mantendo o ID!
@@ -2094,8 +2931,10 @@ router.post('/emitentes', async (req, res) => {
                     cfop_padrao_cte = $24,
                     natureza_padrao_cte = $25,
                     aliquota_icms_padrao = $26,
+                    perfil_operacional = $27,
+                    mdfe_tipo_emitente_padrao = $28,
                     updated_at = NOW()
-                 WHERE id = $27 AND tenant_id = $28
+                 WHERE id = $29 AND tenant_id = $30
                  RETURNING *`,
                 [
                     cleanCnpj,
@@ -2124,6 +2963,8 @@ router.post('/emitentes', async (req, res) => {
                     b.cfop_padrao_cte || '5353',
                     b.natureza_padrao_cte || 'PRESTACAO DE SERVICO DE TRANSPORTE',
                     b.aliquota_icms_padrao !== undefined ? parseFloat(b.aliquota_icms_padrao) : 12.0,
+                    perfilOperacional,
+                    mdfeTipoEmitentePadrao,
                     targetById.id,
                     tenantId,
                 ]
@@ -2137,14 +2978,16 @@ router.post('/emitentes', async (req, res) => {
                     logradouro, numero, complemento, bairro, cep,
                     uf, municipio, codigo_municipio, telefone, email,
                     focus_token, focus_token_homologacao, focus_token_producao, focus_ambiente,
-                    serie_cte, serie_mdfe, cfop_padrao_cte, natureza_padrao_cte, aliquota_icms_padrao
+                    serie_cte, serie_mdfe, cfop_padrao_cte, natureza_padrao_cte, aliquota_icms_padrao,
+                    perfil_operacional, mdfe_tipo_emitente_padrao
                  ) VALUES (
                     $1, $2, $3, $4, $5, $6,
                     $7, $8,
                     $9, $10, $11, $12, $13,
                     $14, $15, $16, $17, $18,
                     $19, $20, $21, $22,
-                    $23, $24, $25, $26, $27
+                    $23, $24, $25, $26, $27,
+                    $28, $29
                  )
                  ON CONFLICT (tenant_id, cnpj) DO UPDATE SET
                     razao_social = EXCLUDED.razao_social,
@@ -2172,6 +3015,8 @@ router.post('/emitentes', async (req, res) => {
                     cfop_padrao_cte = COALESCE(NULLIF(EXCLUDED.cfop_padrao_cte, ''), dash_emitentes.cfop_padrao_cte),
                     natureza_padrao_cte = COALESCE(NULLIF(EXCLUDED.natureza_padrao_cte, ''), dash_emitentes.natureza_padrao_cte),
                     aliquota_icms_padrao = COALESCE(EXCLUDED.aliquota_icms_padrao, dash_emitentes.aliquota_icms_padrao),
+                    perfil_operacional = EXCLUDED.perfil_operacional,
+                    mdfe_tipo_emitente_padrao = EXCLUDED.mdfe_tipo_emitente_padrao,
                     updated_at = NOW()
                  RETURNING *`,
                 [
@@ -2202,6 +3047,8 @@ router.post('/emitentes', async (req, res) => {
                     b.cfop_padrao_cte || '5353',
                     b.natureza_padrao_cte || 'PRESTACAO DE SERVICO DE TRANSPORTE',
                     b.aliquota_icms_padrao !== undefined ? parseFloat(b.aliquota_icms_padrao) : 12.0,
+                    perfilOperacional,
+                    mdfeTipoEmitentePadrao,
                 ]
             );
             saved = rows[0];

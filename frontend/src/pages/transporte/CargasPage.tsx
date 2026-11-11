@@ -3,10 +3,12 @@ import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import api from '../../services/api';
 import TabelaResponsiva from '../../components/TabelaResponsiva';
+import GerenciadorRegioesModal from '../../components/transporte/GerenciadorRegioesModal';
 import {
   Package, Truck, FileText, ChevronRight,
   Search, List, LayoutGrid, Calendar, User, Printer, Copy, X, MapPin,
-  Upload, CloudDownload, Loader2, CheckCircle2, AlertTriangle, ShieldCheck
+  Upload, CloudDownload, Loader2, CheckCircle2, AlertTriangle, ShieldCheck,
+  Layers, RefreshCw
 } from 'lucide-react';
 
 interface CargaItem {
@@ -37,6 +39,8 @@ interface Carga {
   peso_bruto: number;
   volumes?: number;
   produto_predominante?: string;
+  regiao_nome?: string;
+  modelo_documento?: string;
   dados_nfe?: {
     itens?: CargaItem[];
     protocolo?: string;
@@ -59,6 +63,11 @@ export default function CargasPage() {
   const [dataInicio, setDataInicio] = useState('');
   const [dataFim, setDataFim] = useState('');
   const [statusFiltro, setStatusFiltro] = useState('TODAS');
+  const [regiaoFiltro, setRegiaoFiltro] = useState('TODAS');
+  const [ufFiltro, setUfFiltro] = useState('TODAS');
+  const [municipioFiltro, setMunicipioFiltro] = useState('TODOS');
+  const [modalRegioesOpen, setModalRegioesOpen] = useState(false);
+  const [consolidandoErp, setConsolidandoErp] = useState(false);
   const [viewMode, setViewMode] = useState<'lista' | 'cards'>('lista');
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
   const [expandedItemsIds, setExpandedItemsIds] = useState<number[]>([]);
@@ -81,7 +90,7 @@ export default function CargasPage() {
   const [codigoMunFim, setCodigoMunFim] = useState('');
 
   const { data, isLoading, refetch } = useQuery({
-    queryKey: ['cargas', search, cliente, dataInicio, dataFim, statusFiltro],
+    queryKey: ['cargas', search, cliente, dataInicio, dataFim, statusFiltro, regiaoFiltro, ufFiltro, municipioFiltro],
     queryFn: async () => {
       const res = await api.get('/transporte/cargas', {
         params: {
@@ -90,12 +99,37 @@ export default function CargasPage() {
           data_inicio: dataInicio || undefined,
           data_fim: dataFim || undefined,
           status: statusFiltro && statusFiltro !== 'TODAS' ? statusFiltro : undefined,
-          limit: 500
+          regiao: regiaoFiltro !== 'TODAS' ? regiaoFiltro : undefined,
+          uf_destino: ufFiltro !== 'TODAS' ? ufFiltro : undefined,
+          municipio: municipioFiltro !== 'TODOS' ? municipioFiltro : undefined,
+          incluir_resumo: 'true',
+          limit: 800
         }
       });
       return res.data;
     }
   });
+
+  const handleConsolidarNotasErp = async () => {
+    setConsolidandoErp(true);
+    setCargasBanner(null);
+    try {
+      const res = await api.post('/transporte/cargas/consolidar-erp');
+      const d = res.data?.data || {};
+      await refetch();
+      setCargasBanner({
+        ok: true,
+        msg: `Consolidação ERP concluída: ${d.total || 0} NF-e(s) consolidadas (${d.pendentes || 0} disponíveis, ${d.inseridas_de_vendas || 0} resgatadas de Vendas e ${d.enriquecidas || 0} enriquecidas com cliente/IBGE/região).`
+      });
+    } catch (err: any) {
+      setCargasBanner({
+        ok: false,
+        msg: err.response?.data?.error || err.message || 'Erro ao consolidar notas do ERP.'
+      });
+    } finally {
+      setConsolidandoErp(false);
+    }
+  };
 
   // Quadro de Sincronismo do Worker (Clientes, Produtos, Notas Fiscais, Vendas/Itens)
   // Diagnóstico da sincronização do Worker (mostra o que fazer se as notas não chegarem)
@@ -505,6 +539,27 @@ export default function CargasPage() {
 
           <button
             type="button"
+            onClick={() => setModalRegioesOpen(true)}
+            className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-semibold text-sky-700 dark:text-sky-300 bg-sky-50 dark:bg-sky-950/50 border border-sky-200 dark:border-sky-800 hover:bg-sky-100 dark:hover:bg-sky-900/50 transition-all"
+            title="Criar e editar Regiões / Rotas de Entrega agrupando municípios"
+          >
+            <Layers className="w-4 h-4" />
+            Regiões de Entrega
+          </button>
+
+          <button
+            type="button"
+            onClick={handleConsolidarNotasErp}
+            disabled={consolidandoErp}
+            className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-semibold text-slate-700 dark:text-slate-200 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-700 transition-all"
+            title="Cruza Vendas, Clientes, Itens e Regiões do ERP para trazer 100% das NF-es emitidas"
+          >
+            {consolidandoErp ? <Loader2 className="w-4 h-4 animate-spin text-sky-600" /> : <RefreshCw className="w-4 h-4 text-sky-600" />}
+            Consolidar ERP
+          </button>
+
+          <button
+            type="button"
             onClick={() => { setMdeFeedback(null); setModalMdeOpen(true); }}
             className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-semibold text-teal-700 dark:text-teal-300 bg-teal-50 dark:bg-teal-950/50 border border-teal-200 dark:border-teal-800 hover:bg-teal-100 dark:hover:bg-teal-900/50 transition-all"
             title="Buscar NF-es emitidas contra o CNPJ na SEFAZ e registrar Ciência da Operação (Focus MDe)"
@@ -570,8 +625,58 @@ export default function CargasPage() {
         </div>
       )}
 
-      {/* Barra de Filtros e Busca */}
+      {/* Barra de Filtros e Busca (com Regiões / Rotas de Entrega) */}
       <div className="bg-white dark:bg-slate-800 p-4 rounded-2xl border border-slate-200/80 dark:border-slate-700/80 space-y-3">
+        {(data?.resumo?.regioes || []).length > 0 && (
+          <div className="flex flex-wrap items-center gap-1.5 pb-2.5 border-b border-slate-100 dark:border-slate-700/70">
+            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 mr-1 flex items-center gap-1">
+              <Layers className="w-3.5 h-3.5 text-sky-600" />
+              Região / Rota:
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                setRegiaoFiltro('TODAS');
+                setMunicipioFiltro('TODOS');
+              }}
+              className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-colors ${
+                regiaoFiltro === 'TODAS'
+                  ? 'bg-slate-900 dark:bg-white text-white dark:text-slate-900'
+                  : 'bg-slate-100 dark:bg-slate-900 text-slate-600 dark:text-slate-300 hover:bg-slate-200'
+              }`}
+            >
+              Todas
+            </button>
+            {(data?.resumo?.regioes || []).map((r: any) => {
+              const ativa = regiaoFiltro === r.nome;
+              return (
+                <button
+                  key={r.nome}
+                  type="button"
+                  onClick={() => {
+                    setRegiaoFiltro(ativa ? 'TODAS' : r.nome);
+                    setMunicipioFiltro('TODOS');
+                  }}
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold border transition-colors ${
+                    ativa
+                      ? 'bg-sky-600 text-white border-sky-600'
+                      : 'bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 border-slate-200 dark:border-slate-700 hover:border-sky-400'
+                  }`}
+                >
+                  {r.cor && (
+                    <span
+                      className="w-2 h-2 rounded-full shrink-0"
+                      style={{ backgroundColor: ativa ? '#ffffff' : r.cor }}
+                    />
+                  )}
+                  <span>{r.nome === 'SEM_REGIAO' ? 'Sem Região' : r.nome}</span>
+                  <span className="opacity-75 text-[10px]">({r.qtd})</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+
         <div className="flex flex-col lg:flex-row gap-3">
           <div className="relative flex-1">
             <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
@@ -615,6 +720,37 @@ export default function CargasPage() {
           </div>
 
           <select
+            value={ufFiltro}
+            onChange={e => {
+              setUfFiltro(e.target.value);
+              setMunicipioFiltro('TODOS');
+            }}
+            aria-label="Filtrar por UF de Destino"
+            className="px-3 py-2 text-xs bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-700 dark:text-slate-300"
+          >
+            <option value="TODAS">Todas UFs</option>
+            {(data?.resumo?.ufs || UFS_BRASIL.map(u => ({ uf: u, qtd: null }))).map((u: any) => (
+              <option key={u.uf} value={u.uf}>
+                UF: {u.uf}{u.qtd !== null ? ` (${u.qtd})` : ''}
+              </option>
+            ))}
+          </select>
+
+          <select
+            value={municipioFiltro}
+            onChange={e => setMunicipioFiltro(e.target.value)}
+            aria-label="Filtrar por Município de Destino"
+            className="px-3 py-2 text-xs bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-700 dark:text-slate-300 max-w-[200px]"
+          >
+            <option value="TODOS">Todos Municípios</option>
+            {(data?.resumo?.cidades || []).map((c: any) => (
+              <option key={`${c.municipio}-${c.uf}`} value={c.municipio}>
+                {c.municipio}/{c.uf} ({c.qtd})
+              </option>
+            ))}
+          </select>
+
+          <select
             value={statusFiltro}
             onChange={e => setStatusFiltro(e.target.value)}
             className="px-3 py-2 text-xs bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-700 dark:text-slate-300"
@@ -627,7 +763,16 @@ export default function CargasPage() {
           </select>
 
           <button
-            onClick={() => { setSearch(''); setCliente(''); setDataInicio(''); setDataFim(''); setStatusFiltro('TODAS'); }}
+            onClick={() => {
+              setSearch('');
+              setCliente('');
+              setDataInicio('');
+              setDataFim('');
+              setStatusFiltro('TODAS');
+              setRegiaoFiltro('TODAS');
+              setUfFiltro('TODAS');
+              setMunicipioFiltro('TODOS');
+            }}
             className="px-3 py-2 text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-xl transition-colors flex items-center gap-1.5"
           >
             <X className="w-3.5 h-3.5" />
@@ -806,11 +951,18 @@ export default function CargasPage() {
                   },
                   {
                     chave: 'destino',
-                    rotulo: 'Destino (Cidade/UF)',
+                    rotulo: 'Destino / Região',
                     render: c => (
-                      <span className="text-slate-600 dark:text-slate-400 whitespace-nowrap">
-                        {c.destinatario_municipio || '—'}/{c.destinatario_uf || ''}
-                      </span>
+                      <div>
+                        <span className="text-slate-700 dark:text-slate-300 font-medium whitespace-nowrap block">
+                          {c.destinatario_municipio || '—'}/{c.destinatario_uf || ''}
+                        </span>
+                        {c.regiao_nome && (
+                          <span className="inline-block mt-0.5 px-1.5 py-0.2 rounded text-[10px] font-semibold bg-sky-100 dark:bg-sky-950/70 text-sky-800 dark:text-sky-300">
+                            {c.regiao_nome}
+                          </span>
+                        )}
+                      </div>
                     )
                   },
                   {
@@ -1723,6 +1875,11 @@ export default function CargasPage() {
           </div>
         </div>
       )}
+      <GerenciadorRegioesModal
+        aberto={modalRegioesOpen}
+        onFechar={() => setModalRegioesOpen(false)}
+        onAtualizado={() => refetch()}
+      />
     </div>
   );
 }

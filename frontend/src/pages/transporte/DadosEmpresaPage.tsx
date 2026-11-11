@@ -6,7 +6,7 @@ import {
   Building2, ShieldCheck, KeyRound, Save,
   CheckCircle2, MapPin, FileText, Wifi, Loader2, AlertTriangle,
   Zap, Webhook, ChevronDown, ChevronUp, Lock, RefreshCw, Search,
-  Upload, Trash2, Image as ImageIcon
+  Upload, Trash2, Image as ImageIcon, Truck, Package
 } from 'lucide-react';
 
 interface EmitenteForm {
@@ -18,6 +18,8 @@ interface EmitenteForm {
   inscricao_municipal: string;
   regime_tributario: string;
   rntrc: string;
+  perfil_operacional: 'CARGA_PROPRIA' | 'TRANSPORTADORA' | 'HIBRIDO';
+  mdfe_tipo_emitente_padrao: '1' | '2';
   focus_token: string;
   focus_token_homologacao: string;
   focus_token_producao: string;
@@ -152,6 +154,8 @@ export default function DadosEmpresaPage() {
     inscricao_municipal: '',
     regime_tributario: '3',
     rntrc: '',
+    perfil_operacional: 'HIBRIDO',
+    mdfe_tipo_emitente_padrao: '1',
     focus_token: '',
     focus_token_homologacao: '',
     focus_token_producao: '',
@@ -213,6 +217,18 @@ export default function DadosEmpresaPage() {
         inscricao_municipal: emAtual.inscricao_municipal || '',
         regime_tributario: String(emAtual.regime_tributario || '3'),
         rntrc: emAtual.rntrc || '',
+        perfil_operacional:
+          emAtual.perfil_operacional === 'CARGA_PROPRIA' || emAtual.perfil_operacional === 'TRANSPORTADORA'
+            ? emAtual.perfil_operacional
+            : 'HIBRIDO',
+        mdfe_tipo_emitente_padrao:
+          emAtual.perfil_operacional === 'CARGA_PROPRIA'
+            ? '2'
+            : emAtual.perfil_operacional === 'TRANSPORTADORA'
+            ? '1'
+            : String(emAtual.mdfe_tipo_emitente_padrao || '1') === '2'
+            ? '2'
+            : '1',
         focus_token: '',
         focus_token_homologacao: '',
         focus_token_producao: '',
@@ -234,7 +250,15 @@ export default function DadosEmpresaPage() {
         aliquota_icms_padrao: String(emAtual.aliquota_icms_padrao ?? '12.00')
       });
     }
-  }, [emAtual?.id, emAtual?.cnpj, emAtual?.inscricao_estadual, emAtual?.rntrc, emAtual?.razao_social]);
+    }, [
+      emAtual?.id,
+      emAtual?.cnpj,
+      emAtual?.inscricao_estadual,
+      emAtual?.rntrc,
+      emAtual?.razao_social,
+      emAtual?.perfil_operacional,
+      emAtual?.mdfe_tipo_emitente_padrao
+    ]);
 
   useEffect(() => {
     if (!logoPendingDataUri) {
@@ -992,6 +1016,151 @@ export default function DadosEmpresaPage() {
           )}
         </div>
 
+        {/* 1.5 Perfil Operacional de Transporte (Define MDF-e sem CT-e vs Transportadora) */}
+        <div className="p-5 rounded-2xl bg-slate-50 dark:bg-slate-900/50 border border-slate-200/80 dark:border-slate-700/80 space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div>
+              <h3 className="text-xs font-bold text-slate-800 dark:text-slate-100 uppercase tracking-wider flex items-center gap-2">
+                <Truck className="w-4 h-4 text-emerald-600" />
+                Perfil Operacional de Transporte (Configuração de MDF-e sem CT-e vs Com CT-e)
+              </h3>
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                Define como o sistema pré-configura o MDF-e e quais campos da ANTT/SEFAZ são exigidos por padrão.
+              </p>
+            </div>
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-bold bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300">
+              Padrão MDF-e: {form.mdfe_tipo_emitente_padrao === '2' ? 'tpEmit=2 (Sem CT-e · NF-e do ERP)' : 'tpEmit=1 (Com CT-e)'}
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <button
+              type="button"
+              onClick={() =>
+                setForm({
+                  ...form,
+                  perfil_operacional: 'CARGA_PROPRIA',
+                  mdfe_tipo_emitente_padrao: '2'
+                })
+              }
+              className={`p-4 rounded-xl border text-left transition-all flex flex-col justify-between gap-2 ${
+                form.perfil_operacional === 'CARGA_PROPRIA'
+                  ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-500 ring-2 ring-emerald-500/25'
+                  : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 hover:border-emerald-300'
+              }`}
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Package className="w-4 h-4 text-emerald-600 shrink-0" />
+                  <span className="text-xs font-bold text-slate-900 dark:text-white">
+                    Carga Própria (MDF-e sem CT-e)
+                  </span>
+                </div>
+                {form.perfil_operacional === 'CARGA_PROPRIA' && (
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                )}
+              </div>
+              <p className="text-[11px] text-slate-600 dark:text-slate-400 leading-relaxed">
+                Distribuidoras, atacadistas, indústrias e varejo que entregam suas próprias NF-es do ERP.{' '}
+                <strong>Dispensa CT-e, RNTRC e CIOT</strong> em frota própria.
+              </p>
+            </button>
+
+            <button
+              type="button"
+              onClick={() =>
+                setForm({
+                  ...form,
+                  perfil_operacional: 'TRANSPORTADORA',
+                  mdfe_tipo_emitente_padrao: '1'
+                })
+              }
+              className={`p-4 rounded-xl border text-left transition-all flex flex-col justify-between gap-2 ${
+                form.perfil_operacional === 'TRANSPORTADORA'
+                  ? 'bg-sky-50 dark:bg-sky-950/40 border-sky-500 ring-2 ring-sky-500/25'
+                  : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 hover:border-sky-300'
+              }`}
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <FileText className="w-4 h-4 text-sky-600 shrink-0" />
+                  <span className="text-xs font-bold text-slate-900 dark:text-white">
+                    Transportadora (CT-e + MDF-e)
+                  </span>
+                </div>
+                {form.perfil_operacional === 'TRANSPORTADORA' && (
+                  <CheckCircle2 className="w-4 h-4 text-sky-600 shrink-0" />
+                )}
+              </div>
+              <p className="text-[11px] text-slate-600 dark:text-slate-400 leading-relaxed">
+                Prestadores de serviço de transporte (ETC) que cobram frete de terceiros, emitem CT-e (mod. 57) e vinculam os CT-es no MDF-e.
+              </p>
+            </button>
+
+            <button
+              type="button"
+              onClick={() =>
+                setForm({
+                  ...form,
+                  perfil_operacional: 'HIBRIDO'
+                })
+              }
+              className={`p-4 rounded-xl border text-left transition-all flex flex-col justify-between gap-2 ${
+                form.perfil_operacional === 'HIBRIDO'
+                  ? 'bg-amber-50 dark:bg-amber-950/40 border-amber-500 ring-2 ring-amber-500/25'
+                  : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 hover:border-amber-300'
+              }`}
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Building2 className="w-4 h-4 text-amber-600 shrink-0" />
+                  <span className="text-xs font-bold text-slate-900 dark:text-white">
+                    Operação Híbrida (Ambos)
+                  </span>
+                </div>
+                {form.perfil_operacional === 'HIBRIDO' && (
+                  <CheckCircle2 className="w-4 h-4 text-amber-600 shrink-0" />
+                )}
+              </div>
+              <p className="text-[11px] text-slate-600 dark:text-slate-400 leading-relaxed">
+                Opera tanto Carga Própria (NF-e direta sem CT-e) quanto Transporte remunerado com CT-e, alternando livremente no MDF-e.
+              </p>
+            </button>
+          </div>
+
+          {form.perfil_operacional === 'HIBRIDO' && (
+            <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-200/70 dark:border-slate-700/70">
+              <span className="text-xs font-medium text-slate-700 dark:text-slate-300">
+                Modalidade inicial ao abrir <strong>Emitir MDF-e</strong>:
+              </span>
+              <div className="inline-flex rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-1 gap-1">
+                <button
+                  type="button"
+                  onClick={() => setForm({ ...form, mdfe_tipo_emitente_padrao: '2' })}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${
+                    form.mdfe_tipo_emitente_padrao === '2'
+                      ? 'bg-emerald-600 text-white'
+                      : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+                  }`}
+                >
+                  2 — Sem CT-e (NF-es do ERP)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setForm({ ...form, mdfe_tipo_emitente_padrao: '1' })}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${
+                    form.mdfe_tipo_emitente_padrao === '1'
+                      ? 'bg-sky-600 text-white'
+                      : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+                  }`}
+                >
+                  1 — Com CT-e (Transportadora)
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+
         {/* 2. Identificação da Transportadora */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
           <div>
@@ -1046,12 +1215,18 @@ export default function DadosEmpresaPage() {
 
           <div>
             <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1.5">
-              RNTRC (ANTT) *
+              {form.perfil_operacional === 'CARGA_PROPRIA'
+                ? 'RNTRC (ANTT) — Opcional p/ Carga Própria'
+                : 'RNTRC (ANTT) *'}
             </label>
             <input
               type="text"
-              required
-              placeholder="8 dígitos (ex: 12345678)"
+              required={form.perfil_operacional !== 'CARGA_PROPRIA'}
+              placeholder={
+                form.perfil_operacional === 'CARGA_PROPRIA'
+                  ? 'Dispensado em frota própria (ou 8 dígitos)'
+                  : '8 dígitos (ex: 12345678)'
+              }
               value={form.rntrc}
               onChange={e => setForm({ ...form, rntrc: e.target.value.replace(/\D/g, '').slice(0, 14) })}
               className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white font-mono focus:ring-2 focus:ring-brand-500"

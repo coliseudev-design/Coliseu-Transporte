@@ -7,6 +7,11 @@ const logger = require('../config/logger');
 const { requireInternalAuth, requireAdmin, isValidUuid } = require('../middleware/auth');
 const { invalidateTenant } = require('../config/cache');
 const TransporteService = require('../services/transporteService');
+const {
+    enriquecerLinhaCargaSync,
+    consolidarCargasErpTenant,
+    invalidarCacheConsolidacaoTenant,
+} = require('../services/cargaConsolidatorService');
 
 const IBGE_UF_BY_CODE = {
     '11': 'RO', '12': 'AC', '13': 'AM', '14': 'RR', '15': 'PA', '16': 'AP', '17': 'TO',
@@ -339,6 +344,8 @@ function normalizarCargaErpRow(row) {
         ...(itensLista.length > 0 ? { itens: itensLista } : {})
     };
 
+    enriquecerLinhaCargaSync(row);
+
     return row;
 }
 
@@ -450,7 +457,15 @@ const TABELAS_MAP = {
     'rel_ic_contas_plano_res': ['id_firebird', 'codigo', 'descricao', 'tipo', 'nivel', 'conta_pai_id_firebird', 'ativo'],
     'dash_estatisticas_software': ['cliente_id_firebird', 'versao_software', 'versao_atualizacao', 'servidor', 'certificado_vencimento', 'usa_nfe', 'usa_nfce', 'usa_nfse', 'usa_sped', 'usa_boleto', 'usa_folha', 'usa_whats', 'usa_pix', 'usa_cobranca', 'usa_pontuacao', 'usa_os', 'usa_cte', 'usa_mdfe', 'usa_sales', 'usa_dash', 'usa_coletor', 'softwares'],
     // Módulo Coliseu Transporte (Sincronizado pelo Worker do ERP — isolado dos demais módulos)
-    'dash_cargas': ['id_firebird', 'tipo_documento', 'chave_acesso', 'numero', 'serie', 'data_emissao', 'remetente_documento', 'remetente_nome', 'remetente_municipio', 'remetente_uf', 'destinatario_documento', 'destinatario_nome', 'destinatario_municipio', 'destinatario_uf', 'valor_total', 'valor_produtos', 'peso_bruto', 'peso_liquido', 'volume_m3', 'volumes', 'especie', 'produto_predominante', 'status', 'dados_nfe'],
+    'dash_cargas': [
+        'id_firebird', 'venda_id_firebird', 'cliente_id_firebird', 'tipo_documento', 'modelo_documento',
+        'chave_acesso', 'numero', 'serie', 'data_emissao',
+        'remetente_documento', 'remetente_nome', 'remetente_municipio', 'remetente_uf', 'remetente_codigo_ibge',
+        'destinatario_documento', 'destinatario_nome', 'destinatario_municipio', 'destinatario_uf',
+        'destinatario_codigo_ibge', 'destinatario_bairro', 'destinatario_cep', 'regiao_nome',
+        'valor_total', 'valor_produtos', 'peso_bruto', 'peso_liquido', 'volume_m3', 'volumes',
+        'especie', 'produto_predominante', 'produto_ncm', 'status', 'dados_nfe'
+    ],
     'dash_veiculos': ['id_firebird', 'placa', 'renavam', 'chassi', 'uf', 'tipo_rodado', 'tipo_carroceria', 'tara_kg', 'capacidade_kg', 'capacidade_m3', 'tipo_proprietario', 'rntrc', 'cpf_cnpj_proprietario', 'nome_proprietario', 'uf_proprietario'],
     'dash_motoristas': ['id_firebird', 'cpf', 'nome', 'cnh', 'cnh_categoria', 'cnh_validade', 'telefone'],
 };
@@ -1334,6 +1349,16 @@ router.post('/:tabela', async (req, res) => {
                     sincronizado_em TIMESTAMPTZ DEFAULT NOW(),
                     UNIQUE(tenant_id, chave_acesso)
                 );
+                ALTER TABLE dash_cargas
+                    ADD COLUMN IF NOT EXISTS modelo_documento VARCHAR(4) DEFAULT '55',
+                    ADD COLUMN IF NOT EXISTS destinatario_codigo_ibge VARCHAR(7),
+                    ADD COLUMN IF NOT EXISTS destinatario_bairro VARCHAR(120),
+                    ADD COLUMN IF NOT EXISTS destinatario_cep VARCHAR(10),
+                    ADD COLUMN IF NOT EXISTS remetente_codigo_ibge VARCHAR(7),
+                    ADD COLUMN IF NOT EXISTS produto_ncm VARCHAR(10),
+                    ADD COLUMN IF NOT EXISTS regiao_nome VARCHAR(120),
+                    ADD COLUMN IF NOT EXISTS cliente_id_firebird INTEGER,
+                    ADD COLUMN IF NOT EXISTS venda_id_firebird INTEGER;
             `).catch(() => {});
         }
 
@@ -1787,6 +1812,14 @@ router.post('/:tabela', async (req, res) => {
         ]);
 
         await client.query('COMMIT');
+
+        // Pós-Processamento Transporte: Consolida NF-es do ERP, IBGE e Regiões em background
+        if (['dash_cargas', 'dash_vendas', 'dash_vendas_itens', 'dash_clientes', 'dash_produtos'].includes(tabela)) {
+            invalidarCacheConsolidacaoTenant(tenantId);
+            consolidarCargasErpTenant(tenantId).catch(err => {
+                logger.debug('[Sync] Consolidação assíncrona de cargas concluída com aviso:', err.message);
+            });
+        }
 
         // Pós-Processamento: Atualizar Cache e Materialized Views
         if (['dash_vendas', 'dash_vendas_itens', 'dash_financeiro'].includes(tabela)) {

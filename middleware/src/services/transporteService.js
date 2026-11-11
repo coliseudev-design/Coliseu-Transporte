@@ -21,6 +21,11 @@ const {
   maskSecret,
   resolveSecretForSave,
 } = require('../utils/cryptoVault');
+const {
+  resolverIbgeMunicipioSync,
+  resolverIbgeMunicipioAsync,
+  normalizarUf,
+} = require('../utils/ibgeMunicipios');
 
 const IBGE_UF_BY_CODE = {
   '11': 'RO', '12': 'AC', '13': 'AM', '14': 'RR', '15': 'PA', '16': 'AP', '17': 'TO',
@@ -512,14 +517,7 @@ function parseJsonSafe(val, fallback) {
 }
 
 function resolverIbgeMunicipio(codigoIbge, nomeMunicipio, uf) {
-  const cleanCode = digitsOnly(codigoIbge);
-  const ufUpper = String(uf || 'MS').toUpperCase().trim();
-  const cap = CAPITAIS_IBGE_FALLBACK[ufUpper] || CAPITAIS_IBGE_FALLBACK.MS;
-  return {
-    codigo: cleanCode.length === 7 ? cleanCode : cap.codigo,
-    nome: (nomeMunicipio && String(nomeMunicipio).trim()) || cap.nome,
-    uf: ufUpper.length === 2 ? ufUpper : 'MS',
-  };
+  return resolverIbgeMunicipioSync(codigoIbge, nomeMunicipio, uf);
 }
 
 function mapFocusStatusToDb(focusStatus, currentStatus = 'PROCESSANDO') {
@@ -652,16 +650,35 @@ class TransporteService {
         ? tokenProducao || (emitente?.focus_ambiente === 'producao' ? emitTok : '') || ''
         : tokenHomologacao || (emitente?.focus_ambiente !== 'producao' ? emitTok : '') || '';
 
-    const ufRaw = (emitente?.uf || cfg?.focus_uf || 'MS').toUpperCase();
+    const ufRaw = normalizarUf(emitente?.uf || cfg?.focus_uf || 'MS') || 'MS';
     const ibge = resolverIbgeMunicipio(
       emitente?.codigo_municipio || cfg?.focus_codigo_municipio,
       emitente?.municipio || cfg?.focus_municipio || cfg?.empresa_regiao,
       ufRaw
     );
 
+    const perfilOperacionalRaw = String(emitente?.perfil_operacional || 'HIBRIDO')
+      .toUpperCase()
+      .trim();
+    const perfilOperacional = ['CARGA_PROPRIA', 'TRANSPORTADORA', 'HIBRIDO'].includes(
+      perfilOperacionalRaw
+    )
+      ? perfilOperacionalRaw
+      : 'HIBRIDO';
+    const mdfeTipoEmitentePadrao =
+      perfilOperacional === 'CARGA_PROPRIA'
+        ? '2'
+        : perfilOperacional === 'TRANSPORTADORA'
+        ? '1'
+        : String(emitente?.mdfe_tipo_emitente_padrao || '1') === '2'
+        ? '2'
+        : '1';
+
     return {
       ...(emitente || {}),
       id: emitente?.id || null,
+      perfil_operacional: perfilOperacional,
+      mdfe_tipo_emitente_padrao: mdfeTipoEmitentePadrao,
       cnpj: digitsOnly(emitente?.cnpj || cfg?.empresa_cnpj || ''),
       razao_social:
         emitente?.razao_social || cfg?.empresa_razao_social || cfg?.empresa_nome || 'EMPRESA EMITENTE',
@@ -3023,8 +3040,9 @@ class TransporteService {
               ct.tomador as cte_tomador, ct.tomador_documento as cte_tomador_doc,
               ct.remetente_dados as cte_remetente_dados, ct.destinatario_dados as cte_destinatario_dados,
               cg.destinatario_municipio as nfe_mun_fim, cg.destinatario_uf as nfe_uf_fim,
+              cg.destinatario_codigo_ibge as nfe_cod_fim, cg.destinatario_cep as nfe_cep_fim,
               cg.valor_total as nfe_valor_total, cg.peso_bruto as nfe_peso_bruto,
-              cg.produto_predominante as nfe_produto, cg.dados_nfe as nfe_dados
+              cg.produto_predominante as nfe_produto, cg.produto_ncm as nfe_ncm, cg.dados_nfe as nfe_dados
        FROM dash_mdfe_documentos md
        LEFT JOIN dash_ctes ct ON ct.chave_cte = md.chave AND ct.tenant_id = md.tenant_id
        LEFT JOIN dash_cargas cg ON cg.chave_acesso = md.chave AND cg.tenant_id = md.tenant_id
@@ -3032,9 +3050,22 @@ class TransporteService {
       [mdfeId, tenantId]
     );
 
-    const primeiroDocUfFim = docs[0]?.cte_uf_fim || docs[0]?.nfe_uf_fim || '';
-    const ufInicio = (mdfe.uf_inicio || emitente.uf || 'MS').toUpperCase();
-    const ufFim = (mdfe.uf_fim || primeiroDocUfFim || emitente.uf || 'MS').toUpperCase();
+    const ufsDocsDistintas = Array.from(
+      new Set(
+        docs
+          .map((d) => normalizarUf(d.cte_uf_fim || d.nfe_uf_fim || ''))
+          .filter((u) => u && u.length === 2)
+      )
+    );
+    if (ufsDocsDistintas.length > 1) {
+      throw new Error(
+        `Regra SEFAZ MDF-e: um único Manifesto não pode misturar documentos com UFs de descarregamento diferentes (${ufsDocsDistintas.join(', ')}). Emita 1 MDF-e separado para cada UF de destino.`
+      );
+    }
+
+    const primeiroDocUfFim = ufsDocsDistintas[0] || normalizarUf(docs[0]?.cte_uf_fim || docs[0]?.nfe_uf_fim || '');
+    const ufInicio = normalizarUf(mdfe.uf_inicio || emitente.uf || 'MS') || 'MS';
+    const ufFim = normalizarUf(primeiroDocUfFim || mdfe.uf_fim || emitente.uf || 'MS') || 'MS';
 
     // Numeração sequencial segura por tenant
     const serieEnvio = Number(mdfe.serie || emitente.serie_mdfe || 1);
@@ -3120,10 +3151,12 @@ class TransporteService {
 
     // 3. Municípios de Descarregamento agrupando conhecimentos_transporte e notas_fiscais
     const munDescExplicit = parseJsonSafe(mdfe.municipios_descarregamento, []);
-    const defaultMunDesc = resolverIbgeMunicipio(
+    const defaultMunDesc = await resolverIbgeMunicipioAsync(
+      db,
       mdfe.codigo_municipio_descarregamento ||
         docs[0]?.codigo_municipio_descarregamento ||
         docs[0]?.cte_cod_fim ||
+        docs[0]?.nfe_cod_fim ||
         munDescExplicit?.[0]?.codigo ||
         munDescExplicit?.[0]?.ibge ||
         (ufFim === emitente.uf ? emitente.codigo_municipio : ''),
@@ -3138,8 +3171,11 @@ class TransporteService {
     );
 
     const gruposDesc = new Map();
-    const getOrCreateGrupo = (cod, nome) => {
-      const r = resolverIbgeMunicipio(cod, nome, ufFim);
+    const getOrCreateGrupoAsync = async (cod, nome) => {
+      const temDadosProprios = Boolean(digitsOnly(cod) || String(nome || '').trim());
+      const r = temDadosProprios
+        ? await resolverIbgeMunicipioAsync(db, cod, nome, ufFim)
+        : defaultMunDesc;
       if (!gruposDesc.has(r.codigo)) {
         gruposDesc.set(r.codigo, {
           codigo: r.codigo,
@@ -3154,10 +3190,20 @@ class TransporteService {
     for (const d of docs) {
       const chaveLimpa = digitsOnly(d.chave);
       if (chaveLimpa.length !== 44) continue;
-      const g = getOrCreateGrupo(
-        d.codigo_municipio_descarregamento || d.cte_cod_fim || defaultMunDesc.codigo,
-        d.nome_municipio_descarregamento || d.cte_mun_fim || d.nfe_mun_fim || defaultMunDesc.nome
-      );
+      const nfeDadosDoc = parseJsonSafe(d.nfe_dados, {}) || {};
+      const docCodProprio =
+        d.codigo_municipio_descarregamento ||
+        d.cte_cod_fim ||
+        d.nfe_cod_fim ||
+        nfeDadosDoc?.destinatario?.codigo_municipio ||
+        '';
+      const docNomeProprio =
+        d.nome_municipio_descarregamento ||
+        d.cte_mun_fim ||
+        d.nfe_mun_fim ||
+        nfeDadosDoc?.destinatario?.municipio ||
+        '';
+      const g = await getOrCreateGrupoAsync(docCodProprio, docNomeProprio);
       if (String(d.tipo_documento).toUpperCase() === 'CTE') {
         if (!g.conhecimentos_transporte.some((x) => x.chave_cte === chaveLimpa)) {
           g.conhecimentos_transporte.push({ chave_cte: chaveLimpa });
@@ -3173,7 +3219,7 @@ class TransporteService {
     if (Array.isArray(munDescExplicit)) {
       for (const m of munDescExplicit) {
         if (!m?.nome && !m?.codigo && !m?.ibge) continue;
-        const g = getOrCreateGrupo(m.codigo || m.ibge, m.nome || m.municipio);
+        const g = await getOrCreateGrupoAsync(m.codigo || m.ibge, m.nome || m.municipio);
         if (Array.isArray(m.conhecimentos_transporte)) {
           for (const ct of m.conhecimentos_transporte) {
             const ch = digitsOnly(ct?.chave_cte || ct);
@@ -3419,12 +3465,17 @@ class TransporteService {
     const prodPrincipal = Array.isArray(prodPredRaw) && prodPredRaw[0] ? prodPredRaw[0] : null;
     const isCargaLotacao = totalDocsVinculados === 1 || Boolean(prodPrincipal?.lotacao);
 
-    const ncmProd = digitsOnly(prodPrincipal?.ncm || mdfe.produto_predominante_ncm || '');
-    const ncmFinal = ncmProd.length === 8 ? ncmProd : isCargaLotacao ? '21069090' : '';
-
     const primeiroCteRem = parseJsonSafe(docs[0]?.cte_remetente_dados, {}) || {};
     const primeiroCteDest = parseJsonSafe(docs[0]?.cte_destinatario_dados, {}) || {};
     const primeiraNfeDados = parseJsonSafe(docs[0]?.nfe_dados, {}) || {};
+
+    const ncmDocReal =
+      docs.map((d) => digitsOnly(d.nfe_ncm || '')).find((n) => n.length === 8) ||
+      digitsOnly(primeiraNfeDados?.itens?.[0]?.ncm || '');
+    const ncmProd = digitsOnly(
+      prodPrincipal?.ncm || mdfe.produto_predominante_ncm || ncmDocReal || ''
+    );
+    const ncmFinal = ncmProd.length === 8 ? ncmProd : isCargaLotacao ? '21069090' : '';
 
     const cepCarregDigits = digitsOnly(
       mdfe.cep_carregamento || primeiroCteRem.cep || emitente.cep || ''
@@ -3435,6 +3486,7 @@ class TransporteService {
     const cepDescDigits = digitsOnly(
       mdfe.cep_descarregamento ||
         primeiroCteDest.cep ||
+        docs[0]?.nfe_cep_fim ||
         primeiraNfeDados?.destinatario?.cep ||
         ''
     );
@@ -3663,7 +3715,9 @@ class TransporteService {
       : null;
 
     // 10b. CIOT (<infCIOT> — Nota Técnica MDF-e 2026.001 / Ajuste SINIEF 03/2026 — Rejeições 684 e 716)
-    // Obrigatório no modal rodoviário quando tpEmit = 1, tpEmit = 3 ou (tpEmit = 2 com tpTransp preenchido).
+    // Obrigatório no modal rodoviário quando tpEmit = 1, tpEmit = 3 ou (tpEmit = 2 com tpTransp preenchido / veículo terceiro).
+    // Para Carga Própria (tpEmit = 2) em Frota Própria (!isVeiculoTerceiro), a SEFAZ/ANTT dispensa RNTRC, CIOT, Contratantes e Pagamentos.
+    const isCargaPropriaFrotaPropria = tipoEmitenteFinal === '2' && !isVeiculoTerceiro;
     const ciotObrigatorio =
       tipoEmitenteFinal === '1' ||
       tipoEmitenteFinal === '3' ||
@@ -3752,6 +3806,11 @@ class TransporteService {
         ciotsVistos.add(codDigits);
         ciotPayload.push(montarItemCiotFocus(codDigits, cand.documento));
       }
+    }
+
+    if (isCargaPropriaFrotaPropria) {
+      // Limpa eventuais resíduos de rascunho para evitar Rejeições 684 / 743 / 744 em Carga Própria + Frota Própria
+      ciotPayload = [];
     }
 
     if (ciotPayload.length === 0 && ciotObrigatorio) {
@@ -3849,11 +3908,17 @@ class TransporteService {
         ...(tipoEmitenteFinal === '1' && rntrcFinal
           ? { registro_nacional_transporte: rntrcFinal }
           : {}),
-        ...(Array.isArray(ciotListaAtual) && ciotListaAtual.length > 0
+        ...(!isCargaPropriaFrotaPropria &&
+        Array.isArray(ciotListaAtual) &&
+        ciotListaAtual.length > 0
           ? { ciot: ciotListaAtual }
           : {}),
-        ...(contratantesPayload.length > 0 ? { contratantes: contratantesPayload } : {}),
-        ...(pagamentosPayload.length > 0 ? { pagamentos: pagamentosPayload } : {}),
+        ...(!isCargaPropriaFrotaPropria && contratantesPayload.length > 0
+          ? { contratantes: contratantesPayload }
+          : {}),
+        ...(!isCargaPropriaFrotaPropria && pagamentosPayload.length > 0
+          ? { pagamentos: pagamentosPayload }
+          : {}),
         placa_veiculo: placaAtual,
         ...(renavamTracao.length >= 9 ? { renavam_veiculo: renavamTracao.slice(0, 11) } : {}),
         tara_veiculo: taraVeiculo,

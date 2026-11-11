@@ -5,6 +5,7 @@ import api from '../../services/api';
 import WizardStepper from '../../components/fiscal/WizardStepper';
 import { CampoFiscal, GradeCampos, SelectFiscal, InputFiscal, TextareaFiscal, mascaras } from '../../components/fiscal/CampoFiscal';
 import ListaEditavelFiscal, { BotaoRemover } from '../../components/fiscal/ListaEditavelFiscal';
+import SeletorNotasErp from '../../components/fiscal/SeletorNotasErp';
 import {
   FileText, Users, Wallet, Package, Truck, FileText as FileIcon,
   Save, Send, ChevronLeft, ChevronRight, AlertTriangle,
@@ -1614,26 +1615,73 @@ export default function CteWizardPage() {
                   </button>
                 </div>
 
-                {/* Vincular nota já sincronizada do ERP */}
-                {cargas.length > 0 && (
-                  <div className="pt-1">
-                    <p className="text-[11px] text-slate-500 mb-1.5">
-                      Ou vincule uma NF-e sincronizada do ERP (preenche automaticamente Destinatário, Valor, Peso e Município):
-                    </p>
-                    <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto">
-                      {cargas.slice(0, 30).map((c: any) => (
-                        <button
-                          key={c.id}
-                          type="button"
-                          onClick={() => vincularCarga(c.id)}
-                          className="px-2.5 py-1 rounded-lg bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-[11px] font-medium text-slate-700 dark:text-slate-200 hover:border-brand-500 transition-colors"
-                        >
-                          NF-e {c.numero} · {c.destinatario_nome?.slice(0, 22)} (R$ {Number(c.valor_total || 0).toFixed(2)})
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
+                {/* Seletor Inteligente de NF-es do ERP com Filtro por Região / Rota e Geração em Lote */}
+                <div className="pt-3 border-t border-slate-200/70 dark:border-slate-700/70">
+                  <SeletorNotasErp
+                    modo="CTE"
+                    selectedIds={form.documentos.map(d => d.carga_id).filter((id): id is number => Boolean(id))}
+                    emitenteId={form.emitente_id}
+                    onLoteCtesGerado={(resLote) => {
+                      alert(
+                        `${resLote.total_ctes} rascunho(s) de CT-e gerado(s) com sucesso (1 por destinatário), vinculando ${resLote.total_nfes} NF-e(s)!\n\nRedirecionando para a lista de CT-es para conferência e transmissão.`
+                      );
+                      navigate('/transporte/ctes');
+                    }}
+                    onSelectionChange={(novosIds, notasObjetos) => {
+                      setForm(f => {
+                        const docsManuais = f.documentos.filter(d => !d.carga_id);
+                        const docsErp: DocumentoVinculado[] = notasObjetos
+                          .filter(n => n.chave_acesso)
+                          .map(n => ({
+                            id: `carga-${n.id}`,
+                            chave: n.chave_acesso,
+                            tipo: 'NFE',
+                            numero: n.numero || '',
+                            carga_id: n.id
+                          }));
+
+                        const somaValor = notasObjetos.reduce((acc, n) => acc + Number(n.valor_total || 0), 0);
+                        const somaPeso = notasObjetos.reduce((acc, n) => acc + Number(n.peso_bruto || 0), 0);
+                        const somaVolumes = notasObjetos.reduce((acc, n) => acc + Number(n.volumes || 1), 0);
+                        const n0 = notasObjetos[0];
+                        const nfeDest = n0?.dados_nfe?.destinatario || {};
+
+                        return {
+                          ...f,
+                          documentos: [...docsManuais, ...docsErp],
+                          valor_total_carga:
+                            somaValor > 0 ? somaValor.toFixed(2) : novosIds.length === 0 ? '' : f.valor_total_carga,
+                          peso_bruto:
+                            somaPeso > 0 ? somaPeso.toFixed(3) : novosIds.length === 0 ? '' : f.peso_bruto,
+                          quantidade_volumes:
+                            somaVolumes > 0 ? String(somaVolumes) : f.quantidade_volumes,
+                          produto_predominante:
+                            f.produto_predominante || n0?.produto_predominante || 'MERCADORIAS EM GERAL',
+                          uf_fim: n0?.destinatario_uf ? n0.destinatario_uf.toUpperCase() : f.uf_fim,
+                          municipio_fim: n0?.destinatario_municipio || f.municipio_fim,
+                          codigo_municipio_fim:
+                            n0?.destinatario_codigo_ibge || nfeDest.codigo_municipio || f.codigo_municipio_fim,
+                          destinatario_dados:
+                            n0 && !f.destinatario_dados.documento
+                              ? {
+                                  ...f.destinatario_dados,
+                                  documento: n0.destinatario_documento || nfeDest.cnpj || nfeDest.cpf || '',
+                                  razao_social: n0.destinatario_nome || nfeDest.razao_social || '',
+                                  inscricao_estadual: nfeDest.inscricao_estadual || nfeDest.ie || '',
+                                  logradouro: nfeDest.logradouro || '',
+                                  numero: nfeDest.numero || '',
+                                  bairro: n0.destinatario_bairro || nfeDest.bairro || '',
+                                  cep: n0.destinatario_cep || nfeDest.cep || '',
+                                  municipio: n0.destinatario_municipio || nfeDest.municipio || '',
+                                  codigo_municipio: n0.destinatario_codigo_ibge || nfeDest.codigo_municipio || '',
+                                  uf: (n0.destinatario_uf || nfeDest.uf || '').toUpperCase()
+                                }
+                              : f.destinatario_dados
+                        };
+                      });
+                    }}
+                  />
+                </div>
               </div>
 
               <div className="divide-y divide-slate-100 dark:divide-slate-700/60 max-h-52 overflow-y-auto">

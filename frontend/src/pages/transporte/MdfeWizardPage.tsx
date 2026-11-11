@@ -1,9 +1,10 @@
 import React, { useState, useMemo } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import api from '../../services/api';
 import { CampoFiscal, GradeCampos, SelectFiscal, InputFiscal, TextareaFiscal, mascaras } from '../../components/fiscal/CampoFiscal';
 import ListaEditavelFiscal, { BotaoRemover } from '../../components/fiscal/ListaEditavelFiscal';
+import SeletorNotasErp, { CargaErpItem } from '../../components/fiscal/SeletorNotasErp';
 import {
   Truck, Users, CreditCard, FileText, Package, Shield, Save, Send,
   ChevronLeft, ChevronRight, AlertTriangle, CheckCircle2, Loader2, Info,
@@ -89,11 +90,13 @@ const TIPOS_CARGA = [
 
 export default function MdfeWizardPage() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [aba, setAba] = useState<'dados' | 'seguro'>('dados');
   const [salvando, setSalvando] = useState(false);
   const [erroSalvar, setErroSalvar] = useState('');
   const [mdfeId, setMdfeId] = useState<number | null>(null);
   const [novaChaveNfe, setNovaChaveNfe] = useState('');
+  const [notasSelecionadasMeta, setNotasSelecionadasMeta] = useState<CargaErpItem[]>([]);
 
   const [form, setForm] = useState({
     emitente_id: '',
@@ -166,13 +169,24 @@ export default function MdfeWizardPage() {
   });
   const municipios = municipiosData?.data || [];
 
-  // Auto-seleciona o emitente padrão ao carregar
+  // Auto-seleciona o emitente e a modalidade padrão configurada na empresa (Carga Própria sem CT-e vs Transportadora)
   React.useEffect(() => {
     if (emitentes.length > 0 && !form.emitente_id) {
       const em = emitentes[0];
+      const modoUrl = searchParams.get('modo');
+      const tipoEmitPadrao =
+        modoUrl === 'nfe'
+          ? '2'
+          : modoUrl === 'cte'
+          ? '1'
+          : String(
+              em.mdfe_tipo_emitente_padrao ||
+                (em.perfil_operacional === 'CARGA_PROPRIA' ? '2' : '1')
+            );
       setForm(f => ({
         ...f,
         emitente_id: String(em.id),
+        tipo_emitente: tipoEmitPadrao === '2' ? '2' : '1',
         serie: em.serie_mdfe || f.serie || '1',
         uf_inicio: f.uf_inicio || em.uf || '',
         codigo_municipio_carga: f.codigo_municipio_carga || em.codigo_municipio || '',
@@ -181,8 +195,26 @@ export default function MdfeWizardPage() {
     }
   }, [emitentes.length]);
 
+  const veiculoSelecionado = veiculos.find((v: any) => String(v.id) === form.veiculo_id);
+  const isVeiculoTerceiro = Boolean(
+    veiculoSelecionado && String(veiculoSelecionado.tipo_proprietario) === '2'
+  );
+
   // ── Checklist de prontidão (pré-requisitos) ──
   const isCargaPropria = form.tipo_emitente === '2';
+  const isCargaPropriaFrotaPropria = isCargaPropria && !isVeiculoTerceiro;
+  const ufsNfeSelecionadas = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          notasSelecionadasMeta
+            .map(n => String(n.destinatario_uf || '').toUpperCase().trim())
+            .filter(Boolean)
+        )
+      ),
+    [notasSelecionadasMeta]
+  );
+
   const checklist = useMemo(() => [
     {
       ok: veiculos.length > 0 || Boolean(form.veiculo_placa),
@@ -194,17 +226,17 @@ export default function MdfeWizardPage() {
       rotulo: 'Motorista condutor',
       detalhe: form.condutores[0]?.nome || `${motoristas.length} condutor(es)`
     },
-    isCargaPropria
-      ? { ok: true, rotulo: 'Operação Carga Própria', detalhe: 'Transporte próprio sem CT-e' }
-      : { ok: emitentes.some((e: any) => e.rntrc), rotulo: 'RNTRC configurado', detalhe: 'Exigido no MDF-e rodoviário' },
+    isCargaPropriaFrotaPropria
+      ? { ok: true, rotulo: 'Carga Própria (Frota Própria)', detalhe: 'Isento de CT-e, RNTRC e CIOT' }
+      : { ok: emitentes.some((e: any) => e.rntrc) || isCargaPropria, rotulo: 'RNTRC / ANTT', detalhe: 'Exigido para transporte contratado' },
     isCargaPropria
       ? {
           ok: cargas.length > 0 || form.cargas_ids.length > 0 || form.chaves_nfe.length > 0,
-          rotulo: 'NF-es para vincular',
-          detalhe: `${cargas.length} NF-e(s) no ERP`
+          rotulo: 'NF-es do ERP disponíveis',
+          detalhe: `${form.cargas_ids.length + form.chaves_nfe.length} vinculada(s)`
         }
       : { ok: ctes.length > 0, rotulo: 'CT-es autorizados', detalhe: `${ctes.length} disponível(is)` }
-  ], [veiculos, motoristas, emitentes, ctes, cargas, isCargaPropria, form.veiculo_placa, form.condutores, form.cargas_ids.length, form.chaves_nfe.length]);
+  ], [veiculos, motoristas, emitentes, ctes, cargas, isCargaPropria, isCargaPropriaFrotaPropria, form.veiculo_placa, form.condutores, form.cargas_ids.length, form.chaves_nfe.length]);
 
   const bloqueios = checklist.filter(c => !c.ok);
 
@@ -241,24 +273,31 @@ export default function MdfeWizardPage() {
       }
     }
 
-    const ciotDigits = String(form.ciot_codigo || '').replace(/\D/g, '');
-    if (ciotDigits.length > 0 && ciotDigits.length !== 12) {
-      e.pagamento.push('O código CIOT (ANTT) deve conter exatamente 12 dígitos numéricos.');
-    }
-    if (
-      ambienteAtivo === 'producao' &&
-      form.data_emissao >= '2026-11-23' &&
-      (form.tipo_emitente === '1' || form.tipo_emitente === '3') &&
-      ciotDigits.length !== 12
-    ) {
-      e.pagamento.push('CIOT de 12 dígitos é obrigatório em Produção a partir de 23/11/2026 (NT 2026.001 — Rejeição 684).');
-    }
-    if (form.tipo_emitente !== '2' && form.pagto_frete.length === 0) {
-      e.pagamento.push('Pagamento de frete é obrigatório (NT 2025.001) para emitir o MDF-e.');
+    if (!isCargaPropriaFrotaPropria) {
+      const ciotDigits = String(form.ciot_codigo || '').replace(/\D/g, '');
+      if (ciotDigits.length > 0 && ciotDigits.length !== 12) {
+        e.pagamento.push('O código CIOT (ANTT) deve conter exatamente 12 dígitos numéricos.');
+      }
+      if (
+        ambienteAtivo === 'producao' &&
+        form.data_emissao >= '2026-11-23' &&
+        (form.tipo_emitente === '1' || form.tipo_emitente === '3' || isVeiculoTerceiro) &&
+        ciotDigits.length !== 12
+      ) {
+        e.pagamento.push('CIOT de 12 dígitos é obrigatório em Produção a partir de 23/11/2026 (NT 2026.001 — Rejeição 684).');
+      }
+      if ((form.tipo_emitente !== '2' || isVeiculoTerceiro) && form.pagto_frete.length === 0) {
+        e.pagamento.push('Pagamento de frete é obrigatório (NT 2025.001) para transporte contratado / veículo terceiro.');
+      }
     }
     if (form.tipo_emitente === '2') {
       if (form.cargas_ids.length === 0 && form.chaves_nfe.length === 0) {
         e.documentos.push('Vincule ao menos uma NF-e do ERP (ou chave de 44 dígitos) ao manifesto de Carga Própria.');
+      }
+      if (ufsNfeSelecionadas.length > 1) {
+        e.documentos.push(
+          `A SEFAZ exige 1 MDF-e por UF de descarregamento (selecionadas: ${ufsNfeSelecionadas.join(', ')}). Mantenha apenas 1 UF neste manifesto.`
+        );
       }
     } else if (form.ctes_ids.length === 0) {
       e.documentos.push('Vincule ao menos um CT-e ao manifesto.');
@@ -272,7 +311,7 @@ export default function MdfeWizardPage() {
     if (!form.peso_bruto) e.produtos.push('Peso bruto é obrigatório.');
 
     return e;
-  }, [form, ufsSaoLimitrofes, ambienteAtivo]);
+  }, [form, ufsSaoLimitrofes, ambienteAtivo, isCargaPropriaFrotaPropria, isVeiculoTerceiro, ufsNfeSelecionadas]);
 
   const totalErros = Object.values(erros).flat();
 
@@ -387,6 +426,10 @@ export default function MdfeWizardPage() {
         ctes_ids: form.tipo_emitente === '2' ? [] : form.ctes_ids,
         cargas_ids: form.tipo_emitente === '2' ? form.cargas_ids : [],
         chaves_nfe: form.tipo_emitente === '2' ? form.chaves_nfe : [],
+        ciot_codigo: isCargaPropriaFrotaPropria ? '' : form.ciot_codigo,
+        ciot_responsavel_documento: isCargaPropriaFrotaPropria ? '' : form.ciot_responsavel_documento,
+        contratantes: isCargaPropriaFrotaPropria ? [] : form.contratantes,
+        pagto_frete: isCargaPropriaFrotaPropria ? [] : form.pagto_frete,
         valor_carga: parseFloat(form.valor_total_carga || '0') || 0,
         peso_bruto: parseFloat(form.peso_bruto || '0') || 0
       };
@@ -434,7 +477,6 @@ export default function MdfeWizardPage() {
     }
   };
 
-  const veiculoSelecionado = veiculos.find((v: any) => String(v.id) === form.veiculo_id);
   const capacidadeKg = Number(veiculoSelecionado?.capacidade_kg || 0);
   const pesoTotal = Number(form.peso_bruto || 0);
   const excedeCapacidade = capacidadeKg > 0 && pesoTotal > capacidadeKg;
@@ -523,6 +565,72 @@ export default function MdfeWizardPage() {
           {/* ─── ABA DADOS GERAIS ─── */}
           {aba === 'dados' && (
             <div className="space-y-5">
+              {/* Chave Rápida de Modalidade: MDF-e sem CT-e (Carga Própria / NF-e do ERP) vs Com CT-e */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={() =>
+                    setForm(f => ({
+                      ...f,
+                      tipo_emitente: '2',
+                      ctes_ids: []
+                    }))
+                  }
+                  className={`p-4 rounded-xl border text-left transition-all flex items-start justify-between gap-3 ${
+                    isCargaPropria
+                      ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-500 ring-2 ring-emerald-500/25'
+                      : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 hover:border-emerald-300'
+                  }`}
+                >
+                  <div className="flex items-start gap-3">
+                    <div className="p-2 rounded-xl bg-emerald-100 dark:bg-emerald-900/60 text-emerald-700 dark:text-emerald-300 shrink-0">
+                      <Package className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <p className="text-xs font-bold text-slate-900 dark:text-white">
+                        Manifesto sem CT-e — Carga Própria (NF-es do ERP)
+                      </p>
+                      <p className="text-[11px] text-slate-600 dark:text-slate-400 mt-0.5 leading-relaxed">
+                        Selecione as NF-es emitidas no ERP filtrando por <strong>Região / Rota</strong>. Em frota própria, dispensa CT-e, RNTRC, CIOT e Pagamento de Frete.
+                      </p>
+                    </div>
+                  </div>
+                  {isCargaPropria && <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() =>
+                    setForm(f => ({
+                      ...f,
+                      tipo_emitente: '1',
+                      cargas_ids: [],
+                      chaves_nfe: []
+                    }))
+                  }
+                  className={`p-4 rounded-xl border text-left transition-all flex items-start justify-between gap-3 ${
+                    !isCargaPropria
+                      ? 'bg-sky-50 dark:bg-sky-950/40 border-sky-500 ring-2 ring-sky-500/25'
+                      : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 hover:border-sky-300'
+                  }`}
+                >
+                  <div className="flex items-start gap-3">
+                    <div className="p-2 rounded-xl bg-sky-100 dark:bg-sky-900/60 text-sky-700 dark:text-sky-300 shrink-0">
+                      <FileText className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <p className="text-xs font-bold text-slate-900 dark:text-white">
+                        Manifesto com CT-e — Prestador de Transporte
+                      </p>
+                      <p className="text-[11px] text-slate-600 dark:text-slate-400 mt-0.5 leading-relaxed">
+                        Vincule os Conhecimentos de Transporte (CT-e mod. 57) autorizados na SEFAZ com RNTRC, Seguro RCTR-C e CIOT.
+                      </p>
+                    </div>
+                  </div>
+                  {!isCargaPropria && <CheckCircle2 className="w-5 h-5 text-sky-600 shrink-0" />}
+                </button>
+              </div>
+
               {/* Bloco: Dados Gerais */}
               <fieldset className="border border-slate-200 dark:border-slate-700 rounded-xl p-4">
                 <legend className="px-2 text-xs font-bold text-slate-500 uppercase tracking-wider">
@@ -780,231 +888,209 @@ export default function MdfeWizardPage() {
                     </div>
                   )}
 
-                  {/* Pagamento de frete e CIOT (ANTT — NT 2026.001) */}
-                  <fieldset className="border border-slate-200 dark:border-slate-700 rounded-xl p-4 space-y-3">
-                    <legend className="px-2 text-xs font-bold text-slate-500 uppercase tracking-wider">
-                      CIOT (ANTT) e Pagamento de Frete <span className="text-red-500">*</span>
-                    </legend>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pb-2 border-b border-slate-100 dark:border-slate-800">
-                      <CampoFiscal
-                        rotulo="Código CIOT (ANTT — 12 dígitos)"
-                        dica="Obrigatório NT 2026.001 · Rejeição 684"
-                        erro={erros.pagamento.find(err => err.includes('CIOT'))}
-                      >
-                        <InputFiscal
-                          value={form.ciot_codigo}
-                          onChange={v => setCampo('ciot_codigo', mascaras.somenteDigitos(v).slice(0, 12))}
-                          placeholder={
-                            ambienteAtivo === 'producao'
-                              ? 'Informe os 12 dígitos do CIOT (IPEF/ANTT)'
-                              : 'Ex: 202611100010 (gerado auto em homologação)'
-                          }
-                        />
-                      </CampoFiscal>
-                      <CampoFiscal
-                        rotulo="CPF/CNPJ Responsável pelo CIOT"
-                        dica="Contratante / IPEF · Rejeição 716"
-                      >
-                        <InputFiscal
-                          value={form.ciot_responsavel_documento}
-                          onChange={v => setCampo('ciot_responsavel_documento', mascaras.cpfCnpj(v))}
-                          placeholder="CNPJ ou CPF responsável pela geração do CIOT"
-                        />
-                      </CampoFiscal>
+                  {/* Pagamento de frete e CIOT (ANTT — NT 2026.001): dispensado para Carga Própria em Frota Própria */}
+                  {isCargaPropriaFrotaPropria ? (
+                    <div className="p-4 rounded-xl bg-emerald-50/80 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800/60 flex items-start gap-3">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                      <div className="text-xs text-emerald-900 dark:text-emerald-200">
+                        <p className="font-bold">
+                          Carga Própria em Frota Própria — Isento de CIOT, RNTRC, Contratantes e Pagamento de Frete
+                        </p>
+                        <p className="text-[11px] text-emerald-800 dark:text-emerald-300 mt-0.5">
+                          Pela legislação SEFAZ/ANTT (<code>tpEmit=2</code> sem proprietário terceiro), esses grupos são omitidos automaticamente do XML para evitar as Rejeições 684, 743 e 745. Caso selecione um veículo de terceiro/TAC acima, os campos serão habilitados automaticamente.
+                        </p>
+                      </div>
                     </div>
-                    <ListaEditavelFiscal<PagamentoFrete>
-                      titulo=""
-                      itens={form.pagto_frete}
-                      onChange={itens => setCampo('pagto_frete', itens)}
-                      novoItem={() => ({ id: `${Date.now()}-${Math.random()}`, responsavel: '', componentes: 'Frete', forma: '01', tipo: '01' })}
-                      rotuloBotao="Novo Pagamento"
-                      vazio="Obrigatório desde a NT 2501 — adicione o pagamento do frete."
-                      className="border-0"
-                      renderItem={(item, i, atualizar, remover) => (
-                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
-                          <InputFiscal value={item.responsavel} onChange={v => atualizar({ ...item, responsavel: v })} placeholder="Responsável (CNPJ)" />
-                          <InputFiscal value={item.componentes} onChange={v => atualizar({ ...item, componentes: v })} placeholder="Componentes" />
-                          <SelectFiscal
-                            value={item.forma}
-                            onChange={v => atualizar({ ...item, forma: v })}
-                            opcoes={[{ valor: '01', rotulo: 'À vista' }, { valor: '02', rotulo: 'À prazo' }]}
+                  ) : (
+                    <fieldset className="border border-slate-200 dark:border-slate-700 rounded-xl p-4 space-y-3">
+                      <legend className="px-2 text-xs font-bold text-slate-500 uppercase tracking-wider">
+                        CIOT (ANTT) e Pagamento de Frete <span className="text-red-500">*</span>
+                      </legend>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pb-2 border-b border-slate-100 dark:border-slate-800">
+                        <CampoFiscal
+                          rotulo="Código CIOT (ANTT — 12 dígitos)"
+                          dica="Obrigatório NT 2026.001 · Rejeição 684"
+                          erro={erros.pagamento.find(err => err.includes('CIOT'))}
+                        >
+                          <InputFiscal
+                            value={form.ciot_codigo}
+                            onChange={v => setCampo('ciot_codigo', mascaras.somenteDigitos(v).slice(0, 12))}
+                            placeholder={
+                              ambienteAtivo === 'producao'
+                                ? 'Informe os 12 dígitos do CIOT (IPEF/ANTT)'
+                                : 'Ex: 202611100010 (gerado auto em homologação)'
+                            }
                           />
-                          <div className="flex items-end gap-2">
+                        </CampoFiscal>
+                        <CampoFiscal
+                          rotulo="CPF/CNPJ Responsável pelo CIOT"
+                          dica="Contratante / IPEF · Rejeição 716"
+                        >
+                          <InputFiscal
+                            value={form.ciot_responsavel_documento}
+                            onChange={v => setCampo('ciot_responsavel_documento', mascaras.cpfCnpj(v))}
+                            placeholder="CNPJ ou CPF responsável pela geração do CIOT"
+                          />
+                        </CampoFiscal>
+                      </div>
+                      <ListaEditavelFiscal<PagamentoFrete>
+                        titulo=""
+                        itens={form.pagto_frete}
+                        onChange={itens => setCampo('pagto_frete', itens)}
+                        novoItem={() => ({ id: `${Date.now()}-${Math.random()}`, responsavel: '', componentes: 'Frete', forma: '01', tipo: '01' })}
+                        rotuloBotao="Novo Pagamento"
+                        vazio="Obrigatório desde a NT 2501 — adicione o pagamento do frete."
+                        className="border-0"
+                        renderItem={(item, i, atualizar, remover) => (
+                          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
+                            <InputFiscal value={item.responsavel} onChange={v => atualizar({ ...item, responsavel: v })} placeholder="Responsável (CNPJ)" />
+                            <InputFiscal value={item.componentes} onChange={v => atualizar({ ...item, componentes: v })} placeholder="Componentes" />
                             <SelectFiscal
-                              value={item.tipo}
-                              onChange={v => atualizar({ ...item, tipo: v })}
-                              opcoes={[
-                                { valor: '01', rotulo: 'Dados bancários' },
-                                { valor: '02', rotulo: 'CNPJ' },
-                                { valor: '03', rotulo: 'Pix' }
-                              ]}
+                              value={item.forma}
+                              onChange={v => atualizar({ ...item, forma: v })}
+                              opcoes={[{ valor: '01', rotulo: 'À vista' }, { valor: '02', rotulo: 'À prazo' }]}
                             />
-                            <BotaoRemover onClick={remover} />
+                            <div className="flex items-end gap-2">
+                              <SelectFiscal
+                                value={item.tipo}
+                                onChange={v => atualizar({ ...item, tipo: v })}
+                                opcoes={[
+                                  { valor: '01', rotulo: 'Dados bancários' },
+                                  { valor: '02', rotulo: 'CNPJ' },
+                                  { valor: '03', rotulo: 'Pix' }
+                                ]}
+                              />
+                              <BotaoRemover onClick={remover} />
+                            </div>
                           </div>
-                        </div>
-                      )}
-                    />
-                    {erros.pagamento.map((e, i) => (
-                      <p key={i} className="text-[11px] text-red-600 dark:text-red-400 mt-2 flex items-center gap-1.5">
-                        <AlertTriangle className="w-3 h-3" />
-                        {e}
-                      </p>
-                    ))}
-                  </fieldset>
+                        )}
+                      />
+                      {erros.pagamento.map((e, i) => (
+                        <p key={i} className="text-[11px] text-red-600 dark:text-red-400 mt-2 flex items-center gap-1.5">
+                          <AlertTriangle className="w-3 h-3" />
+                          {e}
+                        </p>
+                      ))}
+                    </fieldset>
+                  )}
 
                   {/* Documentos Referenciados */}
                   <fieldset className="border border-slate-200 dark:border-slate-700 rounded-xl p-4 space-y-3">
                     <legend className="px-2 text-xs font-bold text-slate-500 uppercase tracking-wider">
                       {isCargaPropria
-                        ? 'Notas Fiscais Vinculadas (NF-e — Carga Própria)'
+                        ? 'Notas Fiscais do ERP Vinculadas (NF-e — Carga Própria por Região)'
                         : 'Documentos Ref. (CT-e)'}{' '}
                       <span className="text-red-500">*</span>
                     </legend>
 
                     {isCargaPropria ? (
                       <>
-                        <div className="flex flex-col sm:flex-row gap-2">
-                          <div className="flex-1">
-                            <InputFiscal
-                              value={novaChaveNfe}
-                              onChange={v => setNovaChaveNfe(v.replace(/\D/g, '').slice(0, 44))}
-                              placeholder="Adicionar chave de acesso NF-e manualmente (44 dígitos)"
-                            />
-                          </div>
-                          <button
-                            type="button"
-                            onClick={adicionarChaveNfeManual}
-                            className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-bold transition-colors shrink-0"
-                          >
-                            <Plus className="w-3.5 h-3.5" />
-                            Vincular Chave NF-e
-                          </button>
-                        </div>
+                        <SeletorNotasErp
+                          modo="MDFE"
+                          selectedIds={form.cargas_ids}
+                          emitenteId={form.emitente_id}
+                          onSelectionChange={(novosIds, notasObjetos) => {
+                            setNotasSelecionadasMeta(notasObjetos);
+                            const somaValor = notasObjetos.reduce(
+                              (acc, item) => acc + Number(item.valor_total || 0),
+                              0
+                            );
+                            const somaPeso = notasObjetos.reduce(
+                              (acc, item) => acc + Number(item.peso_bruto || 0),
+                              0
+                            );
+                            const primeiraComUf = notasObjetos.find(n => n.destinatario_uf);
+                            const primeiraComProd = notasObjetos.find(n => n.produto_predominante);
+                            const ncmReal =
+                              notasObjetos
+                                .map(n => String(n.produto_ncm || '').replace(/\D/g, ''))
+                                .find(ncm => ncm.length === 8) || '21069090';
 
-                        {form.chaves_nfe.length > 0 && (
-                          <div className="flex flex-wrap gap-1.5">
-                            {form.chaves_nfe.map(ch => (
-                              <span
-                                key={ch}
-                                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-sky-50 dark:bg-sky-950/40 border border-sky-200 dark:border-sky-800 text-[11px] font-mono text-sky-800 dark:text-sky-200"
-                              >
-                                NF-e …{ch.slice(-12)}
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    setForm(f => ({
-                                      ...f,
-                                      chaves_nfe: f.chaves_nfe.filter(x => x !== ch)
-                                    }))
-                                  }
-                                  className="hover:text-red-600"
+                            setForm(f => {
+                              const novaUfFim =
+                                (primeiraComUf?.destinatario_uf || f.uf_fim || '').toUpperCase();
+                              const prodAtual =
+                                f.produtos_predominantes.length > 0
+                                  ? f.produtos_predominantes
+                                  : notasObjetos.length > 0
+                                  ? [
+                                      {
+                                        id: `prod-${Date.now()}`,
+                                        tipo_carga: '05',
+                                        descricao: String(
+                                          primeiraComProd?.produto_predominante || 'MERCADORIAS EM GERAL'
+                                        ).slice(0, 120),
+                                        ncm: ncmReal,
+                                        lotacao: novosIds.length === 1
+                                      }
+                                    ]
+                                  : f.produtos_predominantes;
+
+                              return {
+                                ...f,
+                                cargas_ids: novosIds,
+                                uf_fim: novaUfFim,
+                                ufs_percurso:
+                                  novaUfFim && f.uf_inicio
+                                    ? resolverPercursoUfs(f.uf_inicio, novaUfFim)
+                                    : f.ufs_percurso,
+                                valor_total_carga:
+                                  somaValor > 0 ? somaValor.toFixed(2) : novosIds.length === 0 ? '' : f.valor_total_carga,
+                                peso_bruto:
+                                  somaPeso > 0 ? somaPeso.toFixed(2) : novosIds.length === 0 ? '' : f.peso_bruto,
+                                produtos_predominantes: prodAtual
+                              };
+                            });
+                          }}
+                        />
+
+                        {/* Inclusão opcional de chave NF-e externa de 44 dígitos */}
+                        <div className="pt-2 border-t border-slate-200/70 dark:border-slate-700/70 space-y-2">
+                          <span className="block text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                            Ou vincular chave NF-e avulsa externa (44 dígitos):
+                          </span>
+                          <div className="flex flex-col sm:flex-row gap-2">
+                            <div className="flex-1">
+                              <InputFiscal
+                                value={novaChaveNfe}
+                                onChange={v => setNovaChaveNfe(v.replace(/\D/g, '').slice(0, 44))}
+                                placeholder="Adicionar chave de acesso NF-e manualmente (44 dígitos)"
+                              />
+                            </div>
+                            <button
+                              type="button"
+                              onClick={adicionarChaveNfeManual}
+                              className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold transition-colors shrink-0"
+                            >
+                              <Plus className="w-3.5 h-3.5" />
+                              Adicionar Chave
+                            </button>
+                          </div>
+
+                          {form.chaves_nfe.length > 0 && (
+                            <div className="flex flex-wrap gap-1.5">
+                              {form.chaves_nfe.map(ch => (
+                                <span
+                                  key={ch}
+                                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-sky-50 dark:bg-sky-950/40 border border-sky-200 dark:border-sky-800 text-[11px] font-mono text-sky-800 dark:text-sky-200"
                                 >
-                                  <X className="w-3 h-3" />
-                                </button>
-                              </span>
-                            ))}
-                          </div>
-                        )}
-
-                        <div className="max-h-52 overflow-y-auto rounded-lg border border-slate-200 dark:border-slate-700">
-                          <table className="w-full text-left text-[11px]">
-                            <thead className="bg-slate-100 dark:bg-slate-900 text-slate-500 uppercase text-[10px] sticky top-0">
-                              <tr>
-                                <th className="px-2.5 py-2 font-bold w-8"></th>
-                                <th className="px-2.5 py-2 font-bold">NF-e</th>
-                                <th className="px-2.5 py-2 font-bold">Série</th>
-                                <th className="px-2.5 py-2 font-bold">Chave</th>
-                                <th className="px-2.5 py-2 font-bold">Valor</th>
-                                <th className="px-2.5 py-2 font-bold">Destino</th>
-                                <th className="px-2.5 py-2 font-bold">UF</th>
-                              </tr>
-                            </thead>
-                            <tbody className="divide-y divide-slate-100 dark:divide-slate-700/60">
-                              {cargas.length === 0 ? (
-                                <tr>
-                                  <td colSpan={7} className="px-3 py-6 text-center text-slate-400">
-                                    Nenhuma NF-e sincronizada na Central de Cargas. Sincronize via ERP/Worker, MDe ou cole a chave acima.
-                                  </td>
-                                </tr>
-                              ) : (
-                                cargas.map((cg: any) => {
-                                  const marcado = form.cargas_ids.includes(cg.id);
-                                  return (
-                                    <tr
-                                      key={cg.id}
-                                      onClick={() => {
-                                        const novosIds = marcado
-                                          ? form.cargas_ids.filter(x => x !== cg.id)
-                                          : [...form.cargas_ids, cg.id];
-                                        const selecionadas = cargas.filter((item: any) => novosIds.includes(item.id));
-                                        const somaValor = selecionadas.reduce(
-                                          (acc: number, item: any) => acc + Number(item.valor_total || 0),
-                                          0
-                                        );
-                                        const somaPeso = selecionadas.reduce(
-                                          (acc: number, item: any) => acc + Number(item.peso_bruto || 0),
-                                          0
-                                        );
-                                        setForm(f => {
-                                          const novaUfFim = f.uf_fim || cg.destinatario_uf || '';
-                                          const prodAtual =
-                                            f.produtos_predominantes.length > 0
-                                              ? f.produtos_predominantes
-                                              : cg.produto_predominante
-                                              ? [
-                                                  {
-                                                    id: `prod-${Date.now()}`,
-                                                    tipo_carga: '05',
-                                                    descricao: String(cg.produto_predominante).slice(0, 120),
-                                                    ncm: '21069090',
-                                                    lotacao: novosIds.length === 1
-                                                  }
-                                                ]
-                                              : f.produtos_predominantes;
-                                          return {
-                                            ...f,
-                                            cargas_ids: novosIds,
-                                            uf_fim: novaUfFim,
-                                            ufs_percurso:
-                                              !f.uf_fim && novaUfFim
-                                                ? resolverPercursoUfs(f.uf_inicio, novaUfFim)
-                                                : f.ufs_percurso,
-                                            valor_total_carga: somaValor > 0 ? somaValor.toFixed(2) : f.valor_total_carga,
-                                            peso_bruto: somaPeso > 0 ? somaPeso.toFixed(2) : f.peso_bruto,
-                                            produtos_predominantes: prodAtual
-                                          };
-                                        });
-                                      }}
-                                      className={`cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/50 ${
-                                        marcado ? 'bg-sky-50 dark:bg-sky-950/30' : ''
-                                      }`}
-                                    >
-                                      <td className="px-2.5 py-1.5">
-                                        <input
-                                          type="checkbox"
-                                          checked={marcado}
-                                          readOnly
-                                          className="w-3.5 h-3.5 rounded border-slate-300 text-brand-600"
-                                        />
-                                      </td>
-                                      <td className="px-2.5 py-1.5 font-mono">{cg.numero || '—'}</td>
-                                      <td className="px-2.5 py-1.5 font-mono">{cg.serie || '1'}</td>
-                                      <td className="px-2.5 py-1.5 font-mono text-slate-400">
-                                        {(cg.chave_acesso || '').slice(-12)}
-                                      </td>
-                                      <td className="px-2.5 py-1.5 tabular-nums">
-                                        R$ {Number(cg.valor_total || 0).toFixed(2)}
-                                      </td>
-                                      <td className="px-2.5 py-1.5 truncate max-w-[140px]">
-                                        {cg.destinatario_municipio || cg.destinatario_nome || '—'}
-                                      </td>
-                                      <td className="px-2.5 py-1.5">{cg.destinatario_uf || '—'}</td>
-                                    </tr>
-                                  );
-                                })
-                              )}
-                            </tbody>
-                          </table>
+                                  NF-e …{ch.slice(-12)}
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setForm(f => ({
+                                        ...f,
+                                        chaves_nfe: f.chaves_nfe.filter(x => x !== ch)
+                                      }))
+                                    }
+                                    className="hover:text-red-600"
+                                  >
+                                    <X className="w-3 h-3" />
+                                  </button>
+                                </span>
+                              ))}
+                            </div>
+                          )}
                         </div>
                       </>
                     ) : (
@@ -1224,28 +1310,30 @@ export default function MdfeWizardPage() {
                     )}
                   </fieldset>
 
-                  {/* Contratantes */}
-                  <fieldset className="border border-slate-200 dark:border-slate-700 rounded-xl p-4">
-                    <legend className="px-2 text-xs font-bold text-slate-500 uppercase tracking-wider">
-                      Contratantes
-                    </legend>
-                    <ListaEditavelFiscal<Contratante>
-                      titulo=""
-                      itens={form.contratantes}
-                      onChange={itens => setCampo('contratantes', itens)}
-                      novoItem={() => ({ id: `${Date.now()}-${Math.random()}`, tipo: 'PJ', documento: '', nome: '' })}
-                      rotuloBotao="Novo"
-                      vazio="Opcional."
-                      className="border-0"
-                      renderItem={(item, i, atualizar, remover) => (
-                        <div className="flex items-end gap-1.5">
-                          <InputFiscal value={item.documento} onChange={v => atualizar({ ...item, documento: mascaras.cpfCnpj(v) })} placeholder="CNPJ" className="w-36" />
-                          <InputFiscal value={item.nome} onChange={v => atualizar({ ...item, nome: v })} placeholder="Razão social" />
-                          <BotaoRemover onClick={remover} />
-                        </div>
-                      )}
-                    />
-                  </fieldset>
+                  {/* Contratantes (dispensado para Carga Própria em Frota Própria) */}
+                  {!isCargaPropriaFrotaPropria && (
+                    <fieldset className="border border-slate-200 dark:border-slate-700 rounded-xl p-4">
+                      <legend className="px-2 text-xs font-bold text-slate-500 uppercase tracking-wider">
+                        Contratantes
+                      </legend>
+                      <ListaEditavelFiscal<Contratante>
+                        titulo=""
+                        itens={form.contratantes}
+                        onChange={itens => setCampo('contratantes', itens)}
+                        novoItem={() => ({ id: `${Date.now()}-${Math.random()}`, tipo: 'PJ', documento: '', nome: '' })}
+                        rotuloBotao="Novo"
+                        vazio="Opcional."
+                        className="border-0"
+                        renderItem={(item, i, atualizar, remover) => (
+                          <div className="flex items-end gap-1.5">
+                            <InputFiscal value={item.documento} onChange={v => atualizar({ ...item, documento: mascaras.cpfCnpj(v) })} placeholder="CNPJ" className="w-36" />
+                            <InputFiscal value={item.nome} onChange={v => atualizar({ ...item, nome: v })} placeholder="Razão social" />
+                            <BotaoRemover onClick={remover} />
+                          </div>
+                        )}
+                      />
+                    </fieldset>
+                  )}
 
                   {/* Lacres */}
                   <fieldset className="border border-slate-200 dark:border-slate-700 rounded-xl p-4">
