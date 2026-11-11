@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 
 interface Contratante { id: string; tipo: string; documento: string; nome: string; }
-interface Seguro { id: string; responsavel: string; cnpj_responsavel: string; nome_seguradora: string; numero_apolice: string; numero_averbacao: string; }
+interface Seguro { id: string; responsavel: string; cnpj_responsavel: string; nome_seguradora: string; cnpj_seguradora?: string; numero_apolice: string; numero_averbacao: string; }
 interface ProdutoPred { id: string; tipo_carga: string; descricao: string; ncm: string; lotacao: boolean; }
 interface PagamentoFrete { id: string; responsavel: string; componentes: string; forma: string; tipo: string; }
 interface Reboque { id: string; placa: string; tara_kg: string; capacidade_kg: string; }
@@ -20,6 +20,57 @@ const UFS_BRASIL = [
   'AC','AL','AP','AM','BA','CE','DF','ES','GO','MA','MT','MS','MG','PA','PB','PR','PE','PI',
   'RJ','RN','RS','RO','RR','SC','SP','SE','TO'
 ];
+
+const FRONTEIRAS_UFS_BRASIL: Record<string, string[]> = {
+  AC: ['AM', 'RO'],
+  AL: ['BA', 'PE', 'SE'],
+  AM: ['AC', 'MT', 'PA', 'RO', 'RR'],
+  AP: ['PA'],
+  BA: ['AL', 'ES', 'GO', 'MG', 'PE', 'PI', 'SE', 'TO'],
+  CE: ['PB', 'PE', 'PI', 'RN'],
+  DF: ['GO', 'MG'],
+  ES: ['BA', 'MG', 'RJ'],
+  GO: ['BA', 'DF', 'MG', 'MS', 'MT', 'TO'],
+  MA: ['PA', 'PI', 'TO'],
+  MG: ['BA', 'DF', 'ES', 'GO', 'MS', 'RJ', 'SP'],
+  MS: ['GO', 'MG', 'MT', 'PR', 'SP'],
+  MT: ['AM', 'GO', 'MS', 'PA', 'RO', 'TO'],
+  PA: ['AM', 'AP', 'MA', 'MT', 'RR', 'TO'],
+  PB: ['CE', 'PE', 'RN'],
+  PE: ['AL', 'BA', 'CE', 'PB', 'PI'],
+  PI: ['BA', 'CE', 'MA', 'PE', 'TO'],
+  PR: ['MS', 'SC', 'SP'],
+  RJ: ['ES', 'MG', 'SP'],
+  RN: ['CE', 'PB'],
+  RO: ['AC', 'AM', 'MT'],
+  RR: ['AM', 'PA'],
+  RS: ['SC'],
+  SC: ['PR', 'RS'],
+  SE: ['AL', 'BA'],
+  SP: ['MG', 'MS', 'PR', 'RJ'],
+  TO: ['BA', 'GO', 'MA', 'MT', 'PA', 'PI']
+};
+
+function resolverPercursoUfs(ufInicio: string, ufFim: string): string[] {
+  const ini = String(ufInicio || '').trim().toUpperCase();
+  const fim = String(ufFim || '').trim().toUpperCase();
+  if (!ini || !fim || ini === fim) return [];
+  if ((FRONTEIRAS_UFS_BRASIL[ini] || []).includes(fim)) return [];
+  const fila: string[][] = [[ini]];
+  const visitados = new Set<string>([ini]);
+  while (fila.length > 0) {
+    const caminho = fila.shift()!;
+    const atual = caminho[caminho.length - 1];
+    for (const vizinho of FRONTEIRAS_UFS_BRASIL[atual] || []) {
+      if (vizinho === fim) return caminho.slice(1);
+      if (!visitados.has(vizinho)) {
+        visitados.add(vizinho);
+        fila.push([...caminho, vizinho]);
+      }
+    }
+  }
+  return [];
+}
 
 const TIPOS_CARGA = [
   { valor: '01', rotulo: '01 — Granel sólido' },
@@ -118,13 +169,26 @@ export default function MdfeWizardPage() {
 
   // ── Checklist de prontidão (pré-requisitos) ──
   const checklist = useMemo(() => [
-    { ok: veiculos.length > 0, rotulo: 'Veículos cadastrados', detalhe: `${veiculos.length} veículo(s)` },
-    { ok: motoristas.length > 0, rotulo: 'Motoristas cadastrados', detalhe: `${motoristas.length} condutor(es)` },
+    {
+      ok: veiculos.length > 0 || Boolean(form.veiculo_placa),
+      rotulo: 'Veículo de tração',
+      detalhe: form.veiculo_placa || `${veiculos.length} veículo(s)`
+    },
+    {
+      ok: motoristas.length > 0 || form.condutores.length > 0,
+      rotulo: 'Motorista condutor',
+      detalhe: form.condutores[0]?.nome || `${motoristas.length} condutor(es)`
+    },
     { ok: emitentes.some((e: any) => e.rntrc), rotulo: 'RNTRC configurado', detalhe: 'Exigido no MDF-e rodoviário' },
     { ok: ctes.length > 0, rotulo: 'CT-es autorizados', detalhe: `${ctes.length} disponível(is)` }
-  ], [veiculos, motoristas, emitentes, ctes]);
+  ], [veiculos, motoristas, emitentes, ctes, form.veiculo_placa, form.condutores]);
 
   const bloqueios = checklist.filter(c => !c.ok);
+
+  const ufsSaoLimitrofes = useMemo(() => {
+    if (!form.uf_inicio || !form.uf_fim || form.uf_inicio === form.uf_fim) return true;
+    return (FRONTEIRAS_UFS_BRASIL[form.uf_inicio] || []).includes(form.uf_fim);
+  }, [form.uf_inicio, form.uf_fim]);
 
   const erros = useMemo(() => {
     const e: Record<string, string[]> = { dados: [], pagamento: [], documentos: [], produtos: [] };
@@ -133,25 +197,20 @@ export default function MdfeWizardPage() {
     if (!form.uf_inicio) e.dados.push('Estado de carga é obrigatório.');
     if (!form.uf_fim) e.dados.push('Estado de descarga é obrigatório.');
     if (!form.municipio_carga) e.dados.push('Município de carga é obrigatório.');
-    if (!form.veiculo_placa) e.dados.push('Selecione o veículo de tração.');
-    if (form.condutores.length === 0) e.dados.push('Informe o motorista condutor.');
+    if (!form.veiculo_placa) e.dados.push('Selecione ou informe a placa do veículo de tração.');
+    if (form.condutores.length === 0 || !form.condutores[0]?.cpf) e.dados.push('Informe o motorista condutor com CPF válido.');
 
-    // UFs de percurso: interestadual, em ordem crescente a partir da UF de carga
+    // UFs de percurso: exigidas apenas quando UF início e UF fim não fazem fronteira direta
     if (form.uf_inicio && form.uf_fim && form.uf_inicio !== form.uf_fim) {
-      if (form.ufs_percurso.length === 0) {
-        e.dados.push('MDF-e interestadual exige as UFs de percurso.');
-      } else {
-        const idxInicio = UFS_BRASIL.indexOf(form.uf_inicio);
-        const foraOrdem = form.ufs_percurso.some((uf, i) => {
-          const idx = UFS_BRASIL.indexOf(uf);
-          return idx < idxInicio || (i > 0 && idx <= UFS_BRASIL.indexOf(form.ufs_percurso[i - 1]));
-        });
-        if (foraOrdem) e.dados.push('UFs de percurso devem estar em ordem crescente a partir da UF de carga.');
+      if (form.ufs_percurso.includes(form.uf_inicio) || form.ufs_percurso.includes(form.uf_fim)) {
+        e.dados.push('Não inclua a UF de carga nem a UF de descarga nas UFs de percurso.');
+      } else if (!ufsSaoLimitrofes && form.ufs_percurso.length === 0) {
+        e.dados.push(`Informe as UFs intermediárias de passagem entre ${form.uf_inicio} e ${form.uf_fim}.`);
       }
     }
 
     if (form.pagto_frete.length === 0) {
-      e.pagamento.push('Pagamento de frete é obrigatório (NT 2501) para emitir o MDF-e.');
+      e.pagamento.push('Pagamento de frete é obrigatório (NT 2025.001) para emitir o MDF-e.');
     }
     if (form.ctes_ids.length === 0) e.documentos.push('Vincule ao menos um CT-e ao manifesto.');
     if (form.produtos_predominantes.length === 0) {
@@ -163,18 +222,19 @@ export default function MdfeWizardPage() {
     if (!form.peso_bruto) e.produtos.push('Peso bruto é obrigatório.');
 
     return e;
-  }, [form]);
+  }, [form, ufsSaoLimitrofes]);
 
   const totalErros = Object.values(erros).flat();
 
   const setCampo = (campo: string, valor: any) => setForm(f => ({ ...f, [campo]: valor }));
 
   const alternarUfPercurso = (uf: string) => {
+    if (uf === form.uf_inicio || uf === form.uf_fim) return;
     setForm(f => ({
       ...f,
       ufs_percurso: f.ufs_percurso.includes(uf)
         ? f.ufs_percurso.filter(x => x !== uf)
-        : [...f.ufs_percurso, uf].sort()
+        : [...f.ufs_percurso, uf]
     }));
   };
 
@@ -186,6 +246,79 @@ export default function MdfeWizardPage() {
     String(emitenteSelecionado?.focus_ambiente || 'homologacao').toLowerCase() === 'producao'
       ? 'producao'
       : 'homologacao';
+
+  const preencherDadosTesteHomologacao = () => {
+    const em = emitenteSelecionado;
+    const ufIni = em?.uf || 'MS';
+    const codMunIni = em?.codigo_municipio || '5003702';
+    const munIni = em?.municipio || 'Dourados';
+    const cteAlvo = ctes[0] || null;
+    const ufFim = cteAlvo?.uf_fim || 'SP';
+    const veic = veiculos[0] || null;
+    const mot = motoristas[0] || null;
+    const cnpjEmit = String(em?.cnpj || '03272053000150').replace(/\D/g, '');
+    const valorCarga = Number(cteAlvo?.valor_carga || cteAlvo?.valor_total || 3400);
+    const pesoCarga = Number(cteAlvo?.peso_bruto || 650);
+
+    setForm(f => ({
+      ...f,
+      emitente_id: em ? String(em.id) : f.emitente_id,
+      tipo_emitente: '1',
+      tipo_transporte: '1',
+      serie: String(em?.serie_mdfe || f.serie || '1'),
+      uf_inicio: ufIni,
+      uf_fim: ufFim,
+      codigo_municipio_carga: codMunIni,
+      municipio_carga: munIni,
+      ufs_percurso: resolverPercursoUfs(ufIni, ufFim),
+      veiculo_id: veic ? String(veic.id) : '',
+      veiculo_placa: veic?.placa || 'QAA1B23',
+      condutores: mot
+        ? [{ id: String(mot.id), nome: mot.nome, cpf: mot.cpf }]
+        : [{ id: 'homolog-mot', nome: 'MOTORISTA HOMOLOGACAO SEFAZ', cpf: '11144477735' }],
+      contratantes: [
+        {
+          id: `contr-${Date.now()}`,
+          tipo: 'PJ',
+          documento: cnpjEmit,
+          nome: em?.razao_social || 'CONTRATANTE HOMOLOGACAO SEFAZ'
+        }
+      ],
+      pagto_frete: [
+        {
+          id: `pag-${Date.now()}`,
+          responsavel: cnpjEmit,
+          componentes: 'Frete',
+          forma: '01',
+          tipo: '01'
+        }
+      ],
+      ctes_ids: cteAlvo ? [cteAlvo.id] : [],
+      produtos_predominantes: [
+        {
+          id: `prod-${Date.now()}`,
+          tipo_carga: '05',
+          descricao: 'MERCADORIAS DIVERSAS',
+          ncm: '21069090',
+          lotacao: true
+        }
+      ],
+      valor_total_carga: valorCarga.toFixed(2),
+      peso_bruto: pesoCarga.toFixed(2),
+      seguros: [
+        {
+          id: `seg-${Date.now()}`,
+          responsavel: '1',
+          cnpj_responsavel: cnpjEmit,
+          nome_seguradora: 'PORTO SEGURO CIA DE SEGUROS',
+          cnpj_seguradora: '61198164000160',
+          numero_apolice: '0000540012345',
+          numero_averbacao: '00000000000000000001'
+        }
+      ],
+      informacao_adicional: 'MDF-e emitido em ambiente de homologacao SEFAZ/MS — sem valor fiscal.'
+    }));
+  };
 
   const salvar = async (transmitir: boolean) => {
     setSalvando(true);
@@ -268,7 +401,18 @@ export default function MdfeWizardPage() {
                 : 'Ambiente: Homologação (Sem Valor Fiscal)'}
             </span>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {ambienteAtivo !== 'producao' && (
+              <button
+                type="button"
+                onClick={preencherDadosTesteHomologacao}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold bg-amber-400 hover:bg-amber-300 text-slate-950 shadow-sm transition-colors"
+                title="Preenche automaticamente todos os campos obrigatórios do MDF-e 3.00 para teste em homologação SEFAZ"
+              >
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                Preencher Dados de Teste (Homologação)
+              </button>
+            )}
             <span className="text-white/80 text-[11px] font-mono">
               {form.serie ? `Série ${form.serie}` : 'Série 1'}
               {form.numero ? ` · Nº ${form.numero}` : ''}
@@ -377,7 +521,13 @@ export default function MdfeWizardPage() {
                   <CampoFiscal rotulo="Estado de Carga" obrigatorio erro={erros.dados.find(e => e.includes('Estado de carga'))}>
                     <SelectFiscal
                       value={form.uf_inicio}
-                      onChange={v => setCampo('uf_inicio', v)}
+                      onChange={v =>
+                        setForm(f => ({
+                          ...f,
+                          uf_inicio: v,
+                          ufs_percurso: resolverPercursoUfs(v, f.uf_fim)
+                        }))
+                      }
                       opcoes={UFS_BRASIL.map(u => ({ valor: u, rotulo: u }))}
                       placeholder="Selecione..."
                     />
@@ -386,7 +536,13 @@ export default function MdfeWizardPage() {
                   <CampoFiscal rotulo="Estado de Descarga" obrigatorio erro={erros.dados.find(e => e.includes('Estado de descarga'))}>
                     <SelectFiscal
                       value={form.uf_fim}
-                      onChange={v => setCampo('uf_fim', v)}
+                      onChange={v =>
+                        setForm(f => ({
+                          ...f,
+                          uf_fim: v,
+                          ufs_percurso: resolverPercursoUfs(f.uf_inicio, v)
+                        }))
+                      }
                       opcoes={UFS_BRASIL.map(u => ({ valor: u, rotulo: u }))}
                       placeholder="Selecione..."
                     />
@@ -426,28 +582,57 @@ export default function MdfeWizardPage() {
                     <legend className="px-2 text-xs font-bold text-slate-500 uppercase tracking-wider">
                       Motorista
                     </legend>
-                    <div className="flex flex-col sm:flex-row items-end gap-2">
-                      <div className="w-full sm:w-44">
-                        <CampoFiscal rotulo="Condutor" obrigatorio erro={erros.dados.find(e => e.includes('motorista'))}>
-                          <SelectFiscal
-                            value={form.condutores[0]?.id || ''}
-                            onChange={v => {
-                              const mot = motoristas.find((x: any) => String(x.id) === v);
-                              setForm(f => ({
-                                ...f,
-                                condutores: mot ? [{ id: String(mot.id), nome: mot.nome, cpf: mot.cpf }] : []
-                              }));
-                            }}
-                            opcoes={motoristas.map((m: any) => ({ valor: String(m.id), rotulo: `${m.nome} (${m.cpf})` }))}
-                            placeholder="Pesquisar..."
-                          />
-                        </CampoFiscal>
-                      </div>
-                      {form.condutores[0] && (
-                        <p className="text-xs text-slate-500 dark:text-slate-400 pb-2.5">
-                          CPF {form.condutores[0].cpf}
-                        </p>
-                      )}
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <CampoFiscal rotulo="Condutor Cadastrado" erro={erros.dados.find(e => e.includes('motorista'))}>
+                        <SelectFiscal
+                          value={form.condutores[0]?.id || ''}
+                          onChange={v => {
+                            const mot = motoristas.find((x: any) => String(x.id) === v);
+                            setForm(f => ({
+                              ...f,
+                              condutores: mot ? [{ id: String(mot.id), nome: mot.nome, cpf: mot.cpf }] : []
+                            }));
+                          }}
+                          opcoes={motoristas.map((m: any) => ({ valor: String(m.id), rotulo: `${m.nome} (${m.cpf})` }))}
+                          placeholder="Selecionar da frota..."
+                        />
+                      </CampoFiscal>
+                      <CampoFiscal rotulo="Nome do Condutor" obrigatorio>
+                        <InputFiscal
+                          value={form.condutores[0]?.nome || ''}
+                          onChange={v =>
+                            setForm(f => ({
+                              ...f,
+                              condutores: [
+                                {
+                                  id: f.condutores[0]?.id || 'manual',
+                                  nome: v,
+                                  cpf: f.condutores[0]?.cpf || ''
+                                }
+                              ]
+                            }))
+                          }
+                          placeholder="Nome completo"
+                        />
+                      </CampoFiscal>
+                      <CampoFiscal rotulo="CPF do Condutor" obrigatorio>
+                        <InputFiscal
+                          value={form.condutores[0]?.cpf || ''}
+                          onChange={v =>
+                            setForm(f => ({
+                              ...f,
+                              condutores: [
+                                {
+                                  id: f.condutores[0]?.id || 'manual',
+                                  nome: f.condutores[0]?.nome || 'CONDUTOR',
+                                  cpf: mascaras.somenteDigitos(v).slice(0, 11)
+                                }
+                              ]
+                            }))
+                          }
+                          placeholder="Somente números (11 dígitos)"
+                        />
+                      </CampoFiscal>
                     </div>
                   </fieldset>
 
@@ -458,22 +643,26 @@ export default function MdfeWizardPage() {
                     </legend>
                     <div className="space-y-3">
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                        <CampoFiscal rotulo="Veículo de Tração" obrigatorio erro={erros.dados.find(e => e.includes('veículo'))}>
+                        <CampoFiscal rotulo="Veículo de Tração" erro={erros.dados.find(e => e.includes('veículo'))}>
                           <SelectFiscal
                             value={form.veiculo_id}
                             onChange={v => {
                               const veic = veiculos.find((x: any) => String(x.id) === v);
-                              setForm(f => ({ ...f, veiculo_id: v, veiculo_placa: veic?.placa || '' }));
+                              setForm(f => ({ ...f, veiculo_id: v, veiculo_placa: veic?.placa || f.veiculo_placa }));
                             }}
                             opcoes={veiculos.map((v: any) => ({
                               valor: String(v.id),
                               rotulo: `${v.placa} — ${Number(v.capacidade_kg || 0).toLocaleString('pt-BR')} kg`
                             }))}
-                            placeholder="Pesquisar..."
+                            placeholder="Selecionar da frota..."
                           />
                         </CampoFiscal>
-                        <CampoFiscal rotulo="Placa">
-                          <InputFiscal value={form.veiculo_placa} onChange={v => setCampo('veiculo_placa', mascaras.placa(v))} disabled />
+                        <CampoFiscal rotulo="Placa (Mercosul / Antiga)" obrigatorio>
+                          <InputFiscal
+                            value={form.veiculo_placa}
+                            onChange={v => setCampo('veiculo_placa', mascaras.placa(v))}
+                            placeholder="Ex: QAA1B23"
+                          />
                         </CampoFiscal>
                       </div>
 
@@ -600,13 +789,20 @@ export default function MdfeWizardPage() {
                                     const selecionados = ctes.filter((item: any) => novosIds.includes(item.id));
                                     const somaValor = selecionados.reduce((acc: number, item: any) => acc + Number(item.valor_carga || item.valor_total || 0), 0);
                                     const somaPeso = selecionados.reduce((acc: number, item: any) => acc + Number(item.peso_bruto || 0), 0);
-                                    setForm(f => ({
-                                      ...f,
-                                      ctes_ids: novosIds,
-                                      uf_fim: f.uf_fim || c.uf_fim || '',
-                                      valor_total_carga: somaValor > 0 ? somaValor.toFixed(2) : f.valor_total_carga,
-                                      peso_bruto: somaPeso > 0 ? somaPeso.toFixed(2) : f.peso_bruto
-                                    }));
+                                    setForm(f => {
+                                      const novaUfFim = f.uf_fim || c.uf_fim || '';
+                                      return {
+                                        ...f,
+                                        ctes_ids: novosIds,
+                                        uf_fim: novaUfFim,
+                                        ufs_percurso:
+                                          !f.uf_fim && novaUfFim
+                                            ? resolverPercursoUfs(f.uf_inicio, novaUfFim)
+                                            : f.ufs_percurso,
+                                        valor_total_carga: somaValor > 0 ? somaValor.toFixed(2) : f.valor_total_carga,
+                                        peso_bruto: somaPeso > 0 ? somaPeso.toFixed(2) : f.peso_bruto
+                                      };
+                                    });
                                   }}
                                   className={`cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/50 ${marcado ? 'bg-sky-50 dark:bg-sky-950/30' : ''}`}
                                 >
@@ -698,11 +894,24 @@ export default function MdfeWizardPage() {
                     </legend>
                     {form.uf_inicio && form.uf_fim && form.uf_inicio !== form.uf_fim && (
                       <>
-                        <p className="text-[10px] text-slate-400 mb-2">
-                          Selecione as UFs de passagem, em ordem crescente a partir de {form.uf_inicio}:
-                        </p>
+                        <div className="flex items-center justify-between gap-2 mb-2">
+                          <p className="text-[10px] text-slate-400">
+                            {ufsSaoLimitrofes
+                              ? `${form.uf_inicio} e ${form.uf_fim} fazem fronteira direta (percurso vazio é o padrão).`
+                              : `UFs intermediárias de passagem no sentido ${form.uf_inicio} → ${form.uf_fim}:`}
+                          </p>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setCampo('ufs_percurso', resolverPercursoUfs(form.uf_inicio, form.uf_fim))
+                            }
+                            className="text-[10px] font-semibold text-sky-600 hover:underline shrink-0"
+                          >
+                            Auto-rota
+                          </button>
+                        </div>
                         <div className="flex flex-wrap gap-1 mb-3">
-                          {UFS_BRASIL.map(uf => (
+                          {UFS_BRASIL.filter(uf => uf !== form.uf_inicio && uf !== form.uf_fim).map(uf => (
                             <button
                               key={uf}
                               type="button"
@@ -849,9 +1058,9 @@ export default function MdfeWizardPage() {
                   titulo=""
                   itens={form.seguros}
                   onChange={itens => setCampo('seguros', itens)}
-                  novoItem={() => ({ id: `${Date.now()}-${Math.random()}`, responsavel: '1', cnpj_responsavel: '', nome_seguradora: '', numero_apolice: '', numero_averbacao: '' })}
+                  novoItem={() => ({ id: `${Date.now()}-${Math.random()}`, responsavel: '1', cnpj_responsavel: '', nome_seguradora: '', cnpj_seguradora: '', numero_apolice: '', numero_averbacao: '' })}
                   rotuloBotao="Novo Seguro"
-                  vazio="Opcional — vincule o seguro da carga quando houver."
+                  vazio="Obrigatório para Prestador de Serviço de Transporte (tpEmit = 1)."
                   className="border-0"
                   renderItem={(item, i, atualizar, remover) => (
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
@@ -864,10 +1073,11 @@ export default function MdfeWizardPage() {
                             { valor: '2', rotulo: '2 — Contratante do Frete' }
                           ]}
                         />
-                        <InputFiscal value={item.cnpj_responsavel} onChange={v => atualizar({ ...item, cnpj_responsavel: mascaras.cpfCnpj(v) })} placeholder="CNPJ do responsável" />
+                        <InputFiscal value={item.cnpj_responsavel} onChange={v => atualizar({ ...item, cnpj_responsavel: mascaras.cpfCnpj(v) })} placeholder="CPF/CNPJ do responsável" />
                       </div>
                       <div className="flex items-end gap-2">
                         <InputFiscal value={item.nome_seguradora} onChange={v => atualizar({ ...item, nome_seguradora: v })} placeholder="Nome da seguradora" />
+                        <InputFiscal value={item.cnpj_seguradora || ''} onChange={v => atualizar({ ...item, cnpj_seguradora: mascaras.cpfCnpj(v) })} placeholder="CNPJ da seguradora" />
                         <BotaoRemover onClick={remover} />
                       </div>
                       <div className="flex items-end gap-2">

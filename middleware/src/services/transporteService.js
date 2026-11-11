@@ -48,6 +48,146 @@ function validarCnpjReal(cnpjInput) {
   return Number(cnpj[12]) === dv1 && Number(cnpj[13]) === dv2;
 }
 
+function validarCpfReal(cpfInput) {
+  const cpf = String(cpfInput || '').replace(/\D/g, '');
+  if (cpf.length !== 11) return false;
+  if (/^(\d)\1{10}$/.test(cpf)) return false;
+
+  let soma1 = 0;
+  for (let i = 0; i < 9; i++) {
+    soma1 += Number(cpf[i]) * (10 - i);
+  }
+  const dv1 = (soma1 * 10) % 11 === 10 ? 0 : (soma1 * 10) % 11;
+  if (Number(cpf[9]) !== dv1) return false;
+
+  let soma2 = 0;
+  for (let i = 0; i < 10; i++) {
+    soma2 += Number(cpf[i]) * (11 - i);
+  }
+  const dv2 = (soma2 * 10) % 11 === 10 ? 0 : (soma2 * 10) % 11;
+  return Number(cpf[10]) === dv2;
+}
+
+const FRONTEIRAS_UFS_BRASIL = {
+  AC: ['AM', 'RO'],
+  AL: ['PE', 'SE', 'BA'],
+  AM: ['RR', 'PA', 'MT', 'RO', 'AC'],
+  AP: ['PA'],
+  BA: ['SE', 'AL', 'PE', 'PI', 'TO', 'GO', 'MG', 'ES'],
+  CE: ['PI', 'PE', 'PB', 'RN'],
+  DF: ['GO', 'MG'],
+  ES: ['BA', 'MG', 'RJ'],
+  GO: ['TO', 'BA', 'MG', 'DF', 'MS', 'MT'],
+  MA: ['PA', 'TO', 'PI'],
+  MG: ['BA', 'ES', 'RJ', 'SP', 'MS', 'GO', 'DF'],
+  MS: ['MT', 'GO', 'MG', 'SP', 'PR'],
+  MT: ['RO', 'AM', 'PA', 'TO', 'GO', 'MS'],
+  PA: ['AP', 'MA', 'TO', 'MT', 'AM', 'RR'],
+  PB: ['RN', 'CE', 'PE'],
+  PE: ['PB', 'CE', 'PI', 'BA', 'AL'],
+  PI: ['MA', 'TO', 'BA', 'PE', 'CE'],
+  PR: ['SP', 'MS', 'SC'],
+  RJ: ['ES', 'MG', 'SP'],
+  RN: ['CE', 'PB'],
+  RO: ['AC', 'AM', 'MT'],
+  RR: ['AM', 'PA'],
+  RS: ['SC'],
+  SC: ['PR', 'RS'],
+  SE: ['AL', 'BA'],
+  SP: ['MG', 'RJ', 'PR', 'MS'],
+  TO: ['MA', 'PI', 'BA', 'GO', 'MT', 'PA'],
+};
+
+function saoUfsLimitrofes(ufA, ufB) {
+  const a = String(ufA || '').trim().toUpperCase();
+  const b = String(ufB || '').trim().toUpperCase();
+  if (!a || !b || a === b) return false;
+  return Boolean(FRONTEIRAS_UFS_BRASIL[a]?.includes(b));
+}
+
+/**
+ * Calcula automaticamente o menor caminho terrestre de UFs intermediárias (percursos)
+ * exigido pela SEFAZ no MDF-e 3.00. Para mesma UF ou UFs limítrofes (ex.: MS -> SP), retorna [].
+ */
+function resolverPercursoUfs(ufInicioInput, ufFimInput) {
+  const inicio = String(ufInicioInput || '').trim().toUpperCase();
+  const fim = String(ufFimInput || '').trim().toUpperCase();
+  if (!inicio || !fim || inicio === fim) return [];
+  if (!FRONTEIRAS_UFS_BRASIL[inicio] || !FRONTEIRAS_UFS_BRASIL[fim]) return [];
+  if (saoUfsLimitrofes(inicio, fim)) return [];
+
+  const visitados = new Set([inicio]);
+  const fila = [[inicio]];
+
+  while (fila.length > 0) {
+    const caminho = fila.shift();
+    const atual = caminho[caminho.length - 1];
+    const vizinhos = FRONTEIRAS_UFS_BRASIL[atual] || [];
+    for (const prox of vizinhos) {
+      if (prox === fim) {
+        return caminho.slice(1);
+      }
+      if (!visitados.has(prox)) {
+        visitados.add(prox);
+        fila.push([...caminho, prox]);
+      }
+    }
+  }
+  return [];
+}
+
+const CEPS_CAPITAIS_POR_UF = {
+  AC: '69900000',
+  AL: '57020000',
+  AM: '69005000',
+  AP: '68900000',
+  BA: '40020000',
+  CE: '60025000',
+  DF: '70040010',
+  ES: '29010000',
+  GO: '74003010',
+  MA: '65010000',
+  MG: '30130000',
+  MS: '79002070',
+  MT: '78005000',
+  PA: '66010000',
+  PB: '58010000',
+  PE: '50010000',
+  PI: '64000000',
+  PR: '80020310',
+  RJ: '20040002',
+  RN: '59010000',
+  RO: '76801000',
+  RR: '69301000',
+  RS: '90010150',
+  SC: '88010400',
+  SE: '49010000',
+  SP: '01310100',
+  TO: '77001002',
+};
+
+function cepPadraoPorUf(uf) {
+  const u = String(uf || 'MS').trim().toUpperCase();
+  return CEPS_CAPITAIS_POR_UF[u] || '79002070';
+}
+
+function validarPlacaVeiculoSefaz(placaInput) {
+  const p = String(placaInput || '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+  if (p.length !== 7 || p === 'AAA0000' || /^([A-Z])\1\10000$/.test(p)) return false;
+  return /^[A-Z]{3}[0-9][0-9A-Z][0-9]{2}$/.test(p);
+}
+
+function gerarPlacaMercosulHomolog(seedInput = 1) {
+  const n = Math.abs(parseInt(seedInput, 10) || 1);
+  const letras = 'ABCDEFGHJKLMNPRSTUVWXYZ';
+  const l2 = letras[n % letras.length];
+  const l3 = letras[Math.floor(n / letras.length) % letras.length];
+  const d1 = String((n % 8) + 1);
+  const l4 = letras[Math.floor(n / 7) % letras.length];
+  const d23 = String(((n * 7) % 89) + 10).padStart(2, '0');
+  return `Q${l2}${l3}${d1}${l4}${d23}`;
+}
+
 function normalizarRntrc8(valor) {
   const d = String(valor || '').replace(/\D/g, '');
   if (!d) return '00000000';
@@ -159,6 +299,7 @@ const KNOWN_ANTT_FISCAL_REGISTRY = {
 
 const inFlightAutoHidratacao = new Map();
 const inFlightCteEmissoes = new Map();
+const inFlightMdfeEmissoes = new Map();
 const tenantEmissionChains = new Map();
 const tenantsLoteHomologMsInicializado = new Set();
 
@@ -2093,9 +2234,319 @@ class TransporteService {
           await this.gerarCteUnicoValidacaoLogoHomologacao(tenantId, emitente);
         }
       }
+
+      // 4. Verifica se já foram emitidos os MDF-es de teste SEFAZ/MS em homologação
+      // (#1 Interno MS->MS Autorizado + Encerrado | #2 Interestadual MS->SP Autorizado em aberto)
+      const { rows: jaTemMdfesTeste } = await db.query(
+        `SELECT COUNT(*)::int AS total FROM dash_mdfes
+         WHERE tenant_id = $1 AND informacao_adicional ILIKE '%TESTE HOMOLOGACAO SEFAZ/MS MDF-E%'`,
+        [tenantId]
+      );
+      if (Number(jaTemMdfesTeste[0]?.total || 0) === 0) {
+        await this.gerarMdfesTesteHomologacaoMs(tenantId);
+      }
     } catch (err) {
       logger.warn(`[Homolog MS] Aviso em reconciliarEGerarTestesHomologacaoMs: ${err.message}`);
     }
+  }
+
+  /**
+   * Cria, transmite e valida 2 MDF-es reais (Modelo 58 / v3.00) na SEFAZ/MS em Homologação:
+   *  - MDF-e #1: Operação Interna (Dourados/MS -> Campo Grande/MS) vinculado a CT-e MS->MS, seguido de Encerramento SEFAZ (110112 / cStat 135).
+   *  - MDF-e #2: Operação Interestadual (Dourados/MS -> São Paulo/SP) vinculado a CT-e MS->SP, mantido em aberto como AUTORIZADO com DAMDFE e XML.
+   */
+  static async gerarMdfesTesteHomologacaoMs(tenantId, opts = {}) {
+    const emitente = await this.getEmitente(tenantId);
+    if (emitente.focus_ambiente === 'producao') {
+      throw new Error(
+        'A geração automática de MDF-es de teste só é permitida quando a empresa está em ambiente de Homologação.'
+      );
+    }
+
+    let emitenteId = emitente.id;
+    if (!emitenteId) {
+      const { rows: emRows } = await db.query(
+        `SELECT id FROM dash_emitentes WHERE tenant_id = $1 AND ativo = true ORDER BY id ASC LIMIT 1`,
+        [tenantId]
+      );
+      emitenteId = emRows[0]?.id || null;
+    }
+
+    // Encerra preventivamente eventuais MDF-es de teste anteriores deixados em aberto em homologação
+    const { rows: abertosAnteriores } = await db.query(
+      `SELECT id, uf_fim, codigo_municipio_descarregamento, municipio_descarregamento
+       FROM dash_mdfes
+       WHERE tenant_id = $1
+         AND status = 'AUTORIZADO'
+         AND informacao_adicional ILIKE '%TESTE HOMOLOGACAO SEFAZ/MS MDF-E%'
+       ORDER BY id ASC LIMIT 6`,
+      [tenantId]
+    );
+    for (const ab of abertosAnteriores) {
+      try {
+        await this.encerrarMdfe(tenantId, ab.id, {
+          siglaUf: ab.uf_fim || 'MS',
+          codigoMunicipio: ab.codigo_municipio_descarregamento,
+          nomeMunicipio: ab.municipio_descarregamento,
+        });
+      } catch (encPrevErr) {
+        logger.warn(`[Homolog MDF-e] Aviso ao encerrar MDF-e anterior #${ab.id}: ${encPrevErr.message}`);
+      }
+    }
+
+    const buscarCtesAutorizados = async () => {
+      const { rows: ctesAut } = await db.query(
+        `SELECT id, numero, serie, chave_cte, uf_inicio, uf_fim,
+                municipio_inicio, codigo_municipio_inicio,
+                municipio_fim, codigo_municipio_fim,
+                valor_total, valor_carga, peso_bruto, produto_predominante,
+                tomador, tomador_documento, remetente_dados, destinatario_dados
+         FROM dash_ctes
+         WHERE tenant_id = $1
+           AND status = 'AUTORIZADO'
+           AND LENGTH(regexp_replace(COALESCE(chave_cte, ''), '\\D', '', 'g')) = 44
+         ORDER BY id DESC`,
+        [tenantId]
+      );
+      const interno = ctesAut.find((c) => c.uf_inicio === 'MS' && c.uf_fim === 'MS') || null;
+      const interestadual =
+        ctesAut.find((c) => c.uf_inicio === 'MS' && c.uf_fim === 'SP') ||
+        ctesAut.find((c) => c.uf_inicio !== c.uf_fim) ||
+        null;
+      return { interno, interestadual, todos: ctesAut };
+    };
+
+    let ctesDisp = await buscarCtesAutorizados();
+    if (!ctesDisp.interno || !ctesDisp.interestadual) {
+      await this.gerarCtesTesteHomologacaoMs(tenantId);
+      ctesDisp = await buscarCtesAutorizados();
+    }
+
+    const cteInterno = ctesDisp.interno || ctesDisp.todos[0] || null;
+    const cteInterestadual =
+      ctesDisp.interestadual ||
+      ctesDisp.todos.find((c) => !cteInterno || c.id !== cteInterno.id) ||
+      cteInterno;
+
+    if (!cteInterno) {
+      throw new Error(
+        'Não foi possível localizar ou autorizar um CT-e de base em homologação para vincular ao MDF-e.'
+      );
+    }
+
+    const { rows: maxRows } = await db.query(
+      `SELECT COALESCE(MAX(numero), 0)::int AS max_num, COUNT(*)::int AS total_mdfes
+       FROM dash_mdfes WHERE tenant_id = $1`,
+      [tenantId]
+    );
+    let baseNumero = Math.max(
+      Number(maxRows[0]?.max_num || 0) + 1,
+      10 + Number(maxRows[0]?.total_mdfes || 0)
+    );
+
+    const cnpjEmit = digitsOnly(emitente.cnpj) || '03272053000150';
+    const nomeEmit = emitente.razao_social || 'PANTANAL COMERCIO DE ALIMENTOS LTDA';
+    const codMunOrig = emitente.codigo_municipio || '5003702';
+    const nomeMunOrig = emitente.municipio || 'Dourados';
+    const ufOrig = (emitente.uf || 'MS').toUpperCase();
+
+    const cenariosMdfe = [
+      {
+        descricao:
+          'MDF-e Homologação SEFAZ/MS #1 — Interno (Dourados/MS → Campo Grande/MS) [Autorizado + Encerrado]',
+        cte: cteInterno,
+        uf_inicio: cteInterno.uf_inicio || ufOrig,
+        uf_fim: cteInterno.uf_fim || 'MS',
+        cod_mun_fim: cteInterno.codigo_municipio_fim || '5002704',
+        nome_mun_fim: cteInterno.municipio_fim || 'Campo Grande',
+        placa_seed: baseNumero * 11 + 101,
+        encerrar_apos_autorizar: true,
+        info_adicional:
+          'TESTE HOMOLOGACAO SEFAZ/MS MDF-E #1 — OPERACAO INTERNA MS -> MS (CICLO COMPLETO AUTORIZACAO + ENCERRAMENTO 110112)',
+      },
+      {
+        descricao:
+          'MDF-e Homologação SEFAZ/MS #2 — Interestadual (Dourados/MS → São Paulo/SP) [Em Aberto / Autorizado]',
+        cte: cteInterestadual,
+        uf_inicio: cteInterestadual.uf_inicio || ufOrig,
+        uf_fim: cteInterestadual.uf_fim || 'SP',
+        cod_mun_fim: cteInterestadual.codigo_municipio_fim || '3550308',
+        nome_mun_fim: cteInterestadual.municipio_fim || 'Sao Paulo',
+        placa_seed: baseNumero * 11 + 202,
+        encerrar_apos_autorizar: false,
+        info_adicional:
+          'TESTE HOMOLOGACAO SEFAZ/MS MDF-E #2 — OPERACAO INTERESTADUAL MS -> SP (AUTORIZADO COM DAMDFE E XML)',
+      },
+    ];
+
+    const resultados = [];
+    for (const cenario of cenariosMdfe) {
+      const numeroMdfe = baseNumero++;
+      const refInicial = this.gerarRef('MDFE', tenantId, `TM${numeroMdfe}`);
+      const placaTeste = gerarPlacaMercosulHomolog(cenario.placa_seed);
+      const cteBase = cenario.cte;
+      const chaveCteLimpa = digitsOnly(cteBase.chave_cte);
+      const valorFreteCte = parseFloat(cteBase.valor_total || 150) || 150.0;
+      const valorCargaCte = parseFloat(cteBase.valor_carga || 1850) || 1850.0;
+      const pesoBrutoCte = parseFloat(cteBase.peso_bruto || 180) || 180.0;
+      const percursoUfs = resolverPercursoUfs(cenario.uf_inicio, cenario.uf_fim);
+
+      const municipiosCarregamento = [{ codigo: codMunOrig, nome: nomeMunOrig }];
+      const municipiosDescarregamento = [
+        {
+          codigo: cenario.cod_mun_fim,
+          nome: cenario.nome_mun_fim,
+          conhecimentos_transporte: [{ chave_cte: chaveCteLimpa }],
+        },
+      ];
+      const condutores = [{ nome: 'MOTORISTA HOMOLOGACAO SEFAZ', cpf: '11144477735' }];
+      const contratantes = [{ documento: cnpjEmit, cnpj: cnpjEmit, nome: nomeEmit }];
+      const pagtoFrete = [
+        {
+          nome: nomeEmit,
+          cnpj: cnpjEmit,
+          componentes: [{ tipo: '04', valor: valorFreteCte.toFixed(2) }],
+          valor_total_contrato: valorFreteCte.toFixed(2),
+          forma_pagamento: '0',
+          numero_banco: '001',
+          numero_agencia: '1234',
+        },
+      ];
+      const seguros = [
+        {
+          responsavel: '1',
+          nome_seguradora: 'PORTO SEGURO CIA DE SEGUROS',
+          cnpj_seguradora: '61198164000160',
+          numero_apolice: '0000540012345',
+          numero_averbacao: '00000000000000000001',
+        },
+      ];
+      const produtosPredominantes = [
+        {
+          tipo_carga: '05',
+          descricao: cteBase.produto_predominante || 'MERCADORIAS EM GERAL',
+          ncm: '21069090',
+          lotacao: true,
+        },
+      ];
+
+      const { rows: insRows } = await db.query(
+        `INSERT INTO dash_mdfes (
+            tenant_id, emitente_id, ref, status, serie, numero,
+            tipo_emitente, tipo_transporte, uf_inicio, uf_fim,
+            ufs_percurso, municipios_carregamento, municipios_descarregamento,
+            codigo_municipio_carregamento, municipio_carregamento,
+            codigo_municipio_descarregamento, municipio_descarregamento,
+            veiculo_placa, motorista_cpf, motorista_nome,
+            condutores, contratantes, pagto_frete, seguros, produtos_predominantes,
+            informacao_adicional, qtd_cte, qtd_nfe, valor_carga, peso_bruto, data_emissao
+         ) VALUES (
+            $1, $2, $3, 'RASCUNHO', '1', $4,
+            '1', '1', $5, $6,
+            $7::jsonb, $8::jsonb, $9::jsonb,
+            $10, $11,
+            $12, $13,
+            $14, '11144477735', 'MOTORISTA HOMOLOGACAO SEFAZ',
+            $15::jsonb, $16::jsonb, $17::jsonb, $18::jsonb, $19::jsonb,
+            $20, 1, 0, $21, $22, NOW()
+         ) RETURNING *`,
+        [
+          tenantId,
+          emitenteId,
+          refInicial,
+          numeroMdfe,
+          cenario.uf_inicio,
+          cenario.uf_fim,
+          JSON.stringify(percursoUfs),
+          JSON.stringify(municipiosCarregamento),
+          JSON.stringify(municipiosDescarregamento),
+          codMunOrig,
+          nomeMunOrig,
+          cenario.cod_mun_fim,
+          cenario.nome_mun_fim,
+          placaTeste,
+          JSON.stringify(condutores),
+          JSON.stringify(contratantes),
+          JSON.stringify(pagtoFrete),
+          JSON.stringify(seguros),
+          JSON.stringify(produtosPredominantes),
+          cenario.info_adicional,
+          valorCargaCte,
+          pesoBrutoCte,
+        ]
+      );
+
+      const novoMdfe = insRows[0];
+
+      await db.query(
+        `INSERT INTO dash_mdfe_documentos (
+            tenant_id, mdfe_id, tipo_documento, chave,
+            codigo_municipio_descarregamento, nome_municipio_descarregamento
+         ) VALUES ($1, $2, 'CTE', $3, $4, $5)
+         ON CONFLICT (tenant_id, mdfe_id, chave) DO NOTHING`,
+        [tenantId, novoMdfe.id, chaveCteLimpa, cenario.cod_mun_fim, cenario.nome_mun_fim]
+      );
+
+      try {
+        const resEmissao = await this.emitirMdfe(tenantId, novoMdfe.id, opts);
+        let itemResultado = {
+          tipo_documento: 'MDFE',
+          mdfe_id: novoMdfe.id,
+          cte_vinculado_id: cteBase.id,
+          cte_vinculado_numero: cteBase.numero,
+          descricao: cenario.descricao,
+          ...resEmissao,
+        };
+
+        if (cenario.encerrar_apos_autorizar && resEmissao.status === 'AUTORIZADO') {
+          try {
+            const resEnc = await this.encerrarMdfe(tenantId, novoMdfe.id, {
+              siglaUf: cenario.uf_fim,
+              codigoMunicipio: cenario.cod_mun_fim,
+              nomeMunicipio: cenario.nome_mun_fim,
+            });
+            itemResultado = {
+              ...itemResultado,
+              status: 'ENCERRADO',
+              encerrado_sefaz: true,
+              protocolo_autorizacao: resEmissao.protocolo,
+              status_sefaz: resEnc.status_sefaz || '135',
+              mensagem_sefaz:
+                resEnc.mensagem_sefaz ||
+                'MDF-e autorizado (100) e encerrado com sucesso na SEFAZ (135)',
+              caminho_damdfe: resEnc.caminho_damdfe || resEmissao.caminho_damdfe,
+              caminho_xml: resEnc.caminho_xml || resEmissao.caminho_xml,
+            };
+          } catch (encErr) {
+            logger.warn(
+              `[Homolog MDF-e] MDF-e #${novoMdfe.id} autorizado, mas aviso ao encerrar: ${encErr.message}`
+            );
+            itemResultado.aviso_encerramento = encErr.message;
+          }
+        }
+
+        resultados.push(itemResultado);
+      } catch (err) {
+        resultados.push({
+          tipo_documento: 'MDFE',
+          mdfe_id: novoMdfe.id,
+          descricao: cenario.descricao,
+          status: 'REJEITADO',
+          error: err.message,
+        });
+      }
+    }
+
+    return {
+      success: true,
+      tipo_lote: 'MDFE',
+      criados: resultados.length,
+      autorizados: resultados.filter(
+        (r) => r.status === 'AUTORIZADO' || r.status === 'ENCERRADO'
+      ).length,
+      encerrados: resultados.filter((r) => r.status === 'ENCERRADO').length,
+      resultados,
+    };
   }
 
   /**
@@ -2359,9 +2810,117 @@ class TransporteService {
   // ─────────────────────────────────────────────────────────
 
   /**
-   * Envia o MDF-e para autorização na SEFAZ via Focus NFe v2.
+   * Envia o MDF-e (Modelo 58 / v3.00) para autorização na SEFAZ via Focus NFe v2,
+   * cumprindo integralmente o leiaute oficial MDFeXML + TransporteRodoviarioXML + NT 2025.001.
    */
-  static async emitirMdfe(tenantId, mdfeId) {
+  static async emitirMdfe(tenantId, mdfeId, opts = {}) {
+    const idKey = Number(mdfeId);
+    if (inFlightMdfeEmissoes.has(idKey)) {
+      return inFlightMdfeEmissoes.get(idKey);
+    }
+
+    const promise = runTenantSequential(tenantId, () =>
+      this._executarEmissaoMdfe(tenantId, mdfeId, opts)
+    );
+    inFlightMdfeEmissoes.set(idKey, promise);
+    try {
+      return await promise;
+    } finally {
+      inFlightMdfeEmissoes.delete(idKey);
+    }
+  }
+
+  static async _persistirRetornoFocusMdfe(
+    mdfeId,
+    ref,
+    resFocus,
+    ambiente,
+    fallbackNumero = null,
+    fallbackSerie = null,
+    extraCols = {}
+  ) {
+    const novoStatus = mapFocusStatusToDb(resFocus?.status, 'PROCESSANDO');
+    const chaveMdfeNormalizada =
+      digitsOnly(
+        resFocus?.chave_mdfe || resFocus?.chave || resFocus?.protocolo?.chave_mdfe || ''
+      ).slice(0, 44) || null;
+    const caminhoXmlMdfeNormalizado = FocusClient.normalizarUrlArquivo(
+      resFocus?.caminho_xml_nota_fiscal || resFocus?.caminho_xml,
+      ambiente
+    );
+    const caminhoDamdfeNormalizado = FocusClient.normalizarUrlArquivo(
+      resFocus?.caminho_damdfe,
+      ambiente
+    );
+    const protocoloMdfeNormalizado = extrairProtocoloFocus(resFocus);
+    const statusSefazMdfe = extrairStatusSefazFocus(resFocus);
+    const mensagemSefazMdfe = extrairMensagemSefazFocus(resFocus);
+    const numeroFinal = resFocus?.numero
+      ? parseInt(resFocus.numero, 10)
+      : fallbackNumero
+      ? parseInt(fallbackNumero, 10)
+      : null;
+    const serieFinal = resFocus?.serie
+      ? String(resFocus.serie)
+      : fallbackSerie
+      ? String(fallbackSerie)
+      : null;
+
+    await db.query(
+      `UPDATE dash_mdfes SET
+          status = $1,
+          status_sefaz = COALESCE($2, status_sefaz),
+          mensagem_sefaz = COALESCE($3, mensagem_sefaz),
+          chave_mdfe = COALESCE($4, chave_mdfe),
+          numero = COALESCE($5, numero),
+          serie = COALESCE($6, serie),
+          protocolo = COALESCE($7, protocolo),
+          caminho_xml = COALESCE($8, caminho_xml),
+          caminho_damdfe = COALESCE($9, caminho_damdfe),
+          veiculo_placa = COALESCE($10, veiculo_placa),
+          codigo_municipio_descarregamento = COALESCE($11, codigo_municipio_descarregamento),
+          municipio_descarregamento = COALESCE($12, municipio_descarregamento),
+          retorno_focus = $13,
+          updated_at = NOW()
+       WHERE id = $14`,
+      [
+        novoStatus,
+        statusSefazMdfe,
+        mensagemSefazMdfe,
+        chaveMdfeNormalizada,
+        numeroFinal,
+        serieFinal,
+        protocoloMdfeNormalizado,
+        caminhoXmlMdfeNormalizado,
+        caminhoDamdfeNormalizado,
+        extraCols.placaTracao || null,
+        extraCols.codMunDesc || null,
+        extraCols.nomeMunDesc || null,
+        JSON.stringify(resFocus || {}),
+        mdfeId,
+      ]
+    );
+
+    return {
+      success: true,
+      ref,
+      ambiente,
+      focus_ambiente: ambiente,
+      status: novoStatus,
+      status_sefaz: statusSefazMdfe,
+      mensagem_sefaz: mensagemSefazMdfe,
+      chave_mdfe: chaveMdfeNormalizada,
+      numero: numeroFinal,
+      serie: serieFinal,
+      protocolo: protocoloMdfeNormalizado,
+      caminho_xml: caminhoXmlMdfeNormalizado,
+      caminho_damdfe: caminhoDamdfeNormalizado,
+      veiculo_placa: extraCols.placaTracao || undefined,
+      focus: resFocus,
+    };
+  }
+
+  static async _executarEmissaoMdfe(tenantId, mdfeId, opts = {}) {
     const { rows } = await db.query(
       `SELECT m.*,
               v.placa as v_placa, v.renavam as v_renavam, v.uf as v_uf,
@@ -2382,14 +2941,48 @@ class TransporteService {
     }
 
     const mdfe = rows[0];
-    const { client, emitente } = await this.getFocusClient(tenantId, mdfe.emitente_id);
+    if (mdfe.status === 'AUTORIZADO' || mdfe.status === 'ENCERRADO') {
+      throw new Error(
+        `MDF-e já está ${mdfe.status} na SEFAZ. Os artefatos XML e DAMDFE estão preservados; crie um novo MDF-e se necessário.`
+      );
+    }
 
-    // Busca documentos (CT-e / NF-e) vinculados ao manifesto
+    const { client, emitente } = await this.getFocusClient(tenantId, mdfe.emitente_id);
+    const isHomolog = client.ambiente !== 'producao';
+    const pollIntervalMs = Number.isFinite(opts.pollIntervalMs) ? Number(opts.pollIntervalMs) : 2000;
+
+    // Se já estava em PROCESSANDO com ref existente, verifica se a Focus NFe já autorizou antes de gerar nova tentativa
+    if (mdfe.status === 'PROCESSANDO' && mdfe.ref && !opts.forcarNovaEmissao) {
+      try {
+        const stCheck = await client.consultarMdfe(mdfe.ref, true);
+        const stMapped = mapFocusStatusToDb(stCheck?.status, 'PROCESSANDO');
+        if (stCheck && (stMapped === 'AUTORIZADO' || stMapped === 'ENCERRADO')) {
+          return await this._persistirRetornoFocusMdfe(
+            mdfeId,
+            mdfe.ref,
+            stCheck,
+            client.ambiente,
+            mdfe.numero,
+            mdfe.serie
+          );
+        }
+      } catch (_) {
+        // segue para emissão limpa com nova ref e numeração sequencial
+      }
+    }
+
+    // Busca documentos (CT-e / NF-e) vinculados ao manifesto enriquecidos com dados fiscais e de endereço
     const { rows: docs } = await db.query(
       `SELECT md.tipo_documento, md.chave,
               md.codigo_municipio_descarregamento, md.nome_municipio_descarregamento,
-              ct.codigo_municipio_fim as cte_cod_fim, ct.municipio_fim as cte_mun_fim,
-              cg.destinatario_municipio as nfe_mun_fim
+              ct.codigo_municipio_fim as cte_cod_fim, ct.municipio_fim as cte_mun_fim, ct.uf_fim as cte_uf_fim,
+              ct.valor_total as cte_valor_total, ct.valor_carga as cte_valor_carga,
+              ct.peso_bruto as cte_peso_bruto, ct.produto_predominante as cte_produto,
+              ct.tomador as cte_tomador, ct.tomador_documento as cte_tomador_doc,
+              ct.remetente_dados as cte_remetente_dados, ct.destinatario_dados as cte_destinatario_dados,
+              cg.destinatario_municipio as nfe_mun_fim, cg.destinatario_uf as nfe_uf_fim,
+              cg.valor_total as nfe_valor_total, cg.peso_bruto as nfe_peso_bruto,
+              cg.produto_predominante as nfe_produto, cg.dados_nfe as nfe_dados
        FROM dash_mdfe_documentos md
        LEFT JOIN dash_ctes ct ON ct.chave_cte = md.chave AND ct.tenant_id = md.tenant_id
        LEFT JOIN dash_cargas cg ON cg.chave_acesso = md.chave AND cg.tenant_id = md.tenant_id
@@ -2397,8 +2990,31 @@ class TransporteService {
       [mdfeId, tenantId]
     );
 
+    const primeiroDocUfFim = docs[0]?.cte_uf_fim || docs[0]?.nfe_uf_fim || '';
     const ufInicio = (mdfe.uf_inicio || emitente.uf || 'MS').toUpperCase();
-    const ufFim = (mdfe.uf_fim || emitente.uf || 'MS').toUpperCase();
+    const ufFim = (mdfe.uf_fim || primeiroDocUfFim || emitente.uf || 'MS').toUpperCase();
+
+    // Numeração sequencial segura por tenant
+    const serieEnvio = Number(mdfe.serie || emitente.serie_mdfe || 1);
+    const { rows: maxNumRows } = await db.query(
+      `SELECT COALESCE(MAX(numero), 0)::int AS max_num
+       FROM dash_mdfes
+       WHERE tenant_id = $1 AND id <> $2`,
+      [tenantId, mdfeId]
+    );
+    const maxNumExistente = Number(maxNumRows[0]?.max_num || 0);
+    const precisaNovoNumeroHomolog =
+      isHomolog &&
+      (mdfe.status === 'REJEITADO' ||
+        mdfe.status === 'PROCESSANDO' ||
+        !mdfe.numero ||
+        Number(mdfe.numero) <= 1 ||
+        Boolean(opts.forcarNovaEmissao));
+    let numeroEnvio = precisaNovoNumeroHomolog
+      ? Math.max(maxNumExistente + 1, Number(mdfe.id || 1) + 10)
+      : Number(mdfe.numero) > 0
+      ? Number(mdfe.numero)
+      : Math.max(maxNumExistente + 1, 1);
 
     // 1. Municípios de Carregamento
     const munCarregRaw = parseJsonSafe(mdfe.municipios_carregamento, []);
@@ -2425,27 +3041,53 @@ class TransporteService {
             })(),
           ];
 
-    // 2. Percurso (UFs intermediárias)
+    // 2. Percurso (UFs intermediárias em ordem geográfica real; omitido para mesma UF ou UFs limítrofes como MS -> SP)
     const ufsPercursoRaw = parseJsonSafe(mdfe.ufs_percurso, []);
-    const percurso = Array.isArray(ufsPercursoRaw)
+    let ufsIntermediarias = Array.isArray(ufsPercursoRaw)
       ? ufsPercursoRaw
           .map((u) =>
             typeof u === 'string'
               ? u.trim().toUpperCase()
               : String(u?.uf_percurso || u?.uf || '').trim().toUpperCase()
           )
-          .filter((uf) => uf.length === 2 && uf !== ufInicio && uf !== ufFim)
-          .map((uf_percurso) => ({ uf_percurso }))
+          .filter(
+            (uf, idx, arr) =>
+              uf.length === 2 &&
+              Boolean(FRONTEIRAS_UFS_BRASIL[uf]) &&
+              uf !== ufInicio &&
+              uf !== ufFim &&
+              arr.indexOf(uf) === idx
+          )
       : [];
+
+    if (ufInicio === ufFim) {
+      ufsIntermediarias = [];
+    } else if (ufsIntermediarias.length > 0) {
+      const cadeia = [ufInicio, ...ufsIntermediarias, ufFim];
+      const cadeiaContigua = cadeia.every(
+        (ufAtual, idx) => idx === 0 || saoUfsLimitrofes(cadeia[idx - 1], ufAtual)
+      );
+      if (!cadeiaContigua) {
+        ufsIntermediarias = resolverPercursoUfs(ufInicio, ufFim);
+      }
+    } else {
+      ufsIntermediarias = resolverPercursoUfs(ufInicio, ufFim);
+    }
+    const percurso = ufsIntermediarias.map((uf_percurso) => ({ uf_percurso }));
 
     // 3. Municípios de Descarregamento agrupando conhecimentos_transporte e notas_fiscais
     const munDescExplicit = parseJsonSafe(mdfe.municipios_descarregamento, []);
     const defaultMunDesc = resolverIbgeMunicipio(
       mdfe.codigo_municipio_descarregamento ||
+        docs[0]?.codigo_municipio_descarregamento ||
+        docs[0]?.cte_cod_fim ||
         munDescExplicit?.[0]?.codigo ||
         munDescExplicit?.[0]?.ibge ||
         (ufFim === emitente.uf ? emitente.codigo_municipio : ''),
       mdfe.municipio_descarregamento ||
+        docs[0]?.nome_municipio_descarregamento ||
+        docs[0]?.cte_mun_fim ||
+        docs[0]?.nfe_mun_fim ||
         munDescExplicit?.[0]?.nome ||
         munDescExplicit?.[0]?.municipio ||
         '',
@@ -2507,31 +3149,64 @@ class TransporteService {
       }
     }
 
-    const municipiosDescarregamento = Array.from(gruposDesc.values()).map((g) => {
-      const item = { codigo: g.codigo, nome: g.nome };
-      if (g.conhecimentos_transporte.length > 0) {
-        item.conhecimentos_transporte = g.conhecimentos_transporte;
-      }
-      if (g.notas_fiscais.length > 0) {
-        item.notas_fiscais = g.notas_fiscais;
-      }
-      return item;
-    });
-
-    if (municipiosDescarregamento.length === 0) {
-      municipiosDescarregamento.push({
-        codigo: defaultMunDesc.codigo,
-        nome: defaultMunDesc.nome,
-      });
+    let totalCtesBruto = 0;
+    let totalNfesBruto = 0;
+    for (const g of gruposDesc.values()) {
+      totalCtesBruto += g.conhecimentos_transporte.length;
+      totalNfesBruto += g.notas_fiscais.length;
     }
 
-    // 4. Condutores
+    if (totalCtesBruto + totalNfesBruto === 0) {
+      throw new Error(
+        'Vincule ao menos um CT-e autorizado (ou NF-e para carga própria) ao MDF-e antes de transmitir à SEFAZ.'
+      );
+    }
+
+    let tipoEmitenteFinal = String(mdfe.tipo_emitente || '1');
+    if (tipoEmitenteFinal === '1' && totalCtesBruto === 0 && totalNfesBruto > 0) {
+      tipoEmitenteFinal = '2';
+    } else if (tipoEmitenteFinal === '2' && totalNfesBruto === 0 && totalCtesBruto > 0) {
+      tipoEmitenteFinal = '1';
+    }
+
+    const municipiosDescarregamento = Array.from(gruposDesc.values())
+      .map((g) => {
+        const item = { codigo: g.codigo, nome: g.nome };
+        if (tipoEmitenteFinal !== '2' && g.conhecimentos_transporte.length > 0) {
+          item.conhecimentos_transporte = g.conhecimentos_transporte;
+        }
+        if (tipoEmitenteFinal === '2' && g.notas_fiscais.length > 0) {
+          item.notas_fiscais = g.notas_fiscais;
+        }
+        return item;
+      })
+      .filter(
+        (m) =>
+          (Array.isArray(m.conhecimentos_transporte) && m.conhecimentos_transporte.length > 0) ||
+          (Array.isArray(m.notas_fiscais) && m.notas_fiscais.length > 0)
+      );
+
+    const totalCtesVinculados = municipiosDescarregamento.reduce(
+      (acc, m) => acc + (Array.isArray(m.conhecimentos_transporte) ? m.conhecimentos_transporte.length : 0),
+      0
+    );
+    const totalNfesVinculadas = municipiosDescarregamento.reduce(
+      (acc, m) => acc + (Array.isArray(m.notas_fiscais) ? m.notas_fiscais.length : 0),
+      0
+    );
+    const totalDocsVinculados = totalCtesVinculados + totalNfesVinculadas;
+
+    // 4. Condutores (validação Módulo 11 de CPF)
     const condutoresMap = new Map();
     const cpfMotPrincipal = digitsOnly(mdfe.motorista_cpf || mdfe.mot_cpf);
-    const nomeMotPrincipal = mdfe.motorista_nome || mdfe.mot_nome;
-    if (cpfMotPrincipal.length === 11 && nomeMotPrincipal) {
+    const nomeMotPrincipal = String(mdfe.motorista_nome || mdfe.mot_nome || '').trim();
+    if (
+      validarCpfReal(cpfMotPrincipal) &&
+      nomeMotPrincipal &&
+      nomeMotPrincipal.toUpperCase() !== 'CONDUTOR NAO INFORMADO'
+    ) {
       condutoresMap.set(cpfMotPrincipal, {
-        nome: nomeMotPrincipal,
+        nome: nomeMotPrincipal.slice(0, 60),
         cpf: cpfMotPrincipal,
       });
     }
@@ -2539,9 +3214,23 @@ class TransporteService {
     if (Array.isArray(condutoresRaw)) {
       for (const c of condutoresRaw) {
         const cpf = digitsOnly(c?.cpf);
-        if (cpf.length === 11 && c?.nome) {
-          condutoresMap.set(cpf, { nome: String(c.nome).trim(), cpf });
+        const nome = String(c?.nome || '').trim();
+        if (validarCpfReal(cpf) && nome) {
+          condutoresMap.set(cpf, { nome: nome.slice(0, 60), cpf });
         }
+      }
+    }
+    if (condutoresMap.size === 0) {
+      if (isHomolog) {
+        condutoresMap.set('11144477735', {
+          nome:
+            nomeMotPrincipal && nomeMotPrincipal.toUpperCase() !== 'CONDUTOR NAO INFORMADO'
+              ? nomeMotPrincipal.slice(0, 60)
+              : 'MOTORISTA HOMOLOGACAO SEFAZ',
+          cpf: '11144477735',
+        });
+      } else {
+        throw new Error('Informe ao menos um motorista condutor com CPF válido de 11 dígitos.');
       }
     }
     const condutoresList = Array.from(condutoresMap.values());
@@ -2550,7 +3239,7 @@ class TransporteService {
     const reboquesRaw = parseJsonSafe(mdfe.reboques, []);
     const reboquesPayload = Array.isArray(reboquesRaw)
       ? reboquesRaw
-          .filter((r) => r && r.placa)
+          .filter((r) => r && validarPlacaVeiculoSefaz(r.placa))
           .map((r) => ({
             placa: String(r.placa).replace(/[^a-zA-Z0-9]/g, '').toUpperCase(),
             tara: Number(r.tara_kg || r.tara || 5000),
@@ -2560,7 +3249,7 @@ class TransporteService {
           }))
       : [];
 
-    // 6. Seguros (conforme MDFeXML: seguros_carga)
+    // 6. Seguros da Carga (obrigatório na SEFAZ quando emitente = 1 / Prestador de Serviço de Transporte — Rejeições 698 e 699)
     const segurosRaw = parseJsonSafe(mdfe.seguros, []);
     const segurosPayload = Array.isArray(segurosRaw)
       ? segurosRaw
@@ -2578,123 +3267,400 @@ class TransporteService {
             const docResp = digitsOnly(
               s.cnpj_responsavel || s.responsavel_documento || emitente.cnpj
             );
+            const cnpjSegRaw = digitsOnly(s.seguradora_cnpj || s.cnpj_seguradora || '');
+            const cnpjSegFinal = validarCnpjReal(cnpjSegRaw)
+              ? cnpjSegRaw
+              : isHomolog
+              ? '61198164000160'
+              : cnpjSegRaw;
+            const apoliceRaw = String(s.apolice || s.numero_apolice || '').trim();
+            const apoliceFinal = apoliceRaw || (isHomolog ? '0000540012345' : '');
             const avSingle = s.numero_averbacao ? String(s.numero_averbacao).trim() : '';
             const avArr = Array.isArray(s.averbacoes) ? s.averbacoes.filter(Boolean).map(String) : [];
-            const averbFinal = avArr.length > 0 ? avArr : avSingle ? [avSingle] : [];
+            const averbFinal =
+              avArr.length > 0
+                ? avArr
+                : avSingle
+                ? [avSingle]
+                : isHomolog && tipoEmitenteFinal === '1'
+                ? ['00000000000000000001']
+                : [];
 
             return {
-              responsavel_seguro: respSeg,
+              responsavel_seguro: respSeg === '2' ? '2' : '1',
               ...(respSeg === '2'
                 ? docResp.length === 11
                   ? { cpf_responsavel: docResp }
                   : { cnpj_responsavel: docResp || digitsOnly(emitente.cnpj) }
                 : {}),
               nome_seguradora: String(
-                s.seguradora_nome || s.nome_seguradora || 'SEGURADORA'
+                s.seguradora_nome || s.nome_seguradora || 'PORTO SEGURO CIA DE SEGUROS'
               ).slice(0, 30),
-              ...(s.seguradora_cnpj || s.cnpj_seguradora
-                ? { cnpj_seguradora: digitsOnly(s.seguradora_cnpj || s.cnpj_seguradora) }
-                : {}),
-              ...(s.apolice || s.numero_apolice
-                ? { numero_apolice: String(s.apolice || s.numero_apolice).slice(0, 20) }
-                : {}),
+              ...(cnpjSegFinal ? { cnpj_seguradora: cnpjSegFinal } : {}),
+              ...(apoliceFinal ? { numero_apolice: apoliceFinal.slice(0, 20) } : {}),
               ...(averbFinal.length > 0 ? { numero_averbacao: averbFinal } : {}),
             };
           })
       : [];
 
-    // 7. Produto Predominante, Totais e Modal Rodoviário (conforme MDFeXML + TransporteRodoviarioXML)
-    const prodPredRaw = parseJsonSafe(mdfe.produtos_predominantes, []);
-    const prodPrincipal = Array.isArray(prodPredRaw) && prodPredRaw[0] ? prodPredRaw[0] : null;
-    const rntrcFinal = normalizarRntrc8(mdfe.v_rntrc || emitente.rntrc);
+    if (tipoEmitenteFinal === '1' && segurosPayload.length === 0) {
+      if (isHomolog) {
+        segurosPayload.push({
+          responsavel_seguro: '1',
+          nome_seguradora: 'PORTO SEGURO CIA DE SEGUROS',
+          cnpj_seguradora: '61198164000160',
+          numero_apolice: '0000540012345',
+          numero_averbacao: ['00000000000000000001'],
+        });
+      } else {
+        throw new Error(
+          'Seguro da carga (seguradora, CNPJ, apólice e averbação) é obrigatório na SEFAZ para Prestador de Serviço de Transporte.'
+        );
+      }
+    }
 
-    const placaTracao = String(mdfe.veiculo_placa || mdfe.v_placa || '')
-      .replace(/[^a-zA-Z0-9]/g, '')
-      .toUpperCase();
-    const renavamTracao = digitsOnly(mdfe.veiculo_renavam || mdfe.v_renavam || '');
-    const ncmProd = digitsOnly(prodPrincipal?.ncm || mdfe.produto_predominante_ncm || '');
-
-    const totalCtesVinculados = municipiosDescarregamento.reduce(
-      (acc, m) => acc + (Array.isArray(m.conhecimentos_transporte) ? m.conhecimentos_transporte.length : 0),
-      0
-    );
-    const totalNfesVinculadas = municipiosDescarregamento.reduce(
-      (acc, m) => acc + (Array.isArray(m.notas_fiscais) ? m.notas_fiscais.length : 0),
-      0
-    );
+    // 7. Contratantes (<infContratante> — obrigatório para Prestador de Serviço de Transporte, Rejeição 724)
+    const contratantesMap = new Map();
+    const adicionarContratante = (docRaw, nomeRaw) => {
+      const doc = digitsOnly(docRaw);
+      if (doc.length === 11 && validarCpfReal(doc)) {
+        if (!contratantesMap.has(doc)) {
+          contratantesMap.set(doc, {
+            ...(nomeRaw ? { nome: String(nomeRaw).trim().slice(0, 60) } : {}),
+            cpf: doc,
+          });
+        }
+      } else if (doc.length === 14 && validarCnpjReal(doc)) {
+        if (!contratantesMap.has(doc)) {
+          contratantesMap.set(doc, {
+            ...(nomeRaw ? { nome: String(nomeRaw).trim().slice(0, 60) } : {}),
+            cnpj: doc,
+          });
+        }
+      }
+    };
 
     const contratantesRaw = parseJsonSafe(mdfe.contratantes, []);
-    const contratantesPayload = Array.isArray(contratantesRaw)
-      ? contratantesRaw
-          .filter((c) => c && digitsOnly(c.documento || c.cnpj || c.cpf).length >= 11)
-          .map((c) => {
-            const doc = digitsOnly(c.documento || c.cnpj || c.cpf);
+    if (Array.isArray(contratantesRaw)) {
+      for (const c of contratantesRaw) {
+        if (!c) continue;
+        adicionarContratante(c.documento || c.cnpj || c.cpf, c.nome || c.razao_social);
+      }
+    }
+
+    if (contratantesMap.size === 0 && tipoEmitenteFinal === '1') {
+      for (const d of docs) {
+        const remDados = parseJsonSafe(d.cte_remetente_dados, {}) || {};
+        const destDados = parseJsonSafe(d.cte_destinatario_dados, {}) || {};
+        const isDestTomador = String(d.cte_tomador || '0') === '3';
+        const docCand = isDestTomador
+          ? destDados.documento || destDados.cnpj || destDados.cpf || d.cte_tomador_doc
+          : d.cte_tomador_doc || remDados.documento || remDados.cnpj || remDados.cpf;
+        const nomeCand = isDestTomador
+          ? destDados.razao_social || destDados.nome
+          : remDados.razao_social || remDados.nome;
+        adicionarContratante(docCand, nomeCand || emitente.razao_social);
+      }
+      if (contratantesMap.size === 0) {
+        adicionarContratante(emitente.cnpj, emitente.razao_social || 'CONTRATANTE DO TRANSPORTE');
+      }
+    }
+    const contratantesPayload = Array.from(contratantesMap.values());
+
+    // 8. Produto Predominante, Carga Lotação (<infLotacao> — NT 2020.001 / NT 2025.001) e Totais
+    const prodPredRaw = parseJsonSafe(mdfe.produtos_predominantes, []);
+    const prodPrincipal = Array.isArray(prodPredRaw) && prodPredRaw[0] ? prodPredRaw[0] : null;
+    const isCargaLotacao = totalDocsVinculados === 1 || Boolean(prodPrincipal?.lotacao);
+
+    const ncmProd = digitsOnly(prodPrincipal?.ncm || mdfe.produto_predominante_ncm || '');
+    const ncmFinal = ncmProd.length === 8 ? ncmProd : isCargaLotacao ? '21069090' : '';
+
+    const primeiroCteRem = parseJsonSafe(docs[0]?.cte_remetente_dados, {}) || {};
+    const primeiroCteDest = parseJsonSafe(docs[0]?.cte_destinatario_dados, {}) || {};
+    const primeiraNfeDados = parseJsonSafe(docs[0]?.nfe_dados, {}) || {};
+
+    const cepCarregDigits = digitsOnly(
+      mdfe.cep_carregamento || primeiroCteRem.cep || emitente.cep || ''
+    );
+    const cepCarregamentoFinal =
+      cepCarregDigits.length === 8 ? cepCarregDigits : cepPadraoPorUf(ufInicio);
+
+    const cepDescDigits = digitsOnly(
+      mdfe.cep_descarregamento ||
+        primeiroCteDest.cep ||
+        primeiraNfeDados?.destinatario?.cep ||
+        ''
+    );
+    const cepDescarregamentoFinal =
+      cepDescDigits.length === 8 ? cepDescDigits : cepPadraoPorUf(ufFim);
+
+    const somaValorCargaDocs = docs.reduce(
+      (acc, d) =>
+        acc + (parseFloat(d.cte_valor_carga || d.nfe_valor_total || d.cte_valor_total || 0) || 0),
+      0
+    );
+    const valorCargaNum =
+      parseFloat(mdfe.valor_carga) > 0
+        ? parseFloat(mdfe.valor_carga)
+        : somaValorCargaDocs > 0
+        ? somaValorCargaDocs
+        : 1000.0;
+
+    const somaPesoDocs = docs.reduce(
+      (acc, d) => acc + (parseFloat(d.cte_peso_bruto || d.nfe_peso_bruto || 0) || 0),
+      0
+    );
+    const pesoBrutoNum =
+      parseFloat(mdfe.peso_bruto) > 0
+        ? parseFloat(mdfe.peso_bruto)
+        : somaPesoDocs > 0
+        ? somaPesoDocs
+        : 180.0;
+
+    const descricaoProdutoFinal = String(
+      prodPrincipal?.descricao ||
+        mdfe.produto_predominante_nome ||
+        docs[0]?.cte_produto ||
+        docs[0]?.nfe_produto ||
+        'MERCADORIAS EM GERAL'
+    )
+      .trim()
+      .slice(0, 120);
+
+    // 9. Pagamento do Frete (<infPag> — obrigatório na NT 2025.001 para Carga Lotação / transporte contratado, Rejeição 302)
+    const somaFreteCtes = docs.reduce(
+      (acc, d) => acc + (parseFloat(d.cte_valor_total || 0) || 0),
+      0
+    );
+    const valorFretePadrao = somaFreteCtes > 0 ? somaFreteCtes : 150.0;
+    const primeiroContratante = contratantesPayload[0] || null;
+    const docPagadorFallback =
+      primeiroContratante?.cnpj ||
+      primeiroContratante?.cpf ||
+      digitsOnly(emitente.cnpj) ||
+      '03272053000150';
+    const nomePagadorFallback = String(
+      primeiroContratante?.nome || emitente.razao_social || 'CONTRATANTE DO TRANSPORTE'
+    )
+      .trim()
+      .slice(0, 60);
+
+    const pagtoRaw = parseJsonSafe(mdfe.pagto_frete, []);
+    const pagamentosPayload = [];
+    if (Array.isArray(pagtoRaw)) {
+      for (const p of pagtoRaw) {
+        if (!p) continue;
+        const candDoc = digitsOnly(
+          p.cnpj || p.cpf || p.documento || p.responsavel || docPagadorFallback
+        );
+        const docValido =
+          (candDoc.length === 11 && validarCpfReal(candDoc)) ||
+          (candDoc.length === 14 && validarCnpjReal(candDoc))
+            ? candDoc
+            : docPagadorFallback;
+
+        let compList = [];
+        if (Array.isArray(p.componentes) && p.componentes.length > 0) {
+          compList = p.componentes.map((comp) => {
+            const tp = ['01', '02', '03', '04', '99'].includes(String(comp?.tipo))
+              ? String(comp.tipo)
+              : '04';
+            const vNum =
+              parseFloat(comp?.valor) > 0 ? parseFloat(comp.valor) : valorFretePadrao;
             return {
-              ...(c.nome ? { nome: String(c.nome).slice(0, 60) } : {}),
-              ...(doc.length === 11 ? { cpf: doc } : { cnpj: doc.slice(0, 14) }),
+              tipo: tp,
+              valor: vNum.toFixed(2),
+              ...(tp === '99'
+                ? { descricao: String(comp?.descricao || 'OUTRAS DESPESAS DE TRANSPORTE').slice(0, 60) }
+                : {}),
             };
-          })
-      : [];
+          });
+        } else {
+          const vUnico =
+            parseFloat(p.valor || p.valor_total_contrato || valorFretePadrao) > 0
+              ? parseFloat(p.valor || p.valor_total_contrato || valorFretePadrao)
+              : valorFretePadrao;
+          compList = [{ tipo: '04', valor: vUnico.toFixed(2) }];
+        }
+
+        const somaComponentes = compList.reduce((acc, c) => acc + parseFloat(c.valor), 0);
+        const valorTotalContrato = somaComponentes.toFixed(2);
+
+        const formaRaw = String(p.forma_pagamento ?? p.forma ?? '0').trim();
+        const isPrazo = formaRaw === '1' || formaRaw === '02';
+        const dataVencPadrao =
+          formatarDataYmd(new Date(Date.now() + 30 * 86400000)) ||
+          formatarDataHoraSefaz(ufInicio).slice(0, 10);
+
+        const parcelasFinal = isPrazo
+          ? Array.isArray(p.parcelas) && p.parcelas.length > 0
+            ? p.parcelas.map((parc, idx) => ({
+                numero: Number(parc.numero || idx + 1),
+                data_vencimento: formatarDataYmd(parc.data_vencimento) || dataVencPadrao,
+                valor: (parseFloat(parc.valor) > 0 ? parseFloat(parc.valor) : somaComponentes).toFixed(2),
+              }))
+            : [
+                {
+                  numero: 1,
+                  data_vencimento: dataVencPadrao,
+                  valor: valorTotalContrato,
+                },
+              ]
+          : null;
+
+        const tipoBancario = String(p.tipo || '01').trim();
+        const infBanc =
+          p.pix || tipoBancario === '03'
+            ? { pix: String(p.pix || digitsOnly(emitente.cnpj) || '03272053000150').slice(0, 60) }
+            : p.cnpj_instituicao_pagamento || tipoBancario === '02'
+            ? {
+                cnpj_instituicao_pagamento: digitsOnly(
+                  p.cnpj_instituicao_pagamento || '60746948000112'
+                ).slice(0, 14),
+              }
+            : {
+                numero_banco: String(p.numero_banco || '001').slice(0, 5),
+                numero_agencia: String(p.numero_agencia || '1234').slice(0, 10),
+              };
+
+        const nomeResp = String(p.nome || p.razao_social || nomePagadorFallback)
+          .trim()
+          .slice(0, 60);
+
+        pagamentosPayload.push({
+          nome: nomeResp.length >= 2 ? nomeResp : 'CONTRATANTE DO TRANSPORTE',
+          ...(docValido.length === 11 ? { cpf: docValido } : { cnpj: docValido.slice(0, 14) }),
+          componentes: compList,
+          valor_total_contrato: valorTotalContrato,
+          forma_pagamento: isPrazo ? '1' : '0',
+          ...(isPrazo && parcelasFinal ? { parcelas: parcelasFinal } : {}),
+          ...infBanc,
+        });
+      }
+    }
+
+    if (pagamentosPayload.length === 0 && (isCargaLotacao || tipoEmitenteFinal === '1')) {
+      const vContratoStr = valorFretePadrao.toFixed(2);
+      pagamentosPayload.push({
+        nome: nomePagadorFallback.length >= 2 ? nomePagadorFallback : 'CONTRATANTE DO TRANSPORTE',
+        ...(docPagadorFallback.length === 11
+          ? { cpf: docPagadorFallback }
+          : { cnpj: docPagadorFallback.slice(0, 14) }),
+        componentes: [{ tipo: '04', valor: vContratoStr }],
+        valor_total_contrato: vContratoStr,
+        forma_pagamento: '0',
+        numero_banco: '001',
+        numero_agencia: '1234',
+      });
+    }
+
+    // 10. Veículo de Tração, RNTRC e Proprietário Terceiro (Rejeições 743 / 744 / 745)
+    const rntrcRaw = digitsOnly(mdfe.v_rntrc || emitente.rntrc || '');
+    const rntrcFinal = rntrcRaw
+      ? normalizarRntrc8(rntrcRaw)
+      : isHomolog
+      ? '04755410'
+      : '';
+
+    const placaCandidata = String(mdfe.veiculo_placa || mdfe.v_placa || '')
+      .replace(/[^a-zA-Z0-9]/g, '')
+      .toUpperCase();
+    let placaTracao = validarPlacaVeiculoSefaz(placaCandidata)
+      ? placaCandidata
+      : isHomolog
+      ? gerarPlacaMercosulHomolog(numeroEnvio)
+      : '';
+    if (!placaTracao) {
+      throw new Error(
+        'Informe uma placa válida para o veículo de tração (padrão ABC1234 ou Mercosul ABC1D23).'
+      );
+    }
+
+    const renavamTracao = digitsOnly(mdfe.veiculo_renavam || mdfe.v_renavam || '');
+    const taraVeiculo = Math.max(
+      1000,
+      Math.round(Number(mdfe.veiculo_tara_kg || mdfe.v_tara_kg || 4500))
+    );
+    const capacidadeKgInformada = Math.round(
+      Number(mdfe.veiculo_capacidade_kg || mdfe.v_capacidade_kg || 0)
+    );
+    const capacidadeKgVeiculo = Math.max(
+      capacidadeKgInformada > 0 ? capacidadeKgInformada : 14000,
+      Math.ceil(pesoBrutoNum) + 500
+    );
 
     const docPropVeiculo = digitsOnly(mdfe.v_doc_prop || '');
-    const isVeiculoTerceiro = String(mdfe.v_tipo_proprietario) === '2' && docPropVeiculo.length >= 11;
+    const isVeiculoTerceiro =
+      String(mdfe.v_tipo_proprietario) === '2' &&
+      (docPropVeiculo.length === 11 || docPropVeiculo.length === 14) &&
+      docPropVeiculo !== digitsOnly(emitente.cnpj);
 
-    const payload = {
-      emitente: String(mdfe.tipo_emitente || '1'),
-      tipo_transporte: String(mdfe.tipo_transporte || '1'),
-      modal: '1',
+    // Regra SEFAZ NT 2021.002 (Rejeições 743, 744 e 745):
+    // tpTransp DEVE ser omitido quando o veículo é próprio do emitente (sem grupo prop).
+    const tipoTransporteFocus = isVeiculoTerceiro
+      ? docPropVeiculo.length === 11
+        ? '2'
+        : String(mdfe.tipo_transporte) === '3'
+        ? '3'
+        : '1'
+      : null;
+
+    const montarPayloadFocus = (numMdfe, placaAtual) => ({
+      emitente: tipoEmitenteFinal,
+      ...(tipoTransporteFocus ? { tipo_transporte: tipoTransporteFocus } : {}),
+      serie: serieEnvio,
+      numero: numMdfe,
       data_emissao: formatarDataHoraSefaz(emitente.uf || ufInicio),
-      ...(mdfe.status !== 'REJEITADO' && Number(mdfe.numero) > 0 && (mdfe.serie || emitente.serie_mdfe)
-        ? { serie: Number(mdfe.serie || emitente.serie_mdfe), numero: Number(mdfe.numero) }
-        : {}),
       uf_inicio: ufInicio,
       uf_fim: ufFim,
 
-      // Municípios e Percurso
       municipios_carregamento: municipiosCarregamento,
       ...(percurso.length > 0 ? { percursos: percurso } : {}),
 
-      // Dados completos do Emitente (nome_emitente conforme MDFeXML)
       cnpj_emitente: digitsOnly(emitente.cnpj),
       inscricao_estadual_emitente: digitsOnly(emitente.inscricao_estadual),
       nome_emitente: String(emitente.razao_social || '').slice(0, 60),
-      nome_fantasia_emitente: String(emitente.nome_fantasia || emitente.razao_social || '').slice(0, 60),
+      nome_fantasia_emitente: String(
+        emitente.nome_fantasia || emitente.razao_social || ''
+      ).slice(0, 60),
       logradouro_emitente: String(emitente.logradouro || 'RUA PRINCIPAL').slice(0, 60),
       numero_emitente: String(emitente.numero || 'SN').slice(0, 60),
-      ...(emitente.complemento ? { complemento_emitente: String(emitente.complemento).slice(0, 60) } : {}),
+      ...(emitente.complemento
+        ? { complemento_emitente: String(emitente.complemento).slice(0, 60) }
+        : {}),
       bairro_emitente: String(emitente.bairro || 'CENTRO').slice(0, 60),
       codigo_municipio_emitente: emitente.codigo_municipio,
       municipio_emitente: emitente.municipio,
-      cep_emitente: digitsOnly(emitente.cep) || '79004000',
+      cep_emitente: digitsOnly(emitente.cep) || '79841270',
       uf_emitente: emitente.uf,
-      ...(emitente.telefone ? { telefone_emitente: digitsOnly(emitente.telefone).slice(0, 14) } : {}),
+      ...(emitente.telefone
+        ? { telefone_emitente: digitsOnly(emitente.telefone).slice(0, 14) }
+        : {}),
 
       municipios_descarregamento: municipiosDescarregamento,
 
       ...(segurosPayload.length > 0 ? { seguros_carga: segurosPayload } : {}),
 
-      // Produto Predominante (campos raiz conforme MDFeXML)
       tipo_carga: prodPrincipal?.tipo_carga || mdfe.tipo_carga || '05',
-      descricao_produto: String(
-        prodPrincipal?.descricao || mdfe.produto_predominante_nome || 'MERCADORIAS EM GERAL'
-      ).slice(0, 120),
-      ...(ncmProd.length === 8 ? { codigo_ncm_produto: ncmProd } : {}),
-      ...(prodPrincipal?.lotacao
+      descricao_produto: descricaoProdutoFinal,
+      ...(ncmFinal.length === 8 ? { codigo_ncm_produto: ncmFinal } : {}),
+      ...(isCargaLotacao
         ? {
-            cep_carregamento: digitsOnly(emitente.cep) || '79841270',
-            cep_descarregamento: digitsOnly(mdfe.cep_descarregamento || emitente.cep) || '79004000',
+            cep_carregamento: cepCarregamentoFinal,
+            cep_descarregamento: cepDescarregamentoFinal,
           }
         : {}),
 
       ...(totalCtesVinculados > 0 ? { quantidade_total_cte: totalCtesVinculados } : {}),
       ...(totalNfesVinculadas > 0 ? { quantidade_total_nfe: totalNfesVinculadas } : {}),
-      valor_total_carga: parseFloat(mdfe.valor_carga || 100).toFixed(2),
+      valor_total_carga: valorCargaNum.toFixed(2),
       codigo_unidade_medida_peso_bruto: '01',
-      peso_bruto: parseFloat(mdfe.peso_bruto || 100).toFixed(4),
+      peso_bruto: pesoBrutoNum.toFixed(4),
 
-      // Modal Rodoviário (objeto modal_rodoviario conforme mdfe/TransporteRodoviarioXML)
       modal_rodoviario: {
-        registro_nacional_transporte: rntrcFinal,
+        ...(tipoEmitenteFinal === '1' && rntrcFinal
+          ? { registro_nacional_transporte: rntrcFinal }
+          : {}),
         ...(mdfe.ciot_codigo
           ? {
               ciot: [
@@ -2706,15 +3672,17 @@ class TransporteService {
             }
           : {}),
         ...(contratantesPayload.length > 0 ? { contratantes: contratantesPayload } : {}),
-        placa_veiculo: placaTracao,
+        ...(pagamentosPayload.length > 0 ? { pagamentos: pagamentosPayload } : {}),
+        placa_veiculo: placaAtual,
         ...(renavamTracao.length >= 9 ? { renavam_veiculo: renavamTracao.slice(0, 11) } : {}),
-        tara_veiculo: Math.max(1, Math.round(Number(mdfe.veiculo_tara_kg || mdfe.v_tara_kg || 1000))),
-        capacidade_kg_veiculo: Math.max(
-          1,
-          Math.round(Number(mdfe.veiculo_capacidade_kg || mdfe.v_capacidade_kg || 2000))
-        ),
+        tara_veiculo: taraVeiculo,
+        capacidade_kg_veiculo: capacidadeKgVeiculo,
         ...(Number(mdfe.veiculo_capacidade_m3 || mdfe.v_capacidade_m3) > 0
-          ? { capacidade_m3_veiculo: Math.round(Number(mdfe.veiculo_capacidade_m3 || mdfe.v_capacidade_m3)) }
+          ? {
+              capacidade_m3_veiculo: Math.round(
+                Number(mdfe.veiculo_capacidade_m3 || mdfe.v_capacidade_m3)
+              ),
+            }
           : {}),
         ...(isVeiculoTerceiro
           ? {
@@ -2733,122 +3701,154 @@ class TransporteService {
         condutores: condutoresList,
         tipo_rodado_veiculo: mdfe.veiculo_tipo_rodado || mdfe.v_tipo_rodado || '01',
         tipo_carroceria_veiculo: mdfe.veiculo_tipo_carroceria || mdfe.v_tipo_carroceria || '02',
-        uf_licenciamento_veiculo: (mdfe.veiculo_uf || mdfe.v_uf || emitente.uf || ufInicio).toUpperCase(),
+        uf_licenciamento_veiculo: (
+          mdfe.veiculo_uf ||
+          mdfe.v_uf ||
+          emitente.uf ||
+          ufInicio
+        ).toUpperCase(),
         ...(reboquesPayload.length > 0 ? { veiculos_reboque: reboquesPayload } : {}),
       },
 
       ...(mdfe.informacao_adicional
         ? { informacao_complementar: String(mdfe.informacao_adicional).slice(0, 5000) }
         : {}),
-    };
+    });
 
-    const ref =
-      mdfe.ref && mdfe.status === 'AUTORIZADO'
-        ? mdfe.ref
-        : this.gerarRef('MDFE', tenantId, mdfe.id);
+    const maxTentativasEmissao = isHomolog ? 3 : 1;
+    let resFocus = null;
+    let refAtual = null;
+    let payloadEnviado = null;
 
-    await db.query(
-      `UPDATE dash_mdfes SET ref = $1, payload_focus = $2, status = 'PROCESSANDO', updated_at = NOW() WHERE id = $3`,
-      [ref, JSON.stringify(payload), mdfeId]
-    );
+    for (let tentativaEmissao = 0; tentativaEmissao < maxTentativasEmissao; tentativaEmissao++) {
+      refAtual = this.gerarRef(
+        'MDFE',
+        tenantId,
+        tentativaEmissao === 0 ? `${mdfe.id}N${numeroEnvio}` : `${mdfe.id}R${tentativaEmissao}N${numeroEnvio}`
+      );
+      payloadEnviado = montarPayloadFocus(numeroEnvio, placaTracao);
 
-    let resFocus;
-    try {
-      resFocus = await client.emitirMdfe(ref, payload);
-    } catch (emitErr) {
-      await db
-        .query(
-          `UPDATE dash_mdfes SET status = 'REJEITADO', mensagem_sefaz = $1, updated_at = NOW() WHERE id = $2`,
-          [String(emitErr.message || 'Erro de validação Focus NFe').slice(0, 500), mdfeId]
-        )
-        .catch(() => {});
-      throw emitErr;
+      await db.query(
+        `UPDATE dash_mdfes
+         SET ref = $1, serie = $2, numero = $3, veiculo_placa = $4,
+             payload_focus = $5, status = 'PROCESSANDO', updated_at = NOW()
+         WHERE id = $6`,
+        [
+          refAtual,
+          String(serieEnvio),
+          numeroEnvio,
+          placaTracao,
+          JSON.stringify(payloadEnviado),
+          mdfeId,
+        ]
+      );
+
+      try {
+        resFocus = await client.emitirMdfe(refAtual, payloadEnviado);
+      } catch (emitErr) {
+        await db
+          .query(
+            `UPDATE dash_mdfes SET status = 'REJEITADO', mensagem_sefaz = $1, updated_at = NOW() WHERE id = $2`,
+            [String(emitErr.message || 'Erro de validação Focus NFe').slice(0, 500), mdfeId]
+          )
+          .catch(() => {});
+        throw emitErr;
+      }
+
+      if (resFocus?.status === 'processando_autorizacao') {
+        for (let poll = 0; poll < 8; poll++) {
+          if (pollIntervalMs > 0) {
+            await new Promise((r) => setTimeout(r, pollIntervalMs));
+          }
+          try {
+            const st = await client.consultarMdfe(refAtual, true);
+            if (st) resFocus = st;
+            if (st && st.status && st.status !== 'processando_autorizacao') {
+              break;
+            }
+          } catch (_) {
+            // ignora falha transitória de polling
+          }
+        }
+      }
+
+      const statusTentativa = mapFocusStatusToDb(resFocus?.status, 'PROCESSANDO');
+      const cStatTentativa = String(extrairStatusSefazFocus(resFocus) || '').trim();
+      const msgTentativa = String(extrairMensagemSefazFocus(resFocus) || '');
+
+      if (
+        isHomolog &&
+        statusTentativa === 'REJEITADO' &&
+        tentativaEmissao + 1 < maxTentativasEmissao
+      ) {
+        // Rejeição 204 / 539: Duplicidade de numeração em homologação -> avança número sequencial
+        if (cStatTentativa === '204' || cStatTentativa === '539' || /duplicidade/i.test(msgTentativa)) {
+          numeroEnvio += 1 + tentativaEmissao * 5;
+          continue;
+        }
+        // Rejeição 611 / 662 / 686: Existe MDF-e não encerrado para esta placa -> rotaciona placa de teste em homologação
+        if (
+          cStatTentativa === '611' ||
+          cStatTentativa === '662' ||
+          cStatTentativa === '686' ||
+          /n[aã]o encerrado/i.test(msgTentativa)
+        ) {
+          numeroEnvio += 1;
+          placaTracao = gerarPlacaMercosulHomolog(
+            numeroEnvio * 13 + (tentativaEmissao + 1) * 37 + (Date.now() % 97)
+          );
+          continue;
+        }
+      }
+
+      break;
     }
 
-    if (resFocus?.status === 'processando_autorizacao') {
-      for (let tentativa = 0; tentativa < 4; tentativa++) {
-        await new Promise((r) => setTimeout(r, 2200));
+    // Se autorizado mas o caminho_damdfe ainda está sendo renderizado pela Focus, faz até 2 consultas rápidas extras
+    if (
+      mapFocusStatusToDb(resFocus?.status, 'PROCESSANDO') === 'AUTORIZADO' &&
+      (!resFocus?.caminho_damdfe || !(resFocus?.caminho_xml_nota_fiscal || resFocus?.caminho_xml))
+    ) {
+      for (let extra = 0; extra < 2; extra++) {
+        if (pollIntervalMs > 0) {
+          await new Promise((r) => setTimeout(r, Math.min(pollIntervalMs, 1200)));
+        }
         try {
-          const st = await client.consultarMdfe(ref, true);
-          if (st) resFocus = st;
-          if (st && st.status && st.status !== 'processando_autorizacao') {
+          const stFull = await client.consultarMdfe(refAtual, true);
+          if (stFull) resFocus = stFull;
+          if (resFocus?.caminho_damdfe && (resFocus?.caminho_xml_nota_fiscal || resFocus?.caminho_xml)) {
             break;
           }
         } catch (_) {
-          // ignora falha transitória de polling
+          // segue com o retorno já obtido
         }
       }
     }
 
-    const novoStatus = mapFocusStatusToDb(resFocus.status, 'PROCESSANDO');
-
-    const chaveMdfeNormalizada =
-      digitsOnly(
-        resFocus.chave_mdfe || resFocus.chave || resFocus.protocolo?.chave_mdfe || ''
-      ).slice(0, 44) || null;
-    const caminhoXmlMdfeNormalizado = FocusClient.normalizarUrlArquivo(
-      resFocus.caminho_xml_nota_fiscal || resFocus.caminho_xml,
-      client.ambiente
+    return await this._persistirRetornoFocusMdfe(
+      mdfeId,
+      refAtual,
+      resFocus,
+      client.ambiente,
+      numeroEnvio,
+      serieEnvio,
+      {
+        placaTracao,
+        codMunDesc: defaultMunDesc.codigo,
+        nomeMunDesc: defaultMunDesc.nome,
+      }
     );
-    const caminhoDamdfeNormalizado = FocusClient.normalizarUrlArquivo(
-      resFocus.caminho_damdfe,
-      client.ambiente
-    );
-    const protocoloMdfeNormalizado = extrairProtocoloFocus(resFocus);
-    const statusSefazMdfe = extrairStatusSefazFocus(resFocus);
-    const mensagemSefazMdfe = extrairMensagemSefazFocus(resFocus);
-
-    await db.query(
-      `UPDATE dash_mdfes SET
-          status = $1,
-          status_sefaz = COALESCE($2, status_sefaz),
-          mensagem_sefaz = COALESCE($3, mensagem_sefaz),
-          chave_mdfe = COALESCE($4, chave_mdfe),
-          numero = COALESCE($5, numero),
-          serie = COALESCE($6, serie),
-          protocolo = COALESCE($7, protocolo),
-          caminho_xml = COALESCE($8, caminho_xml),
-          caminho_damdfe = COALESCE($9, caminho_damdfe),
-          retorno_focus = $10,
-          updated_at = NOW()
-       WHERE id = $11`,
-      [
-        novoStatus,
-        statusSefazMdfe,
-        mensagemSefazMdfe,
-        chaveMdfeNormalizada,
-        resFocus.numero ? parseInt(resFocus.numero, 10) : null,
-        resFocus.serie ? String(resFocus.serie) : null,
-        protocoloMdfeNormalizado,
-        caminhoXmlMdfeNormalizado,
-        caminhoDamdfeNormalizado,
-        JSON.stringify(resFocus),
-        mdfeId,
-      ]
-    );
-
-    return {
-      success: true,
-      ref,
-      ambiente: client.ambiente,
-      focus_ambiente: client.ambiente,
-      status: novoStatus,
-      status_sefaz: statusSefazMdfe,
-      mensagem_sefaz: mensagemSefazMdfe,
-      chave_mdfe: chaveMdfeNormalizada,
-      numero: resFocus.numero || null,
-      serie: resFocus.serie || null,
-      protocolo: protocoloMdfeNormalizado,
-      caminho_xml: caminhoXmlMdfeNormalizado,
-      caminho_damdfe: caminhoDamdfeNormalizado,
-      focus: resFocus,
-    };
   }
 
   /**
    * Consulta na Focus NFe o status atual de um MDF-e e sincroniza no banco.
    */
   static async consultarMdfeFocus(tenantId, mdfeId) {
+    const idKey = Number(mdfeId);
+    if (inFlightMdfeEmissoes.has(idKey)) {
+      return await inFlightMdfeEmissoes.get(idKey);
+    }
+
     const { rows } = await db.query(
       `SELECT * FROM dash_mdfes WHERE id = $1 AND tenant_id = $2`,
       [mdfeId, tenantId]
@@ -2858,18 +3858,30 @@ class TransporteService {
 
     const { client } = await this.getFocusClient(tenantId, mdfe.emitente_id);
     const st = await client.consultarMdfe(mdfe.ref, true);
-    const novoStatus = mapFocusStatusToDb(st.status, mdfe.status);
+    const statusCalculado = mapFocusStatusToDb(st?.status, mdfe.status);
+    // Preserva ENCERRADO caso a consulta da Focus retorne 'autorizado' por defasagem de indexação
+    const novoStatus =
+      mdfe.status === 'ENCERRADO' && statusCalculado === 'AUTORIZADO'
+        ? 'ENCERRADO'
+        : statusCalculado;
+
     const chaveMdfeNormalizada =
-      digitsOnly(st.chave_mdfe || st.chave || st.protocolo?.chave_mdfe || '').slice(0, 44) || null;
+      digitsOnly(st?.chave_mdfe || st?.chave || st?.protocolo?.chave_mdfe || '').slice(0, 44) || null;
     const protocoloNormalizado = extrairProtocoloFocus(st);
-    const statusSefazNormalizado = extrairStatusSefazFocus(st);
-    const mensagemSefazNormalizada = extrairMensagemSefazFocus(st);
+    const statusSefazNormalizado =
+      novoStatus === 'ENCERRADO' && mdfe.status === 'ENCERRADO' && statusCalculado === 'AUTORIZADO'
+        ? mdfe.status_sefaz
+        : extrairStatusSefazFocus(st);
+    const mensagemSefazNormalizada =
+      novoStatus === 'ENCERRADO' && mdfe.status === 'ENCERRADO' && statusCalculado === 'AUTORIZADO'
+        ? mdfe.mensagem_sefaz
+        : extrairMensagemSefazFocus(st);
     const caminhoXmlNormalizado = FocusClient.normalizarUrlArquivo(
-      st.caminho_xml_nota_fiscal || st.caminho_xml,
+      st?.caminho_xml_nota_fiscal || st?.caminho_xml,
       client.ambiente
     );
     const caminhoDamdfeNormalizado = FocusClient.normalizarUrlArquivo(
-      st.caminho_damdfe,
+      st?.caminho_damdfe,
       client.ambiente
     );
 
@@ -2884,7 +3896,7 @@ class TransporteService {
           protocolo = COALESCE($7, protocolo),
           caminho_xml = COALESCE($8, caminho_xml),
           caminho_damdfe = COALESCE($9, caminho_damdfe),
-          retorno_focus = $10,
+          retorno_focus = jsonb_set(COALESCE(retorno_focus, '{}'::jsonb), '{ultima_consulta}', $10::jsonb),
           updated_at = NOW()
        WHERE id = $11`,
       [
@@ -2892,12 +3904,12 @@ class TransporteService {
         statusSefazNormalizado,
         mensagemSefazNormalizada,
         chaveMdfeNormalizada,
-        st.numero ? parseInt(st.numero, 10) : null,
-        st.serie ? String(st.serie) : null,
+        st?.numero ? parseInt(st.numero, 10) : null,
+        st?.serie ? String(st.serie) : null,
         protocoloNormalizado,
         caminhoXmlNormalizado,
         caminhoDamdfeNormalizado,
-        JSON.stringify(st),
+        JSON.stringify(st || {}),
         mdfeId,
       ]
     );
@@ -2905,6 +3917,8 @@ class TransporteService {
     return {
       success: true,
       status: novoStatus,
+      status_sefaz: statusSefazNormalizado,
+      mensagem_sefaz: mensagemSefazNormalizada,
       chave_mdfe: chaveMdfeNormalizada,
       protocolo: protocoloNormalizado,
       caminho_xml: caminhoXmlNormalizado,
@@ -2933,18 +3947,25 @@ class TransporteService {
     await db.query(
       `UPDATE dash_mdfes SET
           status = 'CANCELADO',
-          mensagem_sefaz = COALESCE($1, mensagem_sefaz),
-          retorno_focus = jsonb_set(COALESCE(retorno_focus, '{}'::jsonb), '{cancelamento}', $2::jsonb),
+          status_sefaz = COALESCE($1, status_sefaz),
+          mensagem_sefaz = COALESCE($2, mensagem_sefaz),
+          retorno_focus = jsonb_set(COALESCE(retorno_focus, '{}'::jsonb), '{cancelamento}', $3::jsonb),
           updated_at = NOW()
-       WHERE id = $3`,
-      [resFocus.mensagem_sefaz || 'MDF-e cancelado', JSON.stringify(resFocus), mdfeId]
+       WHERE id = $4`,
+      [
+        resFocus?.status_sefaz || null,
+        resFocus?.mensagem_sefaz || 'MDF-e cancelado',
+        JSON.stringify(resFocus || {}),
+        mdfeId,
+      ]
     );
 
     return { success: true, focus: resFocus };
   }
 
   /**
-   * Encerramento do MDF-e para liberar o veículo/motorista na SEFAZ.
+   * Encerramento do MDF-e (evento 110112) para liberar o veículo/motorista na SEFAZ.
+   * Envia estritamente { data, sigla_uf, nome_municipio } conforme OpenAPI Focus NFe v2 (/v2/mdfe/{ref}/encerrar).
    */
   static async encerrarMdfe(
     tenantId,
@@ -2958,7 +3979,38 @@ class TransporteService {
     if (rows.length === 0) throw new Error('MDF-e não encontrado.');
     const mdfe = rows[0];
 
+    if (mdfe.status === 'ENCERRADO') {
+      return {
+        success: true,
+        ja_encerrado: true,
+        status: 'ENCERRADO',
+        status_sefaz: mdfe.status_sefaz || '135',
+        mensagem_sefaz: mdfe.mensagem_sefaz || 'MDF-e já encerrado na SEFAZ',
+      };
+    }
+
     const { client, emitente } = await this.getFocusClient(tenantId, mdfe.emitente_id);
+
+    // Garante que caminho_damdfe e caminho_xml do MDF-e autorizado sejam preservados antes do evento de encerramento
+    let caminhoXmlAutorizado = mdfe.caminho_xml || null;
+    let caminhoDamdfeAutorizado = mdfe.caminho_damdfe || null;
+    if ((!caminhoXmlAutorizado || !caminhoDamdfeAutorizado) && mdfe.ref) {
+      try {
+        const stAntes = await client.consultarMdfe(mdfe.ref, true);
+        caminhoXmlAutorizado =
+          caminhoXmlAutorizado ||
+          FocusClient.normalizarUrlArquivo(
+            stAntes?.caminho_xml_nota_fiscal || stAntes?.caminho_xml,
+            client.ambiente
+          );
+        caminhoDamdfeAutorizado =
+          caminhoDamdfeAutorizado ||
+          FocusClient.normalizarUrlArquivo(stAntes?.caminho_damdfe, client.ambiente);
+      } catch (_) {
+        // segue com encerramento mesmo se consulta prévia falhar
+      }
+    }
+
     const ufFinal = (siglaUf || sigla_uf || mdfe.uf_fim || emitente.uf || 'MS').toUpperCase();
     const ibgeEnc = resolverIbgeMunicipio(
       codigoMunicipio || codigo_municipio || mdfe.codigo_municipio_descarregamento,
@@ -2966,26 +4018,80 @@ class TransporteService {
       ufFinal
     );
 
-    const resFocus = await client.encerrarMdfe(mdfe.ref, {
-      data: formatarDataYmd(dataEncerramento || data) || new Date().toISOString().split('T')[0],
-      sigla_uf: ibgeEnc.uf,
-      nome_municipio: ibgeEnc.nome,
-      codigo_municipio: ibgeEnc.codigo,
-    });
+    const dataEventoYmd =
+      formatarDataYmd(dataEncerramento || data) ||
+      formatarDataHoraSefaz(ibgeEnc.uf).slice(0, 10);
+
+    let resFocus;
+    try {
+      resFocus = await client.encerrarMdfe(mdfe.ref, {
+        data: dataEventoYmd,
+        sigla_uf: ibgeEnc.uf,
+        nome_municipio: ibgeEnc.nome,
+      });
+    } catch (encErr) {
+      const msgErr = String(encErr?.message || '');
+      const nomeSemAcento = ibgeEnc.nome
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '');
+      const nomeAlternativo =
+        ibgeEnc.nome === 'Sao Paulo'
+          ? 'São Paulo'
+          : nomeSemAcento !== ibgeEnc.nome
+          ? nomeSemAcento
+          : null;
+      if (nomeAlternativo && /munic[ií]pio/i.test(msgErr)) {
+        resFocus = await client.encerrarMdfe(mdfe.ref, {
+          data: dataEventoYmd,
+          sigla_uf: ibgeEnc.uf,
+          nome_municipio: nomeAlternativo,
+        });
+      } else {
+        throw encErr;
+      }
+    }
+
+    const statusSefazEnc = String(resFocus?.status_sefaz || '135').slice(0, 20);
+    const msgSefazEnc = String(
+      resFocus?.mensagem_sefaz || 'Evento registrado e vinculado a MDF-e'
+    ).slice(0, 500);
 
     await db.query(
       `UPDATE dash_mdfes SET
           status = 'ENCERRADO',
+          status_sefaz = $1,
+          mensagem_sefaz = $2,
+          caminho_xml = COALESCE($3, caminho_xml),
+          caminho_damdfe = COALESCE($4, caminho_damdfe),
           encerrado_em = NOW(),
-          encerramento_uf = $1,
-          encerramento_municipio = $2,
-          retorno_focus = jsonb_set(COALESCE(retorno_focus, '{}'::jsonb), '{encerramento}', $3::jsonb),
+          encerramento_uf = $5,
+          encerramento_municipio = $6,
+          retorno_focus = jsonb_set(COALESCE(retorno_focus, '{}'::jsonb), '{encerramento}', $7::jsonb),
           updated_at = NOW()
-       WHERE id = $4`,
-      [ibgeEnc.uf, ibgeEnc.nome, JSON.stringify(resFocus), mdfeId]
+       WHERE id = $8`,
+      [
+        statusSefazEnc,
+        msgSefazEnc,
+        caminhoXmlAutorizado,
+        caminhoDamdfeAutorizado,
+        ibgeEnc.uf,
+        ibgeEnc.nome,
+        JSON.stringify(resFocus || {}),
+        mdfeId,
+      ]
     );
 
-    return { success: true, focus: resFocus };
+    return {
+      success: true,
+      status: 'ENCERRADO',
+      status_sefaz: statusSefazEnc,
+      mensagem_sefaz: msgSefazEnc,
+      encerramento_uf: ibgeEnc.uf,
+      encerramento_municipio: ibgeEnc.nome,
+      caminho_xml: caminhoXmlAutorizado,
+      caminho_damdfe: caminhoDamdfeAutorizado,
+      focus: resFocus,
+    };
   }
 
   /**
@@ -4986,6 +6092,11 @@ class TransporteService {
 }
 
 TransporteService.validarCnpjReal = validarCnpjReal;
+TransporteService.validarCpfReal = validarCpfReal;
 TransporteService.parseNfeXml = parseNfeXml;
+TransporteService.saoUfsLimitrofes = saoUfsLimitrofes;
+TransporteService.resolverPercursoUfs = resolverPercursoUfs;
+TransporteService.validarPlacaVeiculoSefaz = validarPlacaVeiculoSefaz;
+TransporteService.gerarPlacaMercosulHomolog = gerarPlacaMercosulHomolog;
 
 module.exports = TransporteService;

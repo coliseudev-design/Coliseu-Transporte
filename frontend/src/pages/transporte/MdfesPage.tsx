@@ -5,7 +5,7 @@ import api from '../../services/api';
 import DocumentoDrawer from '../../components/DocumentoDrawer';
 import {
   Truck, Send, CheckCircle2, Clock, CheckSquare,
-  AlertCircle, Eye, Download, Plus, Navigation, MapPin, MoreHorizontal, RefreshCw
+  AlertCircle, Eye, Download, Plus, Navigation, MapPin, MoreHorizontal, RefreshCw, Loader2
 } from 'lucide-react';
 
 interface Mdfe {
@@ -14,8 +14,12 @@ interface Mdfe {
   chave_mdfe: string;
   numero: number;
   status: string;
+  status_sefaz?: string;
+  mensagem_sefaz?: string;
   uf_inicio: string;
   uf_fim: string;
+  municipio_carregamento?: string;
+  municipio_descarregamento?: string;
   veiculo_placa: string;
   motorista_nome: string;
   qtd_cte: number;
@@ -24,6 +28,7 @@ interface Mdfe {
   caminho_damdfe: string;
   caminho_xml: string;
   data_emissao: string;
+  focus_ambiente?: string;
 }
 
 export default function MdfesPage() {
@@ -34,16 +39,41 @@ export default function MdfesPage() {
   const [municipioEncerramento, setMunicipioEncerramento] = useState('');
   const [ufEncerramento, setUfEncerramento] = useState('');
   const [encerrando, setEncerrando] = useState(false);
+  const [gerandoTestes, setGerandoTestes] = useState(false);
+  const [resultadoTestes, setResultadoTestes] = useState<{
+    criados: number;
+    autorizados: number;
+    encerrados?: number;
+    resultados: any[];
+  } | null>(null);
 
   const { data, isLoading, refetch } = useQuery({
     queryKey: ['mdfes'],
     queryFn: async () => {
       const res = await api.get('/transporte/mdfes');
       return res.data;
+    },
+    refetchInterval: (query) => {
+      const rows = (query.state.data as any)?.data || [];
+      return rows.some((r: Mdfe) => r.status === 'PROCESSANDO') ? 5000 : false;
     }
   });
 
   const mdfes: Mdfe[] = data?.data || [];
+
+  const handleGerarMdfesTesteHomologacao = async () => {
+    setGerandoTestes(true);
+    setResultadoTestes(null);
+    try {
+      const res = await api.post('/transporte/mdfes/gerar-teste-homologacao');
+      setResultadoTestes(res.data);
+      await refetch();
+    } catch (err: any) {
+      alert(err?.response?.data?.error || 'Erro ao gerar e transmitir MDF-es de teste.');
+    } finally {
+      setGerandoTestes(false);
+    }
+  };
 
   const handleEmitir = async (id: number) => {
     setLoadingEmit(id);
@@ -117,7 +147,7 @@ export default function MdfesPage() {
   return (
     <div className="space-y-6 pb-20">
       {/* Top Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white dark:bg-slate-800 p-6 rounded-2xl shadow-sm border border-slate-200/80 dark:border-slate-700/80">
+      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 bg-white dark:bg-slate-800 p-6 rounded-2xl shadow-sm border border-slate-200/80 dark:border-slate-700/80">
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-white flex items-center gap-3">
             <Truck className="w-7 h-7 text-brand-600 dark:text-brand-500" />
@@ -127,7 +157,100 @@ export default function MdfesPage() {
             Agrupamento de CT-e/NF-e por rota, despacho de veículos e encerramento de viagens.
           </p>
         </div>
+
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={handleGerarMdfesTesteHomologacao}
+            disabled={gerandoTestes}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-teal-600 hover:bg-teal-700 text-white shadow-sm transition-colors disabled:opacity-60"
+            title="Emite 2 MDF-es 3.00 em homologação na SEFAZ/MS (Interno MS encerrado + Interestadual MS → SP autorizado)"
+          >
+            {gerandoTestes ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
+            {gerandoTestes ? 'Emitindo MDF-es SEFAZ/MS...' : 'Gerar MDF-es de Teste (Homologação)'}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => navigate('/transporte/mdfe/novo')}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-brand-600 hover:bg-brand-700 text-white shadow-sm transition-colors"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            Emitir MDF-e
+          </button>
+
+          <button
+            type="button"
+            onClick={() => refetch()}
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+            Atualizar
+          </button>
+        </div>
       </div>
+
+      {resultadoTestes && (
+        <div className="bg-teal-50/90 dark:bg-teal-950/40 border border-teal-200 dark:border-teal-800/70 rounded-2xl p-4 space-y-2.5">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-xs font-bold text-teal-900 dark:text-teal-200">
+              <CheckCircle2 className="w-4 h-4 text-teal-600 shrink-0" />
+              <span>
+                Lote MDF-e Homologação SEFAZ/MS processado: {resultadoTestes.criados} MDF-e(s) emitido(s) ({resultadoTestes.autorizados} autorizado(s)
+                {typeof resultadoTestes.encerrados === 'number' ? `, ${resultadoTestes.encerrados} encerrado(s)` : ''})
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setResultadoTestes(null)}
+              className="text-xs text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
+            >
+              Fechar
+            </button>
+          </div>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
+            {(resultadoTestes.resultados || []).map((r: any, idx: number) => (
+              <div
+                key={r.mdfe_id || idx}
+                className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-3 flex items-center justify-between gap-3 text-xs"
+              >
+                <div className="min-w-0">
+                  <p className="font-bold text-slate-900 dark:text-white truncate">
+                    Nº {r.numero || '—'} — {r.descricao}
+                  </p>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate mt-0.5">
+                    Status: <strong className="text-slate-800 dark:text-slate-200">{r.status}</strong>
+                    {r.placa ? ` · Placa ${r.placa}` : ''}
+                    {r.status_sefaz ? ` (SEFAZ ${r.status_sefaz})` : ''}
+                    {r.mensagem_sefaz ? ` — ${r.mensagem_sefaz}` : ''}
+                    {r.error ? ` — ${r.error}` : ''}
+                  </p>
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  {r.mdfe_id && (
+                    <button
+                      type="button"
+                      onClick={() => setDrawerId(r.mdfe_id)}
+                      className="px-2.5 py-1 rounded-lg bg-slate-900 dark:bg-white text-white dark:text-slate-900 font-semibold text-[11px]"
+                    >
+                      Detalhes
+                    </button>
+                  )}
+                  {(r.status === 'AUTORIZADO' || r.status === 'ENCERRADO') && r.mdfe_id && (
+                    <button
+                      type="button"
+                      onClick={() => handleBaixarArtefato(r.mdfe_id, 'pdf', r.caminho_damdfe)}
+                      className="px-2.5 py-1 rounded-lg bg-emerald-600 text-white font-semibold text-[11px]"
+                    >
+                      DAMDFE (PDF)
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Grid de Manifestos */}
       {isLoading ? (
@@ -185,7 +308,7 @@ export default function MdfesPage() {
 
               <div className="flex items-center justify-between pt-2 border-t border-slate-100 dark:border-slate-700/60 text-xs">
                 <div className="flex gap-2">
-                  {(mdfe.caminho_damdfe || mdfe.status === 'AUTORIZADO') && (
+                  {(mdfe.caminho_damdfe || mdfe.status === 'AUTORIZADO' || mdfe.status === 'ENCERRADO') && (
                     <button
                       type="button"
                       onClick={() => handleBaixarArtefato(mdfe.id, 'pdf', mdfe.caminho_damdfe)}
@@ -195,7 +318,7 @@ export default function MdfesPage() {
                       DAMDFE
                     </button>
                   )}
-                  {mdfe.caminho_xml && (
+                  {(mdfe.caminho_xml || mdfe.status === 'AUTORIZADO' || mdfe.status === 'ENCERRADO') && (
                     <button
                       type="button"
                       onClick={() => handleBaixarArtefato(mdfe.id, 'xml', mdfe.caminho_xml)}
@@ -239,7 +362,11 @@ export default function MdfesPage() {
                         Roteiro
                       </button>
                       <button
-                        onClick={() => setModalEncerrar(mdfe)}
+                        onClick={() => {
+                          setMunicipioEncerramento(mdfe.municipio_descarregamento || '');
+                          setUfEncerramento(mdfe.uf_fim || '');
+                          setModalEncerrar(mdfe);
+                        }}
                         className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl font-semibold text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/60 border border-amber-200 dark:border-amber-800/50 hover:bg-amber-100 transition-colors"
                       >
                         <CheckSquare className="w-3.5 h-3.5" />

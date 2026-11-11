@@ -126,6 +126,21 @@ async function ensureTransporteColumns() {
               ADD COLUMN IF NOT EXISTS municipio_carregamento VARCHAR(120),
               ADD COLUMN IF NOT EXISTS codigo_municipio_descarregamento VARCHAR(7),
               ADD COLUMN IF NOT EXISTS municipio_descarregamento VARCHAR(120),
+              ADD COLUMN IF NOT EXISTS cep_carregamento VARCHAR(10),
+              ADD COLUMN IF NOT EXISTS cep_descarregamento VARCHAR(10),
+              ADD COLUMN IF NOT EXISTS tipo_carga VARCHAR(4) DEFAULT '05',
+              ADD COLUMN IF NOT EXISTS produto_predominante_nome VARCHAR(120),
+              ADD COLUMN IF NOT EXISTS produto_predominante_ncm VARCHAR(10),
+              ADD COLUMN IF NOT EXISTS veiculo_tara_kg INTEGER,
+              ADD COLUMN IF NOT EXISTS veiculo_capacidade_kg INTEGER,
+              ADD COLUMN IF NOT EXISTS veiculo_capacidade_m3 INTEGER,
+              ADD COLUMN IF NOT EXISTS veiculo_tipo_rodado VARCHAR(4),
+              ADD COLUMN IF NOT EXISTS veiculo_tipo_carroceria VARCHAR(4),
+              ADD COLUMN IF NOT EXISTS veiculo_renavam VARCHAR(15),
+              ADD COLUMN IF NOT EXISTS veiculo_uf VARCHAR(2),
+              ADD COLUMN IF NOT EXISTS encerrado_em TIMESTAMPTZ,
+              ADD COLUMN IF NOT EXISTS encerramento_uf VARCHAR(2),
+              ADD COLUMN IF NOT EXISTS encerramento_municipio VARCHAR(120),
               ADD COLUMN IF NOT EXISTS informacao_adicional TEXT,
               ADD COLUMN IF NOT EXISTS pagto_frete JSONB DEFAULT '[]'::jsonb,
               ADD COLUMN IF NOT EXISTS contratantes JSONB DEFAULT '[]'::jsonb,
@@ -417,7 +432,7 @@ router.get('/documentos', async (req, res) => {
                    m.status, m.status_sefaz, m.mensagem_sefaz,
                    m.chave_mdfe AS chave,
                    m.tipo_emitente AS natureza_operacao, m.tipo_transporte AS tipo_servico, m.modal, NULL AS tomador,
-                   m.uf_inicio, m.uf_fim, NULL AS municipio_inicio, NULL AS municipio_fim,
+                   m.uf_inicio, m.uf_fim, m.municipio_carregamento AS municipio_inicio, m.municipio_descarregamento AS municipio_fim,
                    NULL::numeric AS valor_total, m.valor_carga, m.peso_bruto,
                    NULL::numeric AS valor_icms, NULL::numeric AS aliquota_icms,
                    m.caminho_xml, m.caminho_damdfe AS caminho_pdf, m.protocolo,
@@ -475,12 +490,13 @@ router.get('/documentos', async (req, res) => {
 
         let { rows } = await db.query(finalSql, params);
 
-        // Se houver documentos em PROCESSANDO ou AUTORIZADO sem PDF sincronizado, consulta sequencialmente a Focus NFe
+        // Se houver documentos em PROCESSANDO ou AUTORIZADO/ENCERRADO sem PDF sincronizado, consulta sequencialmente a Focus NFe
         const processandoRows = rows
             .filter(
                 (r) =>
                     r.ref &&
-                    (r.status === 'PROCESSANDO' || (r.status === 'AUTORIZADO' && !r.caminho_pdf))
+                    (r.status === 'PROCESSANDO' ||
+                        ((r.status === 'AUTORIZADO' || r.status === 'ENCERRADO') && !r.caminho_pdf))
             )
             .slice(0, 4);
         if (processandoRows.length > 0) {
@@ -589,7 +605,8 @@ router.get('/ctes/:id', async (req, res) => {
     const cteId = req.params.id;
     try {
         const { rows } = await db.query(
-            `SELECT c.*, e.razao_social as emitente_nome
+            `SELECT c.*, e.razao_social as emitente_nome,
+                    COALESCE(e.focus_ambiente, 'homologacao') as focus_ambiente
              FROM dash_ctes c
              LEFT JOIN dash_emitentes e ON e.id = c.emitente_id
              WHERE c.id = $1 AND c.tenant_id = $2`,
@@ -1192,11 +1209,24 @@ router.get('/mdfes', async (req, res) => {
     }
 });
 
+router.post('/mdfes/gerar-teste-homologacao', async (req, res) => {
+    const tenantId = req.tenant.id;
+    try {
+        await aplicarRegrasPadraoSefazMs(tenantId);
+        const result = await TransporteService.gerarMdfesTesteHomologacaoMs(tenantId);
+        return res.json(result);
+    } catch (err) {
+        logger.error('[Transporte API] Erro ao gerar MDF-es de teste em homologação:', err.message);
+        return res.status(500).json({ error: err.message });
+    }
+});
+
 router.get('/mdfes/:id', async (req, res) => {
     const tenantId = req.tenant.id;
     try {
         const { rows } = await db.query(
-            `SELECT m.*, e.razao_social as emitente_nome
+            `SELECT m.*, e.razao_social as emitente_nome,
+                    COALESCE(e.focus_ambiente, 'homologacao') as focus_ambiente
              FROM dash_mdfes m
              LEFT JOIN dash_emitentes e ON e.id = m.emitente_id
              WHERE m.id = $1 AND m.tenant_id = $2`,
@@ -1253,6 +1283,48 @@ router.post('/mdfes', async (req, res) => {
             motoristaNome = motoristaNome || b.condutores[0].nome || '';
         }
 
+        const codMunCarreg =
+            b.codigo_municipio_carregamento ||
+            b.codigo_municipio_carga ||
+            b.municipios_carregamento?.[0]?.codigo ||
+            b.municipios_carregamento?.[0]?.ibge ||
+            null;
+        const nomeMunCarreg =
+            b.municipio_carregamento ||
+            b.municipio_carga ||
+            b.municipios_carregamento?.[0]?.nome ||
+            null;
+        const munCarregArray =
+            Array.isArray(b.municipios_carregamento) && b.municipios_carregamento.length > 0
+                ? b.municipios_carregamento
+                : codMunCarreg || nomeMunCarreg
+                ? [{ codigo: codMunCarreg, nome: nomeMunCarreg }]
+                : [];
+
+        let codMunDesc =
+            b.codigo_municipio_descarregamento ||
+            b.municipios_descarregamento?.[0]?.codigo ||
+            b.municipios_descarregamento?.[0]?.ibge ||
+            null;
+        let nomeMunDesc =
+            b.municipio_descarregamento ||
+            b.municipios_descarregamento?.[0]?.nome ||
+            null;
+        let ufFimResolvida = (b.uf_fim || '').toUpperCase();
+
+        if ((!codMunDesc || !nomeMunDesc || !ufFimResolvida) && ctesIds.length > 0) {
+            const ctFirst = await db.query(
+                `SELECT codigo_municipio_fim, municipio_fim, uf_fim
+                 FROM dash_ctes WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
+                [ctesIds[0], tenantId]
+            );
+            if (ctFirst.rows[0]) {
+                codMunDesc = codMunDesc || ctFirst.rows[0].codigo_municipio_fim || null;
+                nomeMunDesc = nomeMunDesc || ctFirst.rows[0].municipio_fim || null;
+                ufFimResolvida = ufFimResolvida || String(ctFirst.rows[0].uf_fim || 'MS').toUpperCase();
+            }
+        }
+
         const tipoEmitenteFinal = String(b.tipo_emitente || (cargasIds.length > 0 && ctesIds.length === 0 ? '2' : '1'));
         const ref = TransporteService.gerarRef('MDFE', tenantId, Date.now().toString().slice(-6));
 
@@ -1263,6 +1335,7 @@ router.post('/mdfes', async (req, res) => {
                 ufs_percurso, municipios_carregamento, municipios_descarregamento,
                 codigo_municipio_carregamento, municipio_carregamento,
                 codigo_municipio_descarregamento, municipio_descarregamento,
+                cep_carregamento, cep_descarregamento,
                 veiculo_id, veiculo_placa,
                 motorista_id, motorista_cpf, motorista_nome,
                 condutores, reboques, contratantes, pagto_frete,
@@ -1276,11 +1349,12 @@ router.post('/mdfes', async (req, res) => {
                 $13, $14,
                 $15, $16,
                 $17, $18,
-                $19, $20, $21,
-                $22::jsonb, $23::jsonb, $24::jsonb, $25::jsonb,
-                $26::jsonb, $27::jsonb, $28::jsonb, $29::jsonb,
-                $30, $31, $32::jsonb,
-                $33, $34, $35, $36
+                $19, $20,
+                $21, $22, $23,
+                $24::jsonb, $25::jsonb, $26::jsonb, $27::jsonb,
+                $28::jsonb, $29::jsonb, $30::jsonb, $31::jsonb,
+                $32, $33, $34::jsonb,
+                $35, $36, $37, $38
              ) RETURNING *`,
             [
                 tenantId,
@@ -1291,14 +1365,16 @@ router.post('/mdfes', async (req, res) => {
                 tipoEmitenteFinal,
                 String(b.tipo_transporte || '1'),
                 (b.uf_inicio || 'MS').toUpperCase(),
-                (b.uf_fim || 'MS').toUpperCase(),
+                ufFimResolvida || 'MS',
                 JSON.stringify(b.ufs_percurso || []),
-                JSON.stringify(b.municipios_carregamento || []),
+                JSON.stringify(munCarregArray),
                 JSON.stringify(b.municipios_descarregamento || []),
-                b.codigo_municipio_carregamento || b.municipios_carregamento?.[0]?.ibge || null,
-                b.municipio_carregamento || b.municipios_carregamento?.[0]?.nome || null,
-                b.codigo_municipio_descarregamento || b.municipios_descarregamento?.[0]?.ibge || null,
-                b.municipio_descarregamento || b.municipios_descarregamento?.[0]?.nome || null,
+                codMunCarreg,
+                nomeMunCarreg,
+                codMunDesc,
+                nomeMunDesc,
+                b.cep_carregamento ? String(b.cep_carregamento).replace(/\D/g, '').slice(0, 8) : null,
+                b.cep_descarregamento ? String(b.cep_descarregamento).replace(/\D/g, '').slice(0, 8) : null,
                 veiculoId,
                 veiculoPlaca || 'AAA0000',
                 motoristaId,

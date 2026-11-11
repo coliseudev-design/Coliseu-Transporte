@@ -48,9 +48,12 @@ export default function DocumentosEmitidosPage() {
   const [dataFim, setDataFim] = useState('');
   const [drawer, setDrawer] = useState<{ tipo: 'CTE' | 'MDFE'; id: number } | null>(null);
   const [gerandoTestes, setGerandoTestes] = useState(false);
+  const [gerandoMdfesTeste, setGerandoMdfesTeste] = useState(false);
   const [resultadoTestes, setResultadoTestes] = useState<{
+    tipoLote?: 'CTE' | 'MDFE';
     criados: number;
     autorizados: number;
+    encerrados?: number;
     resultados: any[];
   } | null>(null);
 
@@ -82,12 +85,26 @@ export default function DocumentosEmitidosPage() {
     setResultadoTestes(null);
     try {
       const res = await api.post('/transporte/ctes/gerar-teste-homologacao');
-      setResultadoTestes(res.data);
+      setResultadoTestes({ ...res.data, tipoLote: 'CTE' });
       await refetch();
     } catch (e: any) {
       alert(e?.response?.data?.error || 'Erro ao gerar e transmitir novos CT-es de teste.');
     } finally {
       setGerandoTestes(false);
+    }
+  };
+
+  const handleGerarMdfesTesteHomologacao = async () => {
+    setGerandoMdfesTeste(true);
+    setResultadoTestes(null);
+    try {
+      const res = await api.post('/transporte/mdfes/gerar-teste-homologacao');
+      setResultadoTestes({ ...res.data, tipoLote: 'MDFE' });
+      await refetch();
+    } catch (e: any) {
+      alert(e?.response?.data?.error || 'Erro ao gerar e transmitir MDF-es de teste.');
+    } finally {
+      setGerandoMdfesTeste(false);
     }
   };
 
@@ -166,7 +183,7 @@ export default function DocumentosEmitidosPage() {
           <button
             type="button"
             onClick={handleGerarCtesTesteHomologacao}
-            disabled={gerandoTestes}
+            disabled={gerandoTestes || gerandoMdfesTeste}
             className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm transition-colors disabled:opacity-60"
             title="Cria e transmite 2 novos CT-es de teste em homologação na SEFAZ/MS (Interno MS 17% e Interestadual 12% + IBS/CBS)"
           >
@@ -178,6 +195,23 @@ export default function DocumentosEmitidosPage() {
             {gerandoTestes
               ? 'Emitindo CT-es na SEFAZ/MS...'
               : 'Gerar Novos CT-es de Teste (SEFAZ/MS)'}
+          </button>
+
+          <button
+            type="button"
+            onClick={handleGerarMdfesTesteHomologacao}
+            disabled={gerandoTestes || gerandoMdfesTeste}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-teal-600 hover:bg-teal-700 text-white shadow-sm transition-colors disabled:opacity-60"
+            title="Cria e transmite 2 MDF-es 3.00 em homologação na SEFAZ/MS (Interno MS encerrado + Interestadual MS → SP autorizado)"
+          >
+            {gerandoMdfesTeste ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <Truck className="w-3.5 h-3.5" />
+            )}
+            {gerandoMdfesTeste
+              ? 'Emitindo MDF-es na SEFAZ/MS...'
+              : 'Gerar MDF-es de Teste (SEFAZ/MS)'}
           </button>
 
           <button
@@ -196,7 +230,9 @@ export default function DocumentosEmitidosPage() {
             <div className="flex items-center gap-2 text-xs font-bold text-emerald-900 dark:text-emerald-200">
               <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
               <span>
-                Lote de Teste Homologação SEFAZ/MS processado: {resultadoTestes.criados} CT-e(s) emitido(s) ({resultadoTestes.autorizados} autorizado(s))
+                Lote de Teste Homologação SEFAZ/MS processado: {resultadoTestes.criados}{' '}
+                {resultadoTestes.tipoLote === 'MDFE' ? 'MDF-e(s)' : 'CT-e(s)'} emitido(s) ({resultadoTestes.autorizados} autorizado(s)
+                {typeof resultadoTestes.encerrados === 'number' ? `, ${resultadoTestes.encerrados} encerrado(s)` : ''})
               </span>
             </div>
             <button
@@ -208,44 +244,50 @@ export default function DocumentosEmitidosPage() {
             </button>
           </div>
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
-            {(resultadoTestes.resultados || []).map((r: any, idx: number) => (
-              <div
-                key={r.cte_id || idx}
-                className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-3 flex items-center justify-between gap-3 text-xs"
-              >
-                <div className="min-w-0">
-                  <p className="font-bold text-slate-900 dark:text-white truncate">
-                    Nº {r.numero || '—'} — {r.descricao}
-                  </p>
-                  <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate mt-0.5">
-                    Status: <strong className="text-slate-800 dark:text-slate-200">{r.status}</strong>
-                    {r.status_sefaz ? ` (SEFAZ ${r.status_sefaz})` : ''}
-                    {r.mensagem_sefaz ? ` — ${r.mensagem_sefaz}` : ''}
-                    {r.error ? ` — ${r.error}` : ''}
-                  </p>
+            {(resultadoTestes.resultados || []).map((r: any, idx: number) => {
+              const docId = r.mdfe_id || r.cte_id;
+              const docTipo: 'CTE' | 'MDFE' = r.mdfe_id ? 'MDFE' : 'CTE';
+              const pdfFallback = r.caminho_damdfe || r.caminho_dacte;
+              return (
+                <div
+                  key={docId || idx}
+                  className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-3 flex items-center justify-between gap-3 text-xs"
+                >
+                  <div className="min-w-0">
+                    <p className="font-bold text-slate-900 dark:text-white truncate">
+                      Nº {r.numero || '—'} — {r.descricao}
+                    </p>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate mt-0.5">
+                      Status: <strong className="text-slate-800 dark:text-slate-200">{r.status}</strong>
+                      {r.placa ? ` · Placa ${r.placa}` : ''}
+                      {r.status_sefaz ? ` (SEFAZ ${r.status_sefaz})` : ''}
+                      {r.mensagem_sefaz ? ` — ${r.mensagem_sefaz}` : ''}
+                      {r.error ? ` — ${r.error}` : ''}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    {docId && (
+                      <button
+                        type="button"
+                        onClick={() => setDrawer({ tipo: docTipo, id: docId })}
+                        className="px-2.5 py-1 rounded-lg bg-slate-900 dark:bg-white text-white dark:text-slate-900 font-semibold text-[11px]"
+                      >
+                        Detalhes
+                      </button>
+                    )}
+                    {(r.status === 'AUTORIZADO' || r.status === 'ENCERRADO') && docId && (
+                      <button
+                        type="button"
+                        onClick={() => handleBaixarArquivo(docTipo, docId, 'pdf', pdfFallback)}
+                        className="px-2.5 py-1 rounded-lg bg-emerald-600 text-white font-semibold text-[11px]"
+                      >
+                        {docTipo === 'MDFE' ? 'DAMDFE (PDF)' : 'DACTE (PDF)'}
+                      </button>
+                    )}
+                  </div>
                 </div>
-                <div className="flex items-center gap-1.5 shrink-0">
-                  {r.cte_id && (
-                    <button
-                      type="button"
-                      onClick={() => setDrawer({ tipo: 'CTE', id: r.cte_id })}
-                      className="px-2.5 py-1 rounded-lg bg-slate-900 dark:bg-white text-white dark:text-slate-900 font-semibold text-[11px]"
-                    >
-                      Detalhes
-                    </button>
-                  )}
-                  {r.status === 'AUTORIZADO' && r.cte_id && (
-                    <button
-                      type="button"
-                      onClick={() => handleBaixarArquivo('CTE', r.cte_id, 'pdf', r.caminho_dacte)}
-                      className="px-2.5 py-1 rounded-lg bg-emerald-600 text-white font-semibold text-[11px]"
-                    >
-                      DACTE (PDF)
-                    </button>
-                  )}
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}
@@ -469,7 +511,7 @@ export default function DocumentosEmitidosPage() {
                         <ArrowUpRight className="w-3 h-3" />
                         <span className="hidden xl:inline">Detalhes</span>
                       </button>
-                      {(d.caminho_pdf || d.status === 'AUTORIZADO') && (
+                      {(d.caminho_pdf || d.status === 'AUTORIZADO' || d.status === 'ENCERRADO') && (
                         <button
                           type="button"
                           onClick={() => handleBaixarArquivo(d.tipo_documento, d.id, 'pdf', d.caminho_pdf)}
@@ -482,7 +524,7 @@ export default function DocumentosEmitidosPage() {
                           </span>
                         </button>
                       )}
-                      {(d.caminho_xml || d.status === 'AUTORIZADO') && (
+                      {(d.caminho_xml || d.status === 'AUTORIZADO' || d.status === 'ENCERRADO') && (
                         <button
                           type="button"
                           onClick={() => handleBaixarArquivo(d.tipo_documento, d.id, 'xml', d.caminho_xml)}

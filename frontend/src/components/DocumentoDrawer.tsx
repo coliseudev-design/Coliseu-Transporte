@@ -4,7 +4,7 @@ import api from '../services/api';
 import {
   X, FileText, Truck, CheckCircle2, AlertTriangle, XCircle, Clock,
   Download, Eye, Send, Ban, FilePen, UserPlus, PlusCircle,
-  MapPin, Package, Copy, Loader2, ShieldCheck, Info, RefreshCw, Mail
+  MapPin, Package, Copy, Loader2, ShieldCheck, Info, RefreshCw, Mail, CheckSquare
 } from 'lucide-react';
 
 interface DrawerProps {
@@ -385,7 +385,7 @@ export default function DocumentoDrawer({ tipo, documentoId, onClose, onVerRotei
                       Arquivos Fiscais Oficiais (SEFAZ / Focus NFe)
                     </p>
                     <div className="flex flex-wrap gap-2">
-                      {((tipo === 'CTE' ? doc.caminho_dacte : doc.caminho_damdfe) || doc.status === 'AUTORIZADO') && (
+                      {((tipo === 'CTE' ? doc.caminho_dacte : doc.caminho_damdfe) || doc.status === 'AUTORIZADO' || doc.status === 'ENCERRADO') && (
                         <button
                           type="button"
                           onClick={() => handleBaixarArquivo('pdf', tipo === 'CTE' ? doc.caminho_dacte : doc.caminho_damdfe)}
@@ -395,7 +395,7 @@ export default function DocumentoDrawer({ tipo, documentoId, onClose, onVerRotei
                           {tipo === 'CTE' ? 'Imprimir DACTE Oficial (PDF)' : 'Imprimir DAMDFE Oficial (PDF)'}
                         </button>
                       )}
-                      {(doc.caminho_xml || doc.status === 'AUTORIZADO') && (
+                      {(doc.caminho_xml || doc.status === 'AUTORIZADO' || doc.status === 'ENCERRADO') && (
                         <button
                           type="button"
                           onClick={() => handleBaixarArquivo('xml', doc.caminho_xml)}
@@ -405,7 +405,7 @@ export default function DocumentoDrawer({ tipo, documentoId, onClose, onVerRotei
                           Baixar XML Autorizado
                         </button>
                       )}
-                      {doc.status !== 'AUTORIZADO' && !doc.caminho_xml && !(tipo === 'CTE' ? doc.caminho_dacte : doc.caminho_damdfe) && (
+                      {doc.status !== 'AUTORIZADO' && doc.status !== 'ENCERRADO' && !doc.caminho_xml && !(tipo === 'CTE' ? doc.caminho_dacte : doc.caminho_damdfe) && (
                         <span className="text-xs text-slate-400 italic">
                           O DACTE/DAMDFE (PDF) e o XML oficial ficam disponíveis imediatamente após a autorização pela SEFAZ.
                         </span>
@@ -528,6 +528,17 @@ export default function DocumentoDrawer({ tipo, documentoId, onClose, onVerRotei
                   </button>
                 )}
 
+                {tipo === 'MDFE' && doc.status === 'ENCERRADO' && (
+                  <button
+                    type="button"
+                    onClick={() => handleBaixarArquivo('pdf', doc.caminho_damdfe)}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold shadow-sm"
+                  >
+                    <Eye className="w-3.5 h-3.5" />
+                    Imprimir DAMDFE (PDF)
+                  </button>
+                )}
+
                 {tipo === 'MDFE' && doc.status === 'AUTORIZADO' && (
                   <>
                     <button
@@ -537,6 +548,32 @@ export default function DocumentoDrawer({ tipo, documentoId, onClose, onVerRotei
                     >
                       <Eye className="w-3.5 h-3.5" />
                       Imprimir DAMDFE (PDF)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const munPadrao = doc.municipio_descarregamento || '';
+                        const nomeMunicipio = window.prompt(
+                          `Confirme o município de encerramento (${doc.uf_fim || 'UF'}):`,
+                          munPadrao
+                        );
+                        if (nomeMunicipio && nomeMunicipio.trim()) {
+                          acao(
+                            () =>
+                              api.post(`/transporte/mdfes/${doc.id}/encerrar`, {
+                                siglaUf: doc.uf_fim,
+                                codigoMunicipio: doc.codigo_municipio_descarregamento,
+                                nomeMunicipio: nomeMunicipio.trim()
+                              }),
+                            'MDF-e encerrado com sucesso na SEFAZ! Placa e condutor liberados.'
+                          );
+                        }
+                      }}
+                      disabled={enviando}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold shadow-sm disabled:opacity-50"
+                    >
+                      <CheckSquare className="w-3.5 h-3.5" />
+                      Encerrar MDF-e
                     </button>
                     <button
                       onClick={() => setModalCondutor(true)}
