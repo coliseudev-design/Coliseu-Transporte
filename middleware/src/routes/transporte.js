@@ -150,7 +150,10 @@ async function ensureTransporteColumns() {
               ADD COLUMN IF NOT EXISTS pessoas_autorizadas JSONB DEFAULT '[]'::jsonb,
               ADD COLUMN IF NOT EXISTS reboques JSONB DEFAULT '[]'::jsonb,
               ADD COLUMN IF NOT EXISTS condutores JSONB DEFAULT '[]'::jsonb,
-              ADD COLUMN IF NOT EXISTS vale_pedagio JSONB DEFAULT '[]'::jsonb;
+              ADD COLUMN IF NOT EXISTS vale_pedagio JSONB DEFAULT '[]'::jsonb,
+              ADD COLUMN IF NOT EXISTS ciot_codigo VARCHAR(50),
+              ADD COLUMN IF NOT EXISTS ciot_responsavel_documento VARCHAR(14),
+              ADD COLUMN IF NOT EXISTS ciots JSONB DEFAULT '[]'::jsonb;
         `);
         _transporteColsReady = true;
     } catch (e) {
@@ -1340,7 +1343,7 @@ router.post('/mdfes', async (req, res) => {
                 motorista_id, motorista_cpf, motorista_nome,
                 condutores, reboques, contratantes, pagto_frete,
                 seguros, produtos_predominantes, lacres, pessoas_autorizadas,
-                informacao_adicional, ciot_codigo, vale_pedagio,
+                informacao_adicional, ciot_codigo, ciot_responsavel_documento, ciots, vale_pedagio,
                 qtd_cte, qtd_nfe, valor_carga, peso_bruto
              ) VALUES (
                 $1, $2, $3, 'RASCUNHO', $4, $5,
@@ -1353,8 +1356,8 @@ router.post('/mdfes', async (req, res) => {
                 $21, $22, $23,
                 $24::jsonb, $25::jsonb, $26::jsonb, $27::jsonb,
                 $28::jsonb, $29::jsonb, $30::jsonb, $31::jsonb,
-                $32, $33, $34::jsonb,
-                $35, $36, $37, $38
+                $32, $33, $34, $35::jsonb, $36::jsonb,
+                $37, $38, $39, $40
              ) RETURNING *`,
             [
                 tenantId,
@@ -1389,7 +1392,9 @@ router.post('/mdfes', async (req, res) => {
                 JSON.stringify(b.lacres || []),
                 JSON.stringify(b.pessoas_autorizadas || []),
                 b.informacao_adicional || null,
-                b.ciot_codigo || null,
+                b.ciot_codigo ? String(b.ciot_codigo).replace(/\D/g, '').slice(0, 12) : null,
+                b.ciot_responsavel_documento ? String(b.ciot_responsavel_documento).replace(/\D/g, '').slice(0, 14) : null,
+                JSON.stringify(Array.isArray(b.ciots) ? b.ciots : []),
                 JSON.stringify(b.vale_pedagio || {}),
                 ctesIds.length,
                 cargasIds.length,

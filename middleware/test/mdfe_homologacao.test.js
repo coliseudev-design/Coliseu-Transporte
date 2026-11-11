@@ -48,6 +48,10 @@ test('MDF-e 3.00 — Geografia de UFs de percurso (BFS) e validadores SEFAZ', ()
   assert.equal(TransporteService.validarPlacaVeiculoSefaz(placaGerada), true);
   assert.equal(TransporteService.validarPlacaVeiculoSefaz('ABC1234'), true);
   assert.equal(TransporteService.validarPlacaVeiculoSefaz('INVALIDA'), false);
+
+  // Gerador CIOT homologação: 12 dígitos exatos [0-9]{12} sem zero à esquerda
+  const ciotHomolog = TransporteService.gerarCiotHomologacao(10);
+  assert.match(ciotHomolog, /^[1-9][0-9]{11}$/);
 });
 
 test('emitirMdfe — Veículo próprio MS -> SP (Carga Lotação): omite tpTransp/modal/percursos e preenche NT 2025.001', async (t) => {
@@ -188,6 +192,159 @@ test('emitirMdfe — Veículo próprio MS -> SP (Carga Lotação): omite tpTrans
   assert.equal(payload.modal_rodoviario.pagamentos[0].numero_agencia, '1234');
   // 6. Condutor fallback com CPF válido módulo 11 em homologação
   assert.equal(payload.modal_rodoviario.condutores[0].cpf, '11144477735');
+  // 7. CIOT obrigatório NT 2026.001 (evita Rejeição 684 e Rejeição 716)
+  assert.equal(Array.isArray(payload.modal_rodoviario.ciot), true);
+  assert.equal(payload.modal_rodoviario.ciot.length, 1);
+  assert.match(payload.modal_rodoviario.ciot[0].ciot, /^[1-9][0-9]{11}$/);
+  assert.equal(payload.modal_rodoviario.ciot[0].cnpj_responsavel, '03272053000150');
+});
+
+test('emitirMdfe — NT 2026.001 CIOT (Rejeições 684 e 716): mapeia CIOT explícito PF, preserva nº em REJEITADO e exige CIOT real em produção (>= 23/11/2026)', async (t) => {
+  const origQuery = db.query;
+  const origGetFocusClient = TransporteService.getFocusClient;
+
+  t.after(() => {
+    db.query = origQuery;
+    TransporteService.getFocusClient = origGetFocusClient;
+  });
+
+  // Caso A: Reemissão do MDF-e nº 10 REJEITADO (684) com CIOT explícito e CPF responsável (PF)
+  const tentativas = [];
+  TransporteService.getFocusClient = async () => ({
+    emitente: { ...EMITENTE_HOMOLOG_MS },
+    client: {
+      ambiente: 'homologacao',
+      emitirMdfe: async (_ref, payload) => {
+        tentativas.push(payload);
+        return {
+          status: 'autorizado',
+          status_sefaz: '100',
+          mensagem_sefaz: 'Autorizado o uso do MDF-e',
+          chave_mdfe: '50261103272053000150580010000000101816720620',
+          numero: payload.numero,
+          serie: payload.serie,
+          caminho_damdfe: '/arquivos_desenvolvimento/mdfe10.pdf',
+          caminho_xml_nota_fiscal: '/arquivos_desenvolvimento/mdfe10.xml',
+        };
+      },
+      consultarMdfe: async () => null,
+    },
+  });
+
+  db.query = async (sql) => {
+    const s = String(sql);
+    if (s.includes('FROM dash_mdfes m') && s.includes('LEFT JOIN dash_veiculos')) {
+      return {
+        rows: [
+          {
+            id: 10,
+            tenant_id: 7,
+            emitente_id: 1,
+            status: 'REJEITADO',
+            status_sefaz: '684',
+            serie: '1',
+            numero: 10,
+            tipo_emitente: '1',
+            uf_inicio: 'MS',
+            uf_fim: 'MS',
+            veiculo_placa: 'QEK4H63',
+            ciot_codigo: '987654321012',
+            ciot_responsavel_documento: '52998224725',
+          },
+        ],
+      };
+    }
+    if (s.includes('MAX(numero)')) return { rows: [{ max_num: 11 }] };
+    if (s.includes('FROM dash_mdfe_documentos md')) {
+      return {
+        rows: [
+          {
+            tipo_documento: 'CTE',
+            chave: CHAVE_CTE_MS_MS,
+            codigo_municipio_descarregamento: '5002704',
+            nome_municipio_descarregamento: 'Campo Grande',
+            cte_valor_total: 150.0,
+          },
+        ],
+      };
+    }
+    return { rows: [] };
+  };
+
+  const resHomolog = await TransporteService.emitirMdfe(7, 10, { pollIntervalMs: 0 });
+  assert.equal(resHomolog.status, 'AUTORIZADO');
+  assert.equal(tentativas.length, 1);
+  assert.equal(tentativas[0].numero, 10);
+  assert.deepEqual(tentativas[0].modal_rodoviario.ciot, [
+    { ciot: '987654321012', cpf_responsavel: '52998224725' },
+  ]);
+
+  // Caso B: Em Produção a partir de 23/11/2026, sem CIOT informado -> bloqueia antes de transmitir (nunca fabrica CIOT falso em produção)
+  TransporteService.getFocusClient = async () => ({
+    emitente: { ...EMITENTE_HOMOLOG_MS, focus_ambiente: 'producao' },
+    client: {
+      ambiente: 'producao',
+      emitirMdfe: async () => {
+        throw new Error('Não deveria transmitir à Focus NFe sem CIOT em produção');
+      },
+      consultarMdfe: async () => null,
+    },
+  });
+
+  db.query = async (sql) => {
+    const s = String(sql);
+    if (s.includes('FROM dash_mdfes m') && s.includes('LEFT JOIN dash_veiculos')) {
+      return {
+        rows: [
+          {
+            id: 599,
+            tenant_id: 7,
+            emitente_id: 1,
+            status: 'RASCUNHO',
+            serie: '1',
+            numero: 1,
+            tipo_emitente: '1',
+            uf_inicio: 'MS',
+            uf_fim: 'SP',
+            veiculo_placa: 'QAA1B23',
+            motorista_cpf: '52998224725',
+            motorista_nome: 'JOSE MOTORISTA REAL',
+            seguros: [
+              {
+                responsavel: '1',
+                nome_seguradora: 'PORTO SEGURO CIA DE SEGUROS',
+                cnpj_seguradora: '61198164000160',
+                numero_apolice: '0000540012345',
+                numero_averbacao: '00000000000000000001',
+              },
+            ],
+            data_emissao: '2026-11-25T12:00:00-03:00',
+            ciot_codigo: null,
+          },
+        ],
+      };
+    }
+    if (s.includes('MAX(numero)')) return { rows: [{ max_num: 1 }] };
+    if (s.includes('FROM dash_mdfe_documentos md')) {
+      return {
+        rows: [
+          {
+            tipo_documento: 'CTE',
+            chave: CHAVE_CTE_MS_SP,
+            codigo_municipio_descarregamento: '3550308',
+            nome_municipio_descarregamento: 'Sao Paulo',
+            cte_valor_total: 280.0,
+          },
+        ],
+      };
+    }
+    return { rows: [] };
+  };
+
+  await assert.rejects(
+    () => TransporteService.emitirMdfe(7, 599, { pollIntervalMs: 0 }),
+    /CIOT obrigatório.*NT 2026\.001/i
+  );
 });
 
 test('emitirMdfe — Veículo de terceiro PF (CPF) MS -> SC: define tipo_transporte=2 (TAC) e percursos=[PR]', async (t) => {
@@ -575,6 +732,7 @@ test('gerarMdfesTesteHomologacaoMs — Emite MDF-e #1 (MS->MS encerrado 135) e M
         informacao_adicional: params[19],
         valor_carga: params[20],
         peso_bruto: params[21],
+        ciot_codigo: params[22],
       };
       mdfesStore.set(id, row);
       return { rows: [row] };
@@ -651,4 +809,7 @@ test('gerarMdfesTesteHomologacaoMs — Emite MDF-e #1 (MS->MS encerrado 135) e M
   assert.equal(lote.resultados[1].status_sefaz, '100');
   assert.ok(lote.resultados[1].caminho_damdfe);
   assert.ok(lote.resultados[1].caminho_xml);
+  for (const r of mdfesStore.values()) {
+    assert.match(String(r.ciot_codigo || ''), /^[1-9][0-9]{11}$/);
+  }
 });

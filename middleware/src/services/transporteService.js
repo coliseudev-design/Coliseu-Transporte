@@ -188,6 +188,16 @@ function gerarPlacaMercosulHomolog(seedInput = 1) {
   return `Q${l2}${l3}${d1}${l4}${d23}`;
 }
 
+/**
+ * Gera um código CIOT sintético de 12 dígitos numéricos ([0-9]{12}, iniciado por 1..9 para preservar
+ * 12 dígitos exatos mesmo quando serializado como Integer[12] na Focus NFe) exclusivo para Homologação SEFAZ.
+ */
+function gerarCiotHomologacao(seedInput = 1) {
+  const n = Math.abs(parseInt(seedInput, 10) || 1);
+  const sufixo6 = String((n % 900000) + 100000);
+  return `202611${sufixo6}`;
+}
+
 function normalizarRntrc8(valor) {
   const d = String(valor || '').replace(/\D/g, '');
   if (!d) return '00000000';
@@ -2235,11 +2245,42 @@ class TransporteService {
         }
       }
 
-      // 4. Verifica se já foram emitidos os MDF-es de teste SEFAZ/MS em homologação
-      // (#1 Interno MS->MS Autorizado + Encerrado | #2 Interestadual MS->SP Autorizado em aberto)
+      // 4. Reconcilia eventuais MDF-es em REJEITADO/PROCESSANDO (ex.: Rejeição 684 — NT 2026.001 CIOT obrigatório)
+      // e garante os 2 cenários SEFAZ/MS em homologação (#1 Interno MS->MS Autorizado + Encerrado | #2 Interestadual MS->SP Autorizado)
+      const { rows: mdfesPendentes } = await db.query(
+        `SELECT id, uf_fim, codigo_municipio_descarregamento, municipio_descarregamento, informacao_adicional
+         FROM dash_mdfes
+         WHERE tenant_id = $1 AND status IN ('REJEITADO', 'PROCESSANDO')
+         ORDER BY id ASC LIMIT 6`,
+        [tenantId]
+      );
+      for (const mPend of mdfesPendentes) {
+        try {
+          const resReemissao = await this.emitirMdfe(tenantId, mPend.id, { forcarNovaEmissao: true });
+          if (
+            resReemissao?.status === 'AUTORIZADO' &&
+            /MDF-E\s*#1/i.test(String(mPend.informacao_adicional || ''))
+          ) {
+            await this.encerrarMdfe(tenantId, mPend.id, {
+              siglaUf: mPend.uf_fim || 'MS',
+              codigoMunicipio: mPend.codigo_municipio_descarregamento || '5002704',
+              nomeMunicipio: mPend.municipio_descarregamento || 'Campo Grande',
+            }).catch((encErr) => {
+              logger.warn(
+                `[Homolog MS] Aviso ao encerrar MDF-e #${mPend.id} após reemissão: ${encErr.message}`
+              );
+            });
+          }
+        } catch (reemitErr) {
+          logger.warn(`[Homolog MS] Aviso ao reemitir MDF-e #${mPend.id}: ${reemitErr.message}`);
+        }
+      }
+
       const { rows: jaTemMdfesTeste } = await db.query(
         `SELECT COUNT(*)::int AS total FROM dash_mdfes
-         WHERE tenant_id = $1 AND informacao_adicional ILIKE '%TESTE HOMOLOGACAO SEFAZ/MS MDF-E%'`,
+         WHERE tenant_id = $1
+           AND status IN ('AUTORIZADO', 'ENCERRADO')
+           AND informacao_adicional ILIKE '%TESTE HOMOLOGACAO SEFAZ/MS MDF-E%'`,
         [tenantId]
       );
       if (Number(jaTemMdfesTeste[0]?.total || 0) === 0) {
@@ -2439,7 +2480,7 @@ class TransporteService {
             codigo_municipio_descarregamento, municipio_descarregamento,
             veiculo_placa, motorista_cpf, motorista_nome,
             condutores, contratantes, pagto_frete, seguros, produtos_predominantes,
-            informacao_adicional, qtd_cte, qtd_nfe, valor_carga, peso_bruto, data_emissao
+            informacao_adicional, qtd_cte, qtd_nfe, valor_carga, peso_bruto, ciot_codigo, data_emissao
          ) VALUES (
             $1, $2, $3, 'RASCUNHO', '1', $4,
             '1', '1', $5, $6,
@@ -2448,7 +2489,7 @@ class TransporteService {
             $12, $13,
             $14, '11144477735', 'MOTORISTA HOMOLOGACAO SEFAZ',
             $15::jsonb, $16::jsonb, $17::jsonb, $18::jsonb, $19::jsonb,
-            $20, 1, 0, $21, $22, NOW()
+            $20, 1, 0, $21, $22, $23, NOW()
          ) RETURNING *`,
         [
           tenantId,
@@ -2473,6 +2514,7 @@ class TransporteService {
           cenario.info_adicional,
           valorCargaCte,
           pesoBrutoCte,
+          gerarCiotHomologacao(numeroMdfe),
         ]
       );
 
@@ -3003,13 +3045,14 @@ class TransporteService {
       [tenantId, mdfeId]
     );
     const maxNumExistente = Number(maxNumRows[0]?.max_num || 0);
+    // Se o MDF-e foi REJEITADO pela SEFAZ (cStat != 100, ex.: 684) e já possui numeração >= 2 (ex.: MDF-e nº 10),
+    // a SEFAZ não consumiu o número fiscal — preservamos o mesmo número na reemissão (avançando apenas se retornar 204/539).
     const precisaNovoNumeroHomolog =
       isHomolog &&
-      (mdfe.status === 'REJEITADO' ||
-        mdfe.status === 'PROCESSANDO' ||
+      (mdfe.status === 'PROCESSANDO' ||
         !mdfe.numero ||
         Number(mdfe.numero) <= 1 ||
-        Boolean(opts.forcarNovaEmissao));
+        Boolean(opts.forcarNovoNumero));
     let numeroEnvio = precisaNovoNumeroHomolog
       ? Math.max(maxNumExistente + 1, Number(mdfe.id || 1) + 10)
       : Number(mdfe.numero) > 0
@@ -3605,7 +3648,138 @@ class TransporteService {
         : '1'
       : null;
 
-    const montarPayloadFocus = (numMdfe, placaAtual) => ({
+    // 10b. CIOT (<infCIOT> — Nota Técnica MDF-e 2026.001 / Ajuste SINIEF 03/2026 — Rejeições 684 e 716)
+    // Obrigatório no modal rodoviário quando tpEmit = 1, tpEmit = 3 ou (tpEmit = 2 com tpTransp preenchido).
+    const ciotObrigatorio =
+      tipoEmitenteFinal === '1' ||
+      tipoEmitenteFinal === '3' ||
+      (tipoEmitenteFinal === '2' && Boolean(tipoTransporteFocus));
+
+    const cnpjEmitenteLimpo = digitsOnly(emitente.cnpj);
+    const resolverDocResponsavelCiot = (docCandRaw) => {
+      const cand = digitsOnly(docCandRaw);
+      if (cand.length === 11 && validarCpfReal(cand)) return cand;
+      if (cand.length === 14 && validarCnpjReal(cand)) return cand;
+
+      const candMdfe = digitsOnly(mdfe.ciot_responsavel_documento);
+      if (candMdfe.length === 11 && validarCpfReal(candMdfe)) return candMdfe;
+      if (candMdfe.length === 14 && validarCnpjReal(candMdfe)) return candMdfe;
+
+      if (isHomolog && cnpjEmitenteLimpo.length === 14 && validarCnpjReal(cnpjEmitenteLimpo)) {
+        return cnpjEmitenteLimpo;
+      }
+
+      const candContr = digitsOnly(primeiroContratante?.cnpj || primeiroContratante?.cpf || '');
+      if (candContr.length === 11 && validarCpfReal(candContr)) return candContr;
+      if (candContr.length === 14 && validarCnpjReal(candContr)) return candContr;
+
+      if (cnpjEmitenteLimpo.length === 14 && validarCnpjReal(cnpjEmitenteLimpo)) {
+        return cnpjEmitenteLimpo;
+      }
+      if (isHomolog) return '03272053000150';
+
+      throw new Error(
+        'CPF ou CNPJ do responsável pela geração do CIOT é inválido (Rejeição SEFAZ 716).'
+      );
+    };
+
+    const montarItemCiotFocus = (codigoDigits, docRespRaw) => {
+      const docResp = resolverDocResponsavelCiot(docRespRaw);
+      return {
+        ciot: codigoDigits,
+        ...(docResp.length === 11
+          ? { cpf_responsavel: docResp }
+          : { cnpj_responsavel: docResp }),
+      };
+    };
+
+    let ciotPayload = [];
+    const ciotsExplicitRaw = parseJsonSafe(mdfe.ciots, []);
+    const candidatosCiot = [];
+    if (Array.isArray(ciotsExplicitRaw)) {
+      for (const item of ciotsExplicitRaw) {
+        if (!item) continue;
+        candidatosCiot.push({
+          codigo: item.ciot || item.codigo || item.ciot_codigo,
+          documento:
+            item.cnpj_responsavel ||
+            item.cpf_responsavel ||
+            item.responsavel_documento ||
+            item.documento ||
+            mdfe.ciot_responsavel_documento,
+        });
+      }
+    }
+    if (mdfe.ciot_codigo) {
+      candidatosCiot.push({
+        codigo: mdfe.ciot_codigo,
+        documento: mdfe.ciot_responsavel_documento,
+      });
+    }
+
+    const ciotsVistos = new Set();
+    for (const cand of candidatosCiot) {
+      const codDigits = digitsOnly(cand.codigo);
+      if (!codDigits) continue;
+      if (codDigits.length !== 12) {
+        if (!isHomolog) {
+          throw new Error(
+            'O código CIOT informado deve conter exatamente 12 dígitos numéricos (padrão ANTT / SEFAZ [0-9]{12}).'
+          );
+        }
+        const normHomolog = codDigits.padStart(12, '2').slice(-12);
+        if (!ciotsVistos.has(normHomolog)) {
+          ciotsVistos.add(normHomolog);
+          ciotPayload.push(montarItemCiotFocus(normHomolog, cand.documento));
+        }
+        continue;
+      }
+      if (!ciotsVistos.has(codDigits)) {
+        ciotsVistos.add(codDigits);
+        ciotPayload.push(montarItemCiotFocus(codDigits, cand.documento));
+      }
+    }
+
+    if (ciotPayload.length === 0 && ciotObrigatorio) {
+      const { rows: contratoCiotRows } = await db
+        .query(
+          `SELECT ciot_codigo, contratante_documento
+           FROM dash_contratos_transporte
+           WHERE tenant_id = $1
+             AND ciot_codigo IS NOT NULL
+             AND LENGTH(regexp_replace(ciot_codigo, '\\D', '', 'g')) = 12
+             AND COALESCE(ciot_status, 'ATIVO') NOT IN ('CANCELADO', 'ENCERRADO', 'ERRO')
+           ORDER BY updated_at DESC NULLS LAST, id DESC
+           LIMIT 1`,
+          [tenantId]
+        )
+        .catch(() => ({ rows: [] }));
+
+      const ciotContrato = digitsOnly(contratoCiotRows[0]?.ciot_codigo || '');
+      if (ciotContrato.length === 12) {
+        ciotPayload.push(
+          montarItemCiotFocus(ciotContrato, contratoCiotRows[0]?.contratante_documento)
+        );
+      }
+    }
+
+    if (ciotPayload.length === 0 && ciotObrigatorio) {
+      if (isHomolog) {
+        ciotPayload.push(
+          montarItemCiotFocus(gerarCiotHomologacao(numeroEnvio), cnpjEmitenteLimpo)
+        );
+      } else {
+        const dataRefEmissao = mdfe.data_emissao ? new Date(mdfe.data_emissao) : new Date();
+        const inicioVigenciaProdNt2026001 = new Date('2026-11-23T00:00:00-03:00');
+        if (dataRefEmissao >= inicioVigenciaProdNt2026001) {
+          throw new Error(
+            'CIOT obrigatório (Rejeição SEFAZ 684 — NT 2026.001): informe o código CIOT de 12 dígitos gerado na IPEF/ANTT e o CPF/CNPJ do responsável antes de transmitir em Produção.'
+          );
+        }
+      }
+    }
+
+    const montarPayloadFocus = (numMdfe, placaAtual, ciotListaAtual) => ({
       emitente: tipoEmitenteFinal,
       ...(tipoTransporteFocus ? { tipo_transporte: tipoTransporteFocus } : {}),
       serie: serieEnvio,
@@ -3661,15 +3835,8 @@ class TransporteService {
         ...(tipoEmitenteFinal === '1' && rntrcFinal
           ? { registro_nacional_transporte: rntrcFinal }
           : {}),
-        ...(mdfe.ciot_codigo
-          ? {
-              ciot: [
-                {
-                  ciot: digitsOnly(mdfe.ciot_codigo),
-                  cnpj_responsavel: digitsOnly(emitente.cnpj),
-                },
-              ],
-            }
+        ...(Array.isArray(ciotListaAtual) && ciotListaAtual.length > 0
+          ? { ciot: ciotListaAtual }
           : {}),
         ...(contratantesPayload.length > 0 ? { contratantes: contratantesPayload } : {}),
         ...(pagamentosPayload.length > 0 ? { pagamentos: pagamentosPayload } : {}),
@@ -3726,12 +3893,13 @@ class TransporteService {
         tenantId,
         tentativaEmissao === 0 ? `${mdfe.id}N${numeroEnvio}` : `${mdfe.id}R${tentativaEmissao}N${numeroEnvio}`
       );
-      payloadEnviado = montarPayloadFocus(numeroEnvio, placaTracao);
+      payloadEnviado = montarPayloadFocus(numeroEnvio, placaTracao, ciotPayload);
 
       await db.query(
         `UPDATE dash_mdfes
          SET ref = $1, serie = $2, numero = $3, veiculo_placa = $4,
-             payload_focus = $5, status = 'PROCESSANDO', updated_at = NOW()
+             payload_focus = $5, ciot_codigo = COALESCE($7, ciot_codigo),
+             status = 'PROCESSANDO', updated_at = NOW()
          WHERE id = $6`,
         [
           refAtual,
@@ -3740,6 +3908,7 @@ class TransporteService {
           placaTracao,
           JSON.stringify(payloadEnviado),
           mdfeId,
+          ciotPayload[0]?.ciot || null,
         ]
       );
 
@@ -3783,7 +3952,18 @@ class TransporteService {
       ) {
         // Rejeição 204 / 539: Duplicidade de numeração em homologação -> avança número sequencial
         if (cStatTentativa === '204' || cStatTentativa === '539' || /duplicidade/i.test(msgTentativa)) {
-          numeroEnvio += 1 + tentativaEmissao * 5;
+          numeroEnvio = Math.max(maxNumExistente, numeroEnvio) + 1 + tentativaEmissao * 5;
+          continue;
+        }
+        // Rejeição 684 / 716 (NT 2026.001): CIOT ausente ou responsável inválido -> regenera CIOT de homologação
+        if (cStatTentativa === '684' || cStatTentativa === '716' || /ciot/i.test(msgTentativa)) {
+          numeroEnvio = Math.max(maxNumExistente, numeroEnvio) + 1;
+          ciotPayload = [
+            montarItemCiotFocus(
+              gerarCiotHomologacao(numeroEnvio * 7 + tentativaEmissao + 1),
+              validarCnpjReal(cnpjEmitenteLimpo) ? cnpjEmitenteLimpo : '03272053000150'
+            ),
+          ];
           continue;
         }
         // Rejeição 611 / 662 / 686: Existe MDF-e não encerrado para esta placa -> rotaciona placa de teste em homologação
@@ -3793,7 +3973,7 @@ class TransporteService {
           cStatTentativa === '686' ||
           /n[aã]o encerrado/i.test(msgTentativa)
         ) {
-          numeroEnvio += 1;
+          numeroEnvio = Math.max(maxNumExistente, numeroEnvio) + 1;
           placaTracao = gerarPlacaMercosulHomolog(
             numeroEnvio * 13 + (tentativaEmissao + 1) * 37 + (Date.now() % 97)
           );
@@ -6098,5 +6278,6 @@ TransporteService.saoUfsLimitrofes = saoUfsLimitrofes;
 TransporteService.resolverPercursoUfs = resolverPercursoUfs;
 TransporteService.validarPlacaVeiculoSefaz = validarPlacaVeiculoSefaz;
 TransporteService.gerarPlacaMercosulHomolog = gerarPlacaMercosulHomolog;
+TransporteService.gerarCiotHomologacao = gerarCiotHomologacao;
 
 module.exports = TransporteService;

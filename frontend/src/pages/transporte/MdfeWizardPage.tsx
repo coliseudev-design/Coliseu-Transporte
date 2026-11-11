@@ -109,7 +109,9 @@ export default function MdfeWizardPage() {
     reboques: [] as Reboque[],
     condutores: [] as { id: string; nome: string; cpf: string }[],
     contratantes: [] as Contratante[],
-    // Pagamento
+    // CIOT (NT 2026.001 — Rejeição 684) e Pagamento
+    ciot_codigo: '',
+    ciot_responsavel_documento: '',
     pagto_frete: [] as PagamentoFrete[],
     // Documentos
     ctes_ids: [] as number[],
@@ -185,6 +187,15 @@ export default function MdfeWizardPage() {
 
   const bloqueios = checklist.filter(c => !c.ok);
 
+  const emitenteSelecionado = useMemo(
+    () => emitentes.find((x: any) => String(x.id) === String(form.emitente_id)) || emitentes[0] || null,
+    [emitentes, form.emitente_id]
+  );
+  const ambienteAtivo =
+    String(emitenteSelecionado?.focus_ambiente || 'homologacao').toLowerCase() === 'producao'
+      ? 'producao'
+      : 'homologacao';
+
   const ufsSaoLimitrofes = useMemo(() => {
     if (!form.uf_inicio || !form.uf_fim || form.uf_inicio === form.uf_fim) return true;
     return (FRONTEIRAS_UFS_BRASIL[form.uf_inicio] || []).includes(form.uf_fim);
@@ -209,6 +220,18 @@ export default function MdfeWizardPage() {
       }
     }
 
+    const ciotDigits = String(form.ciot_codigo || '').replace(/\D/g, '');
+    if (ciotDigits.length > 0 && ciotDigits.length !== 12) {
+      e.pagamento.push('O código CIOT (ANTT) deve conter exatamente 12 dígitos numéricos.');
+    }
+    if (
+      ambienteAtivo === 'producao' &&
+      form.data_emissao >= '2026-11-23' &&
+      (form.tipo_emitente === '1' || form.tipo_emitente === '3') &&
+      ciotDigits.length !== 12
+    ) {
+      e.pagamento.push('CIOT de 12 dígitos é obrigatório em Produção a partir de 23/11/2026 (NT 2026.001 — Rejeição 684).');
+    }
     if (form.pagto_frete.length === 0) {
       e.pagamento.push('Pagamento de frete é obrigatório (NT 2025.001) para emitir o MDF-e.');
     }
@@ -222,7 +245,7 @@ export default function MdfeWizardPage() {
     if (!form.peso_bruto) e.produtos.push('Peso bruto é obrigatório.');
 
     return e;
-  }, [form, ufsSaoLimitrofes]);
+  }, [form, ufsSaoLimitrofes, ambienteAtivo]);
 
   const totalErros = Object.values(erros).flat();
 
@@ -237,15 +260,6 @@ export default function MdfeWizardPage() {
         : [...f.ufs_percurso, uf]
     }));
   };
-
-  const emitenteSelecionado = useMemo(
-    () => emitentes.find((x: any) => String(x.id) === String(form.emitente_id)) || emitentes[0] || null,
-    [emitentes, form.emitente_id]
-  );
-  const ambienteAtivo =
-    String(emitenteSelecionado?.focus_ambiente || 'homologacao').toLowerCase() === 'producao'
-      ? 'producao'
-      : 'homologacao';
 
   const preencherDadosTesteHomologacao = () => {
     const em = emitenteSelecionado;
@@ -284,6 +298,8 @@ export default function MdfeWizardPage() {
           nome: em?.razao_social || 'CONTRATANTE HOMOLOGACAO SEFAZ'
         }
       ],
+      ciot_codigo: '202611100010',
+      ciot_responsavel_documento: cnpjEmit,
       pagto_frete: [
         {
           id: `pag-${Date.now()}`,
@@ -712,11 +728,38 @@ export default function MdfeWizardPage() {
                     </div>
                   )}
 
-                  {/* Pagamento de frete */}
-                  <fieldset className="border border-slate-200 dark:border-slate-700 rounded-xl p-4">
+                  {/* Pagamento de frete e CIOT (ANTT — NT 2026.001) */}
+                  <fieldset className="border border-slate-200 dark:border-slate-700 rounded-xl p-4 space-y-3">
                     <legend className="px-2 text-xs font-bold text-slate-500 uppercase tracking-wider">
-                      Pagamento de Frete <span className="text-red-500">*</span>
+                      CIOT (ANTT) e Pagamento de Frete <span className="text-red-500">*</span>
                     </legend>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pb-2 border-b border-slate-100 dark:border-slate-800">
+                      <CampoFiscal
+                        rotulo="Código CIOT (ANTT — 12 dígitos)"
+                        dica="Obrigatório NT 2026.001 · Rejeição 684"
+                        erro={erros.pagamento.find(err => err.includes('CIOT'))}
+                      >
+                        <InputFiscal
+                          value={form.ciot_codigo}
+                          onChange={v => setCampo('ciot_codigo', mascaras.somenteDigitos(v).slice(0, 12))}
+                          placeholder={
+                            ambienteAtivo === 'producao'
+                              ? 'Informe os 12 dígitos do CIOT (IPEF/ANTT)'
+                              : 'Ex: 202611100010 (gerado auto em homologação)'
+                          }
+                        />
+                      </CampoFiscal>
+                      <CampoFiscal
+                        rotulo="CPF/CNPJ Responsável pelo CIOT"
+                        dica="Contratante / IPEF · Rejeição 716"
+                      >
+                        <InputFiscal
+                          value={form.ciot_responsavel_documento}
+                          onChange={v => setCampo('ciot_responsavel_documento', mascaras.cpfCnpj(v))}
+                          placeholder="CNPJ ou CPF responsável pela geração do CIOT"
+                        />
+                      </CampoFiscal>
+                    </div>
                     <ListaEditavelFiscal<PagamentoFrete>
                       titulo=""
                       itens={form.pagto_frete}
