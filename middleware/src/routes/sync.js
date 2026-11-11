@@ -6,6 +6,389 @@ const db = require('../db/postgres');
 const logger = require('../config/logger');
 const { requireInternalAuth, requireAdmin, isValidUuid } = require('../middleware/auth');
 const { invalidateTenant } = require('../config/cache');
+const TransporteService = require('../services/transporteService');
+
+const IBGE_UF_BY_CODE = {
+    '11': 'RO', '12': 'AC', '13': 'AM', '14': 'RR', '15': 'PA', '16': 'AP', '17': 'TO',
+    '21': 'MA', '22': 'PI', '23': 'CE', '24': 'RN', '25': 'PB', '26': 'PE', '27': 'AL',
+    '28': 'SE', '29': 'BA', '31': 'MG', '32': 'ES', '33': 'RJ', '35': 'SP', '41': 'PR',
+    '42': 'SC', '43': 'RS', '50': 'MS', '51': 'MT', '52': 'GO', '53': 'DF'
+};
+
+function digitsOnlySync(val) {
+    return String(val ?? '').replace(/\D/g, '');
+}
+
+function normalizarDataIsoSync(val) {
+    if (!val) return null;
+    if (val instanceof Date && !isNaN(val.getTime())) {
+        return val.toISOString().slice(0, 10);
+    }
+    const str = String(val).trim();
+    const isoMatch = str.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (isoMatch) return `${isoMatch[1]}-${isoMatch[2]}-${isoMatch[3]}`;
+    const brMatch = str.match(/^(\d{2})\/(\d{2})\/(\d{4})/);
+    if (brMatch) return `${brMatch[3]}-${brMatch[2]}-${brMatch[1]}`;
+    return str || null;
+}
+
+function parseJsonSafeSync(val, fallback = {}) {
+    if (!val) return fallback;
+    if (typeof val === 'object') return val;
+    try {
+        return JSON.parse(String(val));
+    } catch (_) {
+        return fallback;
+    }
+}
+
+/**
+ * Normaliza linhas vindas do ERP / Firebird (Worker Configurator) para dash_cargas,
+ * aceitando variações de colunas do Firebird e enriquecendo via XML da NF-e quando enviado.
+ */
+function normalizarCargaErpRow(row) {
+    let parsedXml = null;
+    const rawXmlCandidate =
+        row.xml || row.xml_nfe || row.nfe_xml || row.arquivo_xml || row.conteudo_xml || row.xml_completo;
+
+    if (rawXmlCandidate && typeof rawXmlCandidate === 'string' && rawXmlCandidate.trim()) {
+        const trimmed = rawXmlCandidate.trim();
+        const xmlTexto = trimmed.includes('<')
+            ? trimmed
+            : (() => {
+                try {
+                    return Buffer.from(trimmed, 'base64').toString('utf8');
+                } catch (_) {
+                    return '';
+                }
+            })();
+        if (xmlTexto && xmlTexto.includes('infNFe')) {
+            try {
+                parsedXml = TransporteService.parseNfeXml(xmlTexto);
+            } catch (_) {
+                parsedXml = null;
+            }
+        }
+    }
+
+    const chaveDigits = digitsOnlySync(
+        row.chave_acesso ||
+        row.chave_nfe ||
+        row.chavenfe ||
+        row.chave ||
+        row.chnfe ||
+        row.chave_dfe ||
+        row.nfe_chave ||
+        parsedXml?.chave_acesso ||
+        ''
+    );
+    if (chaveDigits.length === 44) {
+        row.chave_acesso = chaveDigits;
+    } else if (row.chave_acesso) {
+        row.chave_acesso = String(row.chave_acesso).trim();
+    }
+
+    if (row.id_firebird === undefined || row.id_firebird === null || row.id_firebird === '') {
+        const candId =
+            row.id_nota ?? row.id_nfe ?? row.cod_nota ?? row.id_pedido ?? row.id_saida ?? row.codigo ?? row.id;
+        if (candId !== undefined && candId !== null && candId !== '') {
+            const parsedId = parseInt(String(candId), 10);
+            if (!Number.isNaN(parsedId)) row.id_firebird = parsedId;
+        }
+    }
+
+    const tipoDocRaw = String(row.tipo_documento || row.modelo_doc || row.modelo || 'NFE').trim().toUpperCase();
+    row.tipo_documento = tipoDocRaw === '57' || tipoDocRaw === 'CTE' ? 'CTE' : 'NFE';
+
+    const chave44 = row.chave_acesso && String(row.chave_acesso).length === 44 ? String(row.chave_acesso) : '';
+
+    if (!row.numero) {
+        const candNumero =
+            row.numero_nota ?? row.numero_nfe ?? row.num_nota ?? row.nnf ?? row.num_doc ?? row.ndoc ?? parsedXml?.numero;
+        if (candNumero !== undefined && candNumero !== null && String(candNumero).trim() !== '') {
+            row.numero = String(candNumero).trim().slice(0, 20);
+        } else if (chave44) {
+            row.numero = String(parseInt(chave44.slice(25, 34), 10));
+        }
+    }
+
+    if (!row.serie) {
+        const candSerie = row.serie_nota ?? row.serie_nfe ?? parsedXml?.serie;
+        if (candSerie !== undefined && candSerie !== null && String(candSerie).trim() !== '') {
+            row.serie = String(candSerie).trim().slice(0, 5);
+        } else if (chave44) {
+            row.serie = String(parseInt(chave44.slice(22, 25), 10));
+        }
+    }
+
+    const dataNorm = normalizarDataIsoSync(
+        row.data_emissao || row.dt_emissao || row.data_nota || row.dhemi || row.demi || row.emissao || row.data || parsedXml?.data_emissao
+    );
+    if (dataNorm) {
+        row.data_emissao = dataNorm;
+    }
+
+    const remDoc = digitsOnlySync(
+        row.remetente_documento ||
+        row.remetente_cnpj ||
+        row.remetente_cpf ||
+        row.cnpj_remetente ||
+        row.cpf_remetente ||
+        row.emitente_documento ||
+        row.emitente_cnpj ||
+        row.cnpj_emitente ||
+        parsedXml?.remetente?.documento ||
+        (chave44 ? chave44.slice(6, 20) : '')
+    );
+    if (remDoc) row.remetente_documento = remDoc.slice(0, 20);
+
+    const remNome =
+        row.remetente_nome ||
+        row.nome_remetente ||
+        row.razao_remetente ||
+        row.emitente_nome ||
+        row.emitente_razao ||
+        row.razao_emitente ||
+        parsedXml?.remetente?.razao_social;
+    if (remNome) row.remetente_nome = String(remNome).trim().slice(0, 200);
+
+    const remMun =
+        row.remetente_municipio ||
+        row.municipio_remetente ||
+        row.cidade_remetente ||
+        row.emitente_municipio ||
+        row.emitente_cidade ||
+        row.cidade_origem ||
+        row.mun_origem ||
+        parsedXml?.remetente?.municipio;
+    if (remMun) row.remetente_municipio = String(remMun).trim().slice(0, 100);
+
+    const remUf =
+        row.remetente_uf ||
+        row.uf_remetente ||
+        row.emitente_uf ||
+        row.uf_origem ||
+        parsedXml?.remetente?.uf ||
+        (chave44 ? IBGE_UF_BY_CODE[chave44.slice(0, 2)] : '');
+    if (remUf) row.remetente_uf = String(remUf).trim().toUpperCase().slice(0, 2);
+
+    const destDoc = digitsOnlySync(
+        row.destinatario_documento ||
+        row.destinatario_cnpj ||
+        row.destinatario_cpf ||
+        row.cnpj_destinatario ||
+        row.cpf_destinatario ||
+        row.cliente_documento ||
+        row.cliente_cnpj ||
+        row.cliente_cpf ||
+        row.cpf_cnpj ||
+        row.cnpj_cpf ||
+        parsedXml?.destinatario?.documento ||
+        ''
+    );
+    if (destDoc) row.destinatario_documento = destDoc.slice(0, 20);
+
+    const destNome =
+        row.destinatario_nome ||
+        row.nome_destinatario ||
+        row.razao_destinatario ||
+        row.cliente_nome ||
+        row.nome_cliente ||
+        row.razao_cliente ||
+        parsedXml?.destinatario?.razao_social;
+    if (destNome) row.destinatario_nome = String(destNome).trim().slice(0, 200);
+
+    const destMun =
+        row.destinatario_municipio ||
+        row.municipio_destinatario ||
+        row.cidade_destinatario ||
+        row.cliente_cidade ||
+        row.cidade_destino ||
+        row.mun_destino ||
+        parsedXml?.destinatario?.municipio;
+    if (destMun) row.destinatario_municipio = String(destMun).trim().slice(0, 100);
+
+    const destUf =
+        row.destinatario_uf ||
+        row.uf_destinatario ||
+        row.cliente_uf ||
+        row.uf_destino ||
+        parsedXml?.destinatario?.uf;
+    if (destUf) row.destinatario_uf = String(destUf).trim().toUpperCase().slice(0, 2);
+
+    const vTotal =
+        row.valor_total ?? row.vnf ?? row.valor_nota ?? row.valor_nfe ?? row.vlr_total ?? row.valor ?? parsedXml?.valor_total;
+    if (vTotal !== undefined && vTotal !== null && vTotal !== '') {
+        row.valor_total = parseFloat(vTotal) || 0;
+    }
+
+    const vProd = row.valor_produtos ?? row.vprod ?? row.vlr_produtos ?? parsedXml?.valor_produtos ?? row.valor_total;
+    if (vProd !== undefined && vProd !== null && vProd !== '') {
+        row.valor_produtos = parseFloat(vProd) || 0;
+    }
+
+    const pBruto =
+        row.peso_bruto ?? row.pesob ?? row.peso_kg ?? row.peso_total ?? row.peso ?? parsedXml?.peso_bruto;
+    if (pBruto !== undefined && pBruto !== null && pBruto !== '') {
+        row.peso_bruto = parseFloat(pBruto) || 0;
+    }
+
+    const pLiquido = row.peso_liquido ?? row.pesol ?? parsedXml?.peso_liquido;
+    if (pLiquido !== undefined && pLiquido !== null && pLiquido !== '') {
+        row.peso_liquido = parseFloat(pLiquido) || 0;
+    }
+
+    const vM3 = row.volume_m3 ?? row.cubagem ?? row.m3;
+    if (vM3 !== undefined && vM3 !== null && vM3 !== '') {
+        row.volume_m3 = parseFloat(vM3) || 0;
+    }
+
+    const vols = row.volumes ?? row.qvol ?? row.qtd_volumes ?? row.quantidade_volumes ?? parsedXml?.volumes;
+    if (vols !== undefined && vols !== null && vols !== '') {
+        row.volumes = Math.max(1, parseInt(String(vols), 10) || 1);
+    }
+
+    const esp = row.especie || row.esp || parsedXml?.especie;
+    if (esp) row.especie = String(esp).trim().slice(0, 60);
+
+    const prodPred =
+        row.produto_predominante || row.xprod || row.descricao_produto || row.produto || parsedXml?.produto_predominante;
+    if (prodPred) row.produto_predominante = String(prodPred).trim().slice(0, 200);
+
+    const sitRaw = String(row.status || row.situacao || row.situacao_nfe || '').trim().toUpperCase();
+    const canceladaFlag = String(row.cancelada ?? '').trim().toUpperCase();
+    if (
+        ['CANCELADA', 'CANCELADO', 'DENEGADA', 'DENEGADO', 'INUTILIZADA', 'C'].includes(sitRaw) ||
+        ['S', 'SIM', '1', 'TRUE'].includes(canceladaFlag)
+    ) {
+        row.status = 'CANCELADA';
+    } else {
+        row.status = 'PENDENTE';
+    }
+
+    const dadosExistentes = parseJsonSafeSync(row.dados_nfe, {});
+    const remCodIbge = digitsOnlySync(
+        row.remetente_codigo_municipio ||
+        row.cod_ibge_remetente ||
+        row.cmun_emit ||
+        row.codigo_municipio_origem ||
+        dadosExistentes?.remetente?.codigo_municipio ||
+        parsedXml?.remetente?.codigo_municipio
+    );
+    const destCodIbge = digitsOnlySync(
+        row.destinatario_codigo_municipio ||
+        row.cod_ibge_destinatario ||
+        row.cmun_dest ||
+        row.codigo_municipio_destino ||
+        dadosExistentes?.destinatario?.codigo_municipio ||
+        parsedXml?.destinatario?.codigo_municipio
+    );
+
+    const remetenteJson = {
+        ...(parsedXml?.remetente || {}),
+        ...(dadosExistentes?.remetente || {}),
+        ...(row.remetente_documento ? { documento: row.remetente_documento } : {}),
+        ...(row.remetente_nome ? { razao_social: row.remetente_nome } : {}),
+        ...(row.remetente_ie || row.ie_remetente ? { inscricao_estadual: String(row.remetente_ie || row.ie_remetente).trim() } : {}),
+        ...(row.remetente_endereco || row.logradouro_remetente ? { logradouro: String(row.remetente_endereco || row.logradouro_remetente).trim() } : {}),
+        ...(row.remetente_numero ? { numero: String(row.remetente_numero).trim() } : {}),
+        ...(row.remetente_bairro ? { bairro: String(row.remetente_bairro).trim() } : {}),
+        ...(row.remetente_cep ? { cep: digitsOnlySync(row.remetente_cep) } : {}),
+        ...(remCodIbge ? { codigo_municipio: remCodIbge } : {}),
+        ...(row.remetente_municipio ? { municipio: row.remetente_municipio } : {}),
+        ...(row.remetente_uf ? { uf: row.remetente_uf } : {})
+    };
+
+    const destinatarioJson = {
+        ...(parsedXml?.destinatario || {}),
+        ...(dadosExistentes?.destinatario || {}),
+        ...(row.destinatario_documento ? { documento: row.destinatario_documento } : {}),
+        ...(row.destinatario_nome ? { razao_social: row.destinatario_nome } : {}),
+        ...(row.destinatario_ie || row.ie_destinatario ? { inscricao_estadual: String(row.destinatario_ie || row.ie_destinatario).trim() } : {}),
+        ...(row.destinatario_endereco || row.logradouro_destinatario || row.cliente_endereco
+            ? { logradouro: String(row.destinatario_endereco || row.logradouro_destinatario || row.cliente_endereco).trim() }
+            : {}),
+        ...(row.destinatario_numero ? { numero: String(row.destinatario_numero).trim() } : {}),
+        ...(row.destinatario_bairro ? { bairro: String(row.destinatario_bairro).trim() } : {}),
+        ...(row.destinatario_cep || row.cliente_cep ? { cep: digitsOnlySync(row.destinatario_cep || row.cliente_cep) } : {}),
+        ...(destCodIbge ? { codigo_municipio: destCodIbge } : {}),
+        ...(row.destinatario_municipio ? { municipio: row.destinatario_municipio } : {}),
+        ...(row.destinatario_uf ? { uf: row.destinatario_uf } : {}),
+        ...(row.destinatario_telefone || row.cliente_telefone ? { telefone: digitsOnlySync(row.destinatario_telefone || row.cliente_telefone) } : {}),
+        ...(row.destinatario_email || row.cliente_email ? { email: String(row.destinatario_email || row.cliente_email).trim() } : {})
+    };
+
+    const itensLista = Array.isArray(row.itens)
+        ? row.itens
+        : Array.isArray(dadosExistentes?.itens)
+        ? dadosExistentes.itens
+        : Array.isArray(parsedXml?.itens)
+        ? parsedXml.itens
+        : [];
+
+    row.dados_nfe = {
+        ...dadosExistentes,
+        origem: dadosExistentes.origem || 'WORKER_ERP',
+        ...(row.cfop ? { cfop: digitsOnlySync(row.cfop) } : {}),
+        ...(row.natureza_operacao || row.natureza || parsedXml?.natureza
+            ? { natureza: String(row.natureza_operacao || row.natureza || parsedXml?.natureza).trim() }
+            : {}),
+        ...(parsedXml?.protocolo || row.protocolo ? { protocolo: String(row.protocolo || parsedXml?.protocolo).trim() } : {}),
+        ...(Object.keys(remetenteJson).length > 0 ? { remetente: remetenteJson } : {}),
+        ...(Object.keys(destinatarioJson).length > 0 ? { destinatario: destinatarioJson } : {}),
+        ...(itensLista.length > 0 ? { itens: itensLista } : {})
+    };
+
+    return row;
+}
+
+function normalizarVeiculoErpRow(row) {
+    const placaLimpa = String(row.placa || row.placa_veiculo || row.veiculo_placa || '')
+        .replace(/[^a-zA-Z0-9]/g, '')
+        .toUpperCase()
+        .slice(0, 8);
+    if (placaLimpa) row.placa = placaLimpa;
+    if (!row.id_firebird && (row.id_veiculo || row.cod_veiculo || row.codigo || row.id)) {
+        const parsed = parseInt(String(row.id_veiculo || row.cod_veiculo || row.codigo || row.id), 10);
+        if (!Number.isNaN(parsed)) row.id_firebird = parsed;
+    }
+    if (row.tara_kg === undefined && row.tara !== undefined) row.tara_kg = parseInt(String(row.tara), 10) || 0;
+    if (row.capacidade_kg === undefined && row.capacidade !== undefined) row.capacidade_kg = parseInt(String(row.capacidade), 10) || 0;
+    if (row.capacidade_m3 === undefined && row.cubagem !== undefined) row.capacidade_m3 = parseFloat(row.cubagem) || 0;
+    if (!row.cpf_cnpj_proprietario && (row.doc_proprietario || row.cnpj_proprietario || row.cpf_proprietario)) {
+        row.cpf_cnpj_proprietario = digitsOnlySync(row.doc_proprietario || row.cnpj_proprietario || row.cpf_proprietario).slice(0, 20);
+    }
+    if (row.uf) row.uf = String(row.uf).trim().toUpperCase().slice(0, 2);
+    if (row.uf_proprietario) row.uf_proprietario = String(row.uf_proprietario).trim().toUpperCase().slice(0, 2);
+    if (row.rntrc) row.rntrc = digitsOnlySync(row.rntrc).slice(0, 20);
+    if (row.renavam) row.renavam = digitsOnlySync(row.renavam).slice(0, 20);
+    return row;
+}
+
+function normalizarMotoristaErpRow(row) {
+    const cpfLimpo = digitsOnlySync(row.cpf || row.cpf_motorista || row.documento || row.cpf_cnpj || '');
+    if (cpfLimpo) row.cpf = cpfLimpo.slice(0, 14);
+    if (!row.id_firebird && (row.id_motorista || row.cod_motorista || row.codigo || row.id)) {
+        const parsed = parseInt(String(row.id_motorista || row.cod_motorista || row.codigo || row.id), 10);
+        if (!Number.isNaN(parsed)) row.id_firebird = parsed;
+    }
+    if (!row.nome && (row.nome_motorista || row.motorista)) {
+        row.nome = String(row.nome_motorista || row.motorista).trim().slice(0, 200);
+    }
+    if (!row.cnh && (row.numero_cnh || row.registro_cnh)) {
+        row.cnh = digitsOnlySync(row.numero_cnh || row.registro_cnh).slice(0, 20);
+    }
+    if (!row.cnh_categoria && (row.categoria_cnh || row.cat_cnh)) {
+        row.cnh_categoria = String(row.categoria_cnh || row.cat_cnh).trim().toUpperCase().slice(0, 5);
+    }
+    if (!row.cnh_validade && (row.validade_cnh || row.venc_cnh)) {
+        row.cnh_validade = normalizarDataIsoSync(row.validade_cnh || row.venc_cnh);
+    }
+    if (!row.telefone && (row.celular || row.fone || row.whatsapp)) {
+        row.telefone = digitsOnlySync(row.celular || row.fone || row.whatsapp).slice(0, 30);
+    }
+    return row;
+}
 
 const MASTER_TENANT_ID = '00000000-0000-0000-0000-000000000000';
 
@@ -66,8 +449,8 @@ const TABELAS_MAP = {
     'adm_ocorrencias_itens': ['id_firebird', 'ocorrencia_id_firebird', 'descricao', 'quantidade', 'valor_unitario', 'valor_total'],
     'rel_ic_contas_plano_res': ['id_firebird', 'codigo', 'descricao', 'tipo', 'nivel', 'conta_pai_id_firebird', 'ativo'],
     'dash_estatisticas_software': ['cliente_id_firebird', 'versao_software', 'versao_atualizacao', 'servidor', 'certificado_vencimento', 'usa_nfe', 'usa_nfce', 'usa_nfse', 'usa_sped', 'usa_boleto', 'usa_folha', 'usa_whats', 'usa_pix', 'usa_cobranca', 'usa_pontuacao', 'usa_os', 'usa_cte', 'usa_mdfe', 'usa_sales', 'usa_dash', 'usa_coletor', 'softwares'],
-    // Módulo Coliseu Transporte (Sincronizado pelo Worker do ERP)
-    'dash_cargas': ['id_firebird', 'tipo_documento', 'chave_acesso', 'numero', 'serie', 'data_emissao', 'remetente_documento', 'remetente_nome', 'remetente_municipio', 'remetente_uf', 'destinatario_documento', 'destinatario_nome', 'destinatario_municipio', 'destinatario_uf', 'valor_total', 'valor_produtos', 'peso_bruto', 'peso_liquido', 'volume_m3', 'volumes', 'especie', 'produto_predominante', 'dados_nfe'],
+    // Módulo Coliseu Transporte (Sincronizado pelo Worker do ERP — isolado dos demais módulos)
+    'dash_cargas': ['id_firebird', 'tipo_documento', 'chave_acesso', 'numero', 'serie', 'data_emissao', 'remetente_documento', 'remetente_nome', 'remetente_municipio', 'remetente_uf', 'destinatario_documento', 'destinatario_nome', 'destinatario_municipio', 'destinatario_uf', 'valor_total', 'valor_produtos', 'peso_bruto', 'peso_liquido', 'volume_m3', 'volumes', 'especie', 'produto_predominante', 'status', 'dados_nfe'],
     'dash_veiculos': ['id_firebird', 'placa', 'renavam', 'chassi', 'uf', 'tipo_rodado', 'tipo_carroceria', 'tara_kg', 'capacidade_kg', 'capacidade_m3', 'tipo_proprietario', 'rntrc', 'cpf_cnpj_proprietario', 'nome_proprietario', 'uf_proprietario'],
     'dash_motoristas': ['id_firebird', 'cpf', 'nome', 'cnh', 'cnh_categoria', 'cnh_validade', 'telefone'],
 };
@@ -189,8 +572,17 @@ const ALIAS_MAP = {
     'estatisticas-software': 'dash_estatisticas_software',
     'cargas':                 'dash_cargas',
     'notas':                  'dash_cargas',
+    'nfes':                   'dash_cargas',
+    'nfe':                    'dash_cargas',
+    'notas-fiscais':          'dash_cargas',
+    'notas_fiscais':          'dash_cargas',
+    'transporte-cargas':      'dash_cargas',
     'veiculos':               'dash_veiculos',
+    'frota':                  'dash_veiculos',
+    'transporte-veiculos':    'dash_veiculos',
     'motoristas':             'dash_motoristas',
+    'condutores':             'dash_motoristas',
+    'transporte-motoristas':  'dash_motoristas',
 };
 
 router.post('/adm-ocorrencias', requireInternalAuth, (req, res, next) => {
@@ -856,8 +1248,8 @@ router.get('/clientes-diag', requireAdmin, async (req, res) => {
  * Header obriga: X-Internal-Key e X-Tenant-Id
  */
 router.post('/:tabela', async (req, res) => {
-    // Resolve alias (ex: 'customers' -> 'dash_clientes')
-    const rawTabela = req.params.tabela;
+    // Resolve alias (ex: 'cargas'/'notas' -> 'dash_cargas', 'customers' -> 'dash_clientes')
+    const rawTabela = String(req.params.tabela || '').trim().toLowerCase();
     const tabela = ALIAS_MAP[rawTabela] || rawTabela;
 
     const body = req.body || [];
@@ -955,9 +1347,19 @@ router.post('/:tabela', async (req, res) => {
                     row[key.toLowerCase()] = rawRow[key];
                 }
 
-                // Normalização prévia de chaves primárias para tabelas com nomes de coluna específicos
+                // Normalização prévia de chaves primárias e aliases para tabelas com nomes específicos do Firebird
                 if (tabela === 'dash_estatisticas_software' && !row.cliente_id_firebird) {
                     row.cliente_id_firebird = row.id_firebird || row.cod_cliente || row.cliente_id || row.id_cliente || row.codcliente || row.id;
+                } else if (tabela === 'dash_cargas') {
+                    normalizarCargaErpRow(row);
+                    if (!row.chave_acesso || String(row.chave_acesso).replace(/\D/g, '').length !== 44) {
+                        errors.push('Row sem chave_acesso de 44 dígitos válida: NF-e ignorada');
+                        continue;
+                    }
+                } else if (tabela === 'dash_veiculos') {
+                    normalizarVeiculoErpRow(row);
+                } else if (tabela === 'dash_motoristas') {
+                    normalizarMotoristaErpRow(row);
                 }
 
                 // Guarda: valida chave primária obrigatória
@@ -1264,6 +1666,30 @@ router.post('/:tabela', async (req, res) => {
                             return `${c} = EXCLUDED.${c}`;
                         })
                         .join(', ');
+                } else if (tabela === 'dash_cargas') {
+                    updateSet = usedCols
+                        .filter(c => c !== conflictKey)
+                        .map(c => {
+                            if (c === 'status') {
+                                return `status = CASE
+                                    WHEN EXCLUDED.status = 'CANCELADA' THEN 'CANCELADA'
+                                    WHEN dash_cargas.status IN ('EM_CTE', 'EM_MDFE', 'DESPACHADA', 'CANCELADA') THEN dash_cargas.status
+                                    ELSE COALESCE(EXCLUDED.status, dash_cargas.status, 'PENDENTE')
+                                END`;
+                            }
+                            if (c === 'dados_nfe') {
+                                return `dados_nfe = COALESCE(dash_cargas.dados_nfe, '{}'::jsonb) || COALESCE(EXCLUDED.dados_nfe, '{}'::jsonb)`;
+                            }
+                            if ([
+                                'remetente_documento', 'remetente_nome', 'remetente_municipio', 'remetente_uf',
+                                'destinatario_documento', 'destinatario_nome', 'destinatario_municipio', 'destinatario_uf',
+                                'produto_predominante', 'especie'
+                            ].includes(c)) {
+                                return `${c} = COALESCE(EXCLUDED.${c}, dash_cargas.${c})`;
+                            }
+                            return `${c} = EXCLUDED.${c}`;
+                        })
+                        .join(', ');
                 } else {
                     updateSet = usedCols
                         .filter(c => c !== conflictKey)
@@ -1285,6 +1711,50 @@ router.post('/:tabela', async (req, res) => {
                 await client.query(`SAVEPOINT row_save`);
                 try {
                     await client.query(sql, insertValues);
+                    if (tabela === 'dash_cargas') {
+                        const partesSync = [
+                            row.dados_nfe?.remetente,
+                            row.dados_nfe?.destinatario
+                        ].filter(p => p && p.documento && p.razao_social);
+                        for (const p of partesSync) {
+                            await client.query(`SAVEPOINT parte_save`);
+                            await client.query(
+                                `INSERT INTO dash_partes (
+                                    tenant_id, tipo_pessoa, documento, razao_social, inscricao_estadual,
+                                    logradouro, numero, bairro, codigo_municipio, municipio, uf, cep, telefone, email
+                                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+                                ON CONFLICT (tenant_id, documento) DO UPDATE SET
+                                    razao_social = COALESCE(EXCLUDED.razao_social, dash_partes.razao_social),
+                                    inscricao_estadual = COALESCE(NULLIF(EXCLUDED.inscricao_estadual, ''), dash_partes.inscricao_estadual),
+                                    logradouro = COALESCE(NULLIF(EXCLUDED.logradouro, ''), dash_partes.logradouro),
+                                    numero = COALESCE(NULLIF(EXCLUDED.numero, ''), dash_partes.numero),
+                                    bairro = COALESCE(NULLIF(EXCLUDED.bairro, ''), dash_partes.bairro),
+                                    codigo_municipio = COALESCE(NULLIF(EXCLUDED.codigo_municipio, ''), dash_partes.codigo_municipio),
+                                    municipio = COALESCE(NULLIF(EXCLUDED.municipio, ''), dash_partes.municipio),
+                                    uf = COALESCE(NULLIF(EXCLUDED.uf, ''), dash_partes.uf),
+                                    cep = COALESCE(NULLIF(EXCLUDED.cep, ''), dash_partes.cep),
+                                    updated_at = NOW()`,
+                                [
+                                    tenantId,
+                                    String(p.documento).length === 11 ? 'PF' : 'PJ',
+                                    String(p.documento).slice(0, 14),
+                                    String(p.razao_social).slice(0, 200),
+                                    p.inscricao_estadual || null,
+                                    p.logradouro || null,
+                                    p.numero || null,
+                                    p.bairro || null,
+                                    p.codigo_municipio || null,
+                                    p.municipio || null,
+                                    p.uf || null,
+                                    p.cep || null,
+                                    p.telefone || null,
+                                    p.email || null
+                                ]
+                            )
+                                .then(() => client.query(`RELEASE SAVEPOINT parte_save`))
+                                .catch(() => client.query(`ROLLBACK TO SAVEPOINT parte_save`));
+                        }
+                    }
                     await client.query(`RELEASE SAVEPOINT row_save`);
                     inserted++;
                 } catch (rowErr) {
@@ -1350,5 +1820,11 @@ router.post('/:tabela', async (req, res) => {
         detalhes: errors.slice(0, 5)
     });
 });
+
+router.normalizarCargaErpRow = normalizarCargaErpRow;
+router.normalizarVeiculoErpRow = normalizarVeiculoErpRow;
+router.normalizarMotoristaErpRow = normalizarMotoristaErpRow;
+router.ALIAS_MAP = ALIAS_MAP;
+router.TABELAS_MAP = TABELAS_MAP;
 
 module.exports = router;

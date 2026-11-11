@@ -3163,8 +3163,9 @@ class TransporteService {
           g.conhecimentos_transporte.push({ chave_cte: chaveLimpa });
         }
       } else {
-        if (!g.notas_fiscais.some((x) => x.chave_nfe === chaveLimpa)) {
-          g.notas_fiscais.push({ chave_nfe: chaveLimpa });
+        const chaveNfeAmb = normalizarChaveDfeParaAmbiente(chaveLimpa, client.ambiente);
+        if (!g.notas_fiscais.some((x) => x.chave_nfe === chaveNfeAmb)) {
+          g.notas_fiscais.push({ chave_nfe: chaveNfeAmb });
         }
       }
     }
@@ -3183,7 +3184,10 @@ class TransporteService {
         }
         if (Array.isArray(m.notas_fiscais)) {
           for (const nf of m.notas_fiscais) {
-            const ch = digitsOnly(nf?.chave_nfe || nf);
+            const ch = normalizarChaveDfeParaAmbiente(
+              digitsOnly(nf?.chave_nfe || nf),
+              client.ambiente
+            );
             if (ch.length === 44 && !g.notas_fiscais.some((x) => x.chave_nfe === ch)) {
               g.notas_fiscais.push({ chave_nfe: ch });
             }
@@ -3582,7 +3586,17 @@ class TransporteService {
       }
     }
 
-    if (pagamentosPayload.length === 0 && (isCargaLotacao || tipoEmitenteFinal === '1')) {
+    const docPropPreCheck = digitsOnly(mdfe.v_doc_prop || '');
+    const isVeiculoTerceiroPreCheck =
+      String(mdfe.v_tipo_proprietario) === '2' &&
+      (docPropPreCheck.length === 11 || docPropPreCheck.length === 14) &&
+      docPropPreCheck !== digitsOnly(emitente.cnpj);
+    const pagtoFreteObrigatorio =
+      tipoEmitenteFinal === '1' ||
+      tipoEmitenteFinal === '3' ||
+      (tipoEmitenteFinal === '2' && isVeiculoTerceiroPreCheck);
+
+    if (pagamentosPayload.length === 0 && pagtoFreteObrigatorio) {
       const vContratoStr = valorFretePadrao.toFixed(2);
       pagamentosPayload.push({
         nome: nomePagadorFallback.length >= 2 ? nomePagadorFallback : 'CONTRATANTE DO TRANSPORTE',

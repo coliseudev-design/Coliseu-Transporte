@@ -1257,6 +1257,15 @@ router.post('/mdfes', async (req, res) => {
         const emitId = await resolverEmitentePadraoId(tenantId, b.emitente_id);
         const ctesIds = Array.isArray(b.ctes_ids) ? b.ctes_ids : [];
         const cargasIds = Array.isArray(b.cargas_ids) ? b.cargas_ids : [];
+        const chavesNfeManuais = Array.isArray(b.chaves_nfe)
+            ? Array.from(
+                  new Set(
+                      b.chaves_nfe
+                          .map((ch) => String(ch || '').replace(/\D/g, ''))
+                          .filter((ch) => ch.length === 44)
+                  )
+              )
+            : [];
         const veiculoId = b.veiculo_id || b.veiculo_tracao_id || null;
         const motoristaId = b.motorista_id || null;
 
@@ -1328,7 +1337,34 @@ router.post('/mdfes', async (req, res) => {
             }
         }
 
-        const tipoEmitenteFinal = String(b.tipo_emitente || (cargasIds.length > 0 && ctesIds.length === 0 ? '2' : '1'));
+        if ((!codMunDesc || !nomeMunDesc || !ufFimResolvida) && cargasIds.length > 0) {
+            const cgFirst = await db.query(
+                `SELECT destinatario_municipio, destinatario_uf, dados_nfe
+                 FROM dash_cargas WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
+                [cargasIds[0], tenantId]
+            );
+            if (cgFirst.rows[0]) {
+                const dNfe = cgFirst.rows[0].dados_nfe || {};
+                codMunDesc =
+                    codMunDesc ||
+                    dNfe?.destinatario?.codigo_municipio ||
+                    dNfe?.destinatario?.cMun ||
+                    null;
+                nomeMunDesc =
+                    nomeMunDesc ||
+                    cgFirst.rows[0].destinatario_municipio ||
+                    dNfe?.destinatario?.municipio ||
+                    null;
+                ufFimResolvida =
+                    ufFimResolvida ||
+                    String(cgFirst.rows[0].destinatario_uf || dNfe?.destinatario?.uf || 'MS').toUpperCase();
+            }
+        }
+
+        const tipoEmitenteFinal = String(
+            b.tipo_emitente ||
+                ((cargasIds.length > 0 || chavesNfeManuais.length > 0) && ctesIds.length === 0 ? '2' : '1')
+        );
         const ref = TransporteService.gerarRef('MDFE', tenantId, Date.now().toString().slice(-6));
 
         const { rows } = await db.query(
@@ -1397,7 +1433,7 @@ router.post('/mdfes', async (req, res) => {
                 JSON.stringify(Array.isArray(b.ciots) ? b.ciots : []),
                 JSON.stringify(b.vale_pedagio || {}),
                 ctesIds.length,
-                cargasIds.length,
+                cargasIds.length + chavesNfeManuais.length,
                 parseFloat(b.valor_carga ?? b.valor_total_carga ?? 0),
                 parseFloat(b.peso_bruto ?? b.peso_bruto_kg ?? 0),
             ]
@@ -1440,6 +1476,15 @@ router.post('/mdfes', async (req, res) => {
                     [novoMdfe.id, cargaId]
                 );
             }
+        }
+
+        for (const chaveNfeManual of chavesNfeManuais) {
+            await db.query(
+                `INSERT INTO dash_mdfe_documentos (tenant_id, mdfe_id, tipo_documento, chave, codigo_municipio_descarregamento, nome_municipio_descarregamento)
+                 VALUES ($1, $2, 'NFE', $3, $4, $5)
+                 ON CONFLICT (tenant_id, mdfe_id, chave) DO NOTHING`,
+                [tenantId, novoMdfe.id, chaveNfeManual, codMunDesc, nomeMunDesc]
+            );
         }
 
         return res.status(201).json({ success: true, data: novoMdfe });

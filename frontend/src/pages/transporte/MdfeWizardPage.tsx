@@ -93,6 +93,7 @@ export default function MdfeWizardPage() {
   const [salvando, setSalvando] = useState(false);
   const [erroSalvar, setErroSalvar] = useState('');
   const [mdfeId, setMdfeId] = useState<number | null>(null);
+  const [novaChaveNfe, setNovaChaveNfe] = useState('');
 
   const [form, setForm] = useState({
     emitente_id: '',
@@ -113,8 +114,10 @@ export default function MdfeWizardPage() {
     ciot_codigo: '',
     ciot_responsavel_documento: '',
     pagto_frete: [] as PagamentoFrete[],
-    // Documentos
+    // Documentos (CT-e para tpEmit 1/3 | NF-e do ERP ou chave manual para tpEmit 2 Carga Própria)
     ctes_ids: [] as number[],
+    cargas_ids: [] as number[],
+    chaves_nfe: [] as string[],
     // Seguro
     seguros: [] as Seguro[],
     // Produtos
@@ -148,6 +151,15 @@ export default function MdfeWizardPage() {
   });
   const ctes = ctesData?.data || [];
 
+  const { data: cargasData } = useQuery({
+    queryKey: ['cargas-mdfe'],
+    queryFn: async () => (await api.get('/transporte/cargas', { params: { limit: 200 } })).data
+  });
+  const cargas = useMemo(
+    () => (cargasData?.data || []).filter((c: any) => c.status !== 'CANCELADA'),
+    [cargasData]
+  );
+
   const { data: municipiosData } = useQuery({
     queryKey: ['municipios-mdfe'],
     queryFn: async () => (await api.get('/transporte/municipios')).data
@@ -170,6 +182,7 @@ export default function MdfeWizardPage() {
   }, [emitentes.length]);
 
   // ── Checklist de prontidão (pré-requisitos) ──
+  const isCargaPropria = form.tipo_emitente === '2';
   const checklist = useMemo(() => [
     {
       ok: veiculos.length > 0 || Boolean(form.veiculo_placa),
@@ -181,9 +194,17 @@ export default function MdfeWizardPage() {
       rotulo: 'Motorista condutor',
       detalhe: form.condutores[0]?.nome || `${motoristas.length} condutor(es)`
     },
-    { ok: emitentes.some((e: any) => e.rntrc), rotulo: 'RNTRC configurado', detalhe: 'Exigido no MDF-e rodoviário' },
-    { ok: ctes.length > 0, rotulo: 'CT-es autorizados', detalhe: `${ctes.length} disponível(is)` }
-  ], [veiculos, motoristas, emitentes, ctes, form.veiculo_placa, form.condutores]);
+    isCargaPropria
+      ? { ok: true, rotulo: 'Operação Carga Própria', detalhe: 'Transporte próprio sem CT-e' }
+      : { ok: emitentes.some((e: any) => e.rntrc), rotulo: 'RNTRC configurado', detalhe: 'Exigido no MDF-e rodoviário' },
+    isCargaPropria
+      ? {
+          ok: cargas.length > 0 || form.cargas_ids.length > 0 || form.chaves_nfe.length > 0,
+          rotulo: 'NF-es para vincular',
+          detalhe: `${cargas.length} NF-e(s) no ERP`
+        }
+      : { ok: ctes.length > 0, rotulo: 'CT-es autorizados', detalhe: `${ctes.length} disponível(is)` }
+  ], [veiculos, motoristas, emitentes, ctes, cargas, isCargaPropria, form.veiculo_placa, form.condutores, form.cargas_ids.length, form.chaves_nfe.length]);
 
   const bloqueios = checklist.filter(c => !c.ok);
 
@@ -232,10 +253,16 @@ export default function MdfeWizardPage() {
     ) {
       e.pagamento.push('CIOT de 12 dígitos é obrigatório em Produção a partir de 23/11/2026 (NT 2026.001 — Rejeição 684).');
     }
-    if (form.pagto_frete.length === 0) {
+    if (form.tipo_emitente !== '2' && form.pagto_frete.length === 0) {
       e.pagamento.push('Pagamento de frete é obrigatório (NT 2025.001) para emitir o MDF-e.');
     }
-    if (form.ctes_ids.length === 0) e.documentos.push('Vincule ao menos um CT-e ao manifesto.');
+    if (form.tipo_emitente === '2') {
+      if (form.cargas_ids.length === 0 && form.chaves_nfe.length === 0) {
+        e.documentos.push('Vincule ao menos uma NF-e do ERP (ou chave de 44 dígitos) ao manifesto de Carga Própria.');
+      }
+    } else if (form.ctes_ids.length === 0) {
+      e.documentos.push('Vincule ao menos um CT-e ao manifesto.');
+    }
     if (form.produtos_predominantes.length === 0) {
       e.produtos.push('Informe ao menos um produto predominante com NCM.');
     } else if (form.produtos_predominantes.some(p => !p.ncm || p.ncm.length < 2)) {
@@ -336,6 +363,20 @@ export default function MdfeWizardPage() {
     }));
   };
 
+  const adicionarChaveNfeManual = () => {
+    const digits = novaChaveNfe.replace(/\D/g, '').slice(0, 44);
+    if (digits.length !== 44) {
+      alert('Informe uma chave de acesso de NF-e válida com 44 dígitos numéricos.');
+      return;
+    }
+    if (form.chaves_nfe.includes(digits)) {
+      alert('Esta chave de NF-e já foi adicionada ao manifesto.');
+      return;
+    }
+    setForm(f => ({ ...f, chaves_nfe: [...f.chaves_nfe, digits] }));
+    setNovaChaveNfe('');
+  };
+
   const salvar = async (transmitir: boolean) => {
     setSalvando(true);
     setErroSalvar('');
@@ -343,6 +384,9 @@ export default function MdfeWizardPage() {
       const payload = {
         ...form,
         emitente_id: form.emitente_id ? Number(form.emitente_id) : undefined,
+        ctes_ids: form.tipo_emitente === '2' ? [] : form.ctes_ids,
+        cargas_ids: form.tipo_emitente === '2' ? form.cargas_ids : [],
+        chaves_nfe: form.tipo_emitente === '2' ? form.chaves_nfe : [],
         valor_carga: parseFloat(form.valor_total_carga || '0') || 0,
         peso_bruto: parseFloat(form.peso_bruto || '0') || 0
       };
@@ -509,10 +553,18 @@ export default function MdfeWizardPage() {
                   <CampoFiscal rotulo="Operação Comercial" dica="Modelo do manifesto">
                     <SelectFiscal
                       value={form.tipo_emitente}
-                      onChange={v => setCampo('tipo_emitente', v)}
+                      onChange={v =>
+                        setForm(f => ({
+                          ...f,
+                          tipo_emitente: v,
+                          ctes_ids: v === '2' ? [] : f.ctes_ids,
+                          cargas_ids: v === '2' ? f.cargas_ids : [],
+                          chaves_nfe: v === '2' ? f.chaves_nfe : []
+                        }))
+                      }
                       opcoes={[
                         { valor: '1', rotulo: '1 — Prestador de Serviço de Transporte' },
-                        { valor: '2', rotulo: '2 — Carga Própria' },
+                        { valor: '2', rotulo: '2 — Carga Própria (NF-e Direta)' },
                         { valor: '3', rotulo: '3 — CT-e Globalizado' }
                       ]}
                     />
@@ -801,71 +853,224 @@ export default function MdfeWizardPage() {
                   </fieldset>
 
                   {/* Documentos Referenciados */}
-                  <fieldset className="border border-slate-200 dark:border-slate-700 rounded-xl p-4">
+                  <fieldset className="border border-slate-200 dark:border-slate-700 rounded-xl p-4 space-y-3">
                     <legend className="px-2 text-xs font-bold text-slate-500 uppercase tracking-wider">
-                      Documentos Ref. <span className="text-red-500">*</span>
+                      {isCargaPropria
+                        ? 'Notas Fiscais Vinculadas (NF-e — Carga Própria)'
+                        : 'Documentos Ref. (CT-e)'}{' '}
+                      <span className="text-red-500">*</span>
                     </legend>
-                    <div className="max-h-52 overflow-y-auto rounded-lg border border-slate-200 dark:border-slate-700">
-                      <table className="w-full text-left text-[11px]">
-                        <thead className="bg-slate-100 dark:bg-slate-900 text-slate-500 uppercase text-[10px] sticky top-0">
-                          <tr>
-                            <th className="px-2.5 py-2 font-bold">Nº</th>
-                            <th className="px-2.5 py-2 font-bold">Modelo</th>
-                            <th className="px-2.5 py-2 font-bold">Série</th>
-                            <th className="px-2.5 py-2 font-bold">Chave</th>
-                            <th className="px-2.5 py-2 font-bold">Valor</th>
-                            <th className="px-2.5 py-2 font-bold">Destinatário</th>
-                            <th className="px-2.5 py-2 font-bold">UF</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100 dark:divide-slate-700/60">
-                          {ctes.length === 0 ? (
-                            <tr><td colSpan={7} className="px-3 py-6 text-center text-slate-400">Nenhum CT-e autorizado.</td></tr>
-                          ) : (
-                            ctes.map((c: any) => {
-                              const marcado = form.ctes_ids.includes(c.id);
-                              return (
-                                <tr
-                                  key={c.id}
-                                  onClick={() => {
-                                    const novosIds = marcado ? form.ctes_ids.filter(x => x !== c.id) : [...form.ctes_ids, c.id];
-                                    const selecionados = ctes.filter((item: any) => novosIds.includes(item.id));
-                                    const somaValor = selecionados.reduce((acc: number, item: any) => acc + Number(item.valor_carga || item.valor_total || 0), 0);
-                                    const somaPeso = selecionados.reduce((acc: number, item: any) => acc + Number(item.peso_bruto || 0), 0);
-                                    setForm(f => {
-                                      const novaUfFim = f.uf_fim || c.uf_fim || '';
-                                      return {
-                                        ...f,
-                                        ctes_ids: novosIds,
-                                        uf_fim: novaUfFim,
-                                        ufs_percurso:
-                                          !f.uf_fim && novaUfFim
-                                            ? resolverPercursoUfs(f.uf_inicio, novaUfFim)
-                                            : f.ufs_percurso,
-                                        valor_total_carga: somaValor > 0 ? somaValor.toFixed(2) : f.valor_total_carga,
-                                        peso_bruto: somaPeso > 0 ? somaPeso.toFixed(2) : f.peso_bruto
-                                      };
-                                    });
-                                  }}
-                                  className={`cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/50 ${marcado ? 'bg-sky-50 dark:bg-sky-950/30' : ''}`}
+
+                    {isCargaPropria ? (
+                      <>
+                        <div className="flex flex-col sm:flex-row gap-2">
+                          <div className="flex-1">
+                            <InputFiscal
+                              value={novaChaveNfe}
+                              onChange={v => setNovaChaveNfe(v.replace(/\D/g, '').slice(0, 44))}
+                              placeholder="Adicionar chave de acesso NF-e manualmente (44 dígitos)"
+                            />
+                          </div>
+                          <button
+                            type="button"
+                            onClick={adicionarChaveNfeManual}
+                            className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-bold transition-colors shrink-0"
+                          >
+                            <Plus className="w-3.5 h-3.5" />
+                            Vincular Chave NF-e
+                          </button>
+                        </div>
+
+                        {form.chaves_nfe.length > 0 && (
+                          <div className="flex flex-wrap gap-1.5">
+                            {form.chaves_nfe.map(ch => (
+                              <span
+                                key={ch}
+                                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-sky-50 dark:bg-sky-950/40 border border-sky-200 dark:border-sky-800 text-[11px] font-mono text-sky-800 dark:text-sky-200"
+                              >
+                                NF-e …{ch.slice(-12)}
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setForm(f => ({
+                                      ...f,
+                                      chaves_nfe: f.chaves_nfe.filter(x => x !== ch)
+                                    }))
+                                  }
+                                  className="hover:text-red-600"
                                 >
-                                  <td className="px-2.5 py-1.5">
-                                    <input type="checkbox" checked={marcado} readOnly className="w-3.5 h-3.5 rounded border-slate-300 text-brand-600" />
+                                  <X className="w-3 h-3" />
+                                </button>
+                              </span>
+                            ))}
+                          </div>
+                        )}
+
+                        <div className="max-h-52 overflow-y-auto rounded-lg border border-slate-200 dark:border-slate-700">
+                          <table className="w-full text-left text-[11px]">
+                            <thead className="bg-slate-100 dark:bg-slate-900 text-slate-500 uppercase text-[10px] sticky top-0">
+                              <tr>
+                                <th className="px-2.5 py-2 font-bold w-8"></th>
+                                <th className="px-2.5 py-2 font-bold">NF-e</th>
+                                <th className="px-2.5 py-2 font-bold">Série</th>
+                                <th className="px-2.5 py-2 font-bold">Chave</th>
+                                <th className="px-2.5 py-2 font-bold">Valor</th>
+                                <th className="px-2.5 py-2 font-bold">Destino</th>
+                                <th className="px-2.5 py-2 font-bold">UF</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100 dark:divide-slate-700/60">
+                              {cargas.length === 0 ? (
+                                <tr>
+                                  <td colSpan={7} className="px-3 py-6 text-center text-slate-400">
+                                    Nenhuma NF-e sincronizada na Central de Cargas. Sincronize via ERP/Worker, MDe ou cole a chave acima.
                                   </td>
-                                  <td className="px-2.5 py-1.5 font-mono">{c.numero || '—'}</td>
-                                  <td className="px-2.5 py-1.5 font-mono">57</td>
-                                  <td className="px-2.5 py-1.5 font-mono">{c.serie || '—'}</td>
-                                  <td className="px-2.5 py-1.5 font-mono text-slate-400">{(c.chave_cte || '').slice(-12)}</td>
-                                  <td className="px-2.5 py-1.5 tabular-nums">R$ {Number(c.valor_total || 0).toFixed(2)}</td>
-                                  <td className="px-2.5 py-1.5 truncate max-w-[120px]">{c.municipio_fim || '—'}</td>
-                                  <td className="px-2.5 py-1.5">{c.uf_fim || '—'}</td>
                                 </tr>
-                              );
-                            })
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
+                              ) : (
+                                cargas.map((cg: any) => {
+                                  const marcado = form.cargas_ids.includes(cg.id);
+                                  return (
+                                    <tr
+                                      key={cg.id}
+                                      onClick={() => {
+                                        const novosIds = marcado
+                                          ? form.cargas_ids.filter(x => x !== cg.id)
+                                          : [...form.cargas_ids, cg.id];
+                                        const selecionadas = cargas.filter((item: any) => novosIds.includes(item.id));
+                                        const somaValor = selecionadas.reduce(
+                                          (acc: number, item: any) => acc + Number(item.valor_total || 0),
+                                          0
+                                        );
+                                        const somaPeso = selecionadas.reduce(
+                                          (acc: number, item: any) => acc + Number(item.peso_bruto || 0),
+                                          0
+                                        );
+                                        setForm(f => {
+                                          const novaUfFim = f.uf_fim || cg.destinatario_uf || '';
+                                          const prodAtual =
+                                            f.produtos_predominantes.length > 0
+                                              ? f.produtos_predominantes
+                                              : cg.produto_predominante
+                                              ? [
+                                                  {
+                                                    id: `prod-${Date.now()}`,
+                                                    tipo_carga: '05',
+                                                    descricao: String(cg.produto_predominante).slice(0, 120),
+                                                    ncm: '21069090',
+                                                    lotacao: novosIds.length === 1
+                                                  }
+                                                ]
+                                              : f.produtos_predominantes;
+                                          return {
+                                            ...f,
+                                            cargas_ids: novosIds,
+                                            uf_fim: novaUfFim,
+                                            ufs_percurso:
+                                              !f.uf_fim && novaUfFim
+                                                ? resolverPercursoUfs(f.uf_inicio, novaUfFim)
+                                                : f.ufs_percurso,
+                                            valor_total_carga: somaValor > 0 ? somaValor.toFixed(2) : f.valor_total_carga,
+                                            peso_bruto: somaPeso > 0 ? somaPeso.toFixed(2) : f.peso_bruto,
+                                            produtos_predominantes: prodAtual
+                                          };
+                                        });
+                                      }}
+                                      className={`cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/50 ${
+                                        marcado ? 'bg-sky-50 dark:bg-sky-950/30' : ''
+                                      }`}
+                                    >
+                                      <td className="px-2.5 py-1.5">
+                                        <input
+                                          type="checkbox"
+                                          checked={marcado}
+                                          readOnly
+                                          className="w-3.5 h-3.5 rounded border-slate-300 text-brand-600"
+                                        />
+                                      </td>
+                                      <td className="px-2.5 py-1.5 font-mono">{cg.numero || '—'}</td>
+                                      <td className="px-2.5 py-1.5 font-mono">{cg.serie || '1'}</td>
+                                      <td className="px-2.5 py-1.5 font-mono text-slate-400">
+                                        {(cg.chave_acesso || '').slice(-12)}
+                                      </td>
+                                      <td className="px-2.5 py-1.5 tabular-nums">
+                                        R$ {Number(cg.valor_total || 0).toFixed(2)}
+                                      </td>
+                                      <td className="px-2.5 py-1.5 truncate max-w-[140px]">
+                                        {cg.destinatario_municipio || cg.destinatario_nome || '—'}
+                                      </td>
+                                      <td className="px-2.5 py-1.5">{cg.destinatario_uf || '—'}</td>
+                                    </tr>
+                                  );
+                                })
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+                      </>
+                    ) : (
+                      <div className="max-h-52 overflow-y-auto rounded-lg border border-slate-200 dark:border-slate-700">
+                        <table className="w-full text-left text-[11px]">
+                          <thead className="bg-slate-100 dark:bg-slate-900 text-slate-500 uppercase text-[10px] sticky top-0">
+                            <tr>
+                              <th className="px-2.5 py-2 font-bold w-8"></th>
+                              <th className="px-2.5 py-2 font-bold">Nº</th>
+                              <th className="px-2.5 py-2 font-bold">Modelo</th>
+                              <th className="px-2.5 py-2 font-bold">Série</th>
+                              <th className="px-2.5 py-2 font-bold">Chave</th>
+                              <th className="px-2.5 py-2 font-bold">Valor</th>
+                              <th className="px-2.5 py-2 font-bold">Destinatário</th>
+                              <th className="px-2.5 py-2 font-bold">UF</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100 dark:divide-slate-700/60">
+                            {ctes.length === 0 ? (
+                              <tr><td colSpan={8} className="px-3 py-6 text-center text-slate-400">Nenhum CT-e autorizado.</td></tr>
+                            ) : (
+                              ctes.map((c: any) => {
+                                const marcado = form.ctes_ids.includes(c.id);
+                                return (
+                                  <tr
+                                    key={c.id}
+                                    onClick={() => {
+                                      const novosIds = marcado ? form.ctes_ids.filter(x => x !== c.id) : [...form.ctes_ids, c.id];
+                                      const selecionados = ctes.filter((item: any) => novosIds.includes(item.id));
+                                      const somaValor = selecionados.reduce((acc: number, item: any) => acc + Number(item.valor_carga || item.valor_total || 0), 0);
+                                      const somaPeso = selecionados.reduce((acc: number, item: any) => acc + Number(item.peso_bruto || 0), 0);
+                                      setForm(f => {
+                                        const novaUfFim = f.uf_fim || c.uf_fim || '';
+                                        return {
+                                          ...f,
+                                          ctes_ids: novosIds,
+                                          uf_fim: novaUfFim,
+                                          ufs_percurso:
+                                            !f.uf_fim && novaUfFim
+                                              ? resolverPercursoUfs(f.uf_inicio, novaUfFim)
+                                              : f.ufs_percurso,
+                                          valor_total_carga: somaValor > 0 ? somaValor.toFixed(2) : f.valor_total_carga,
+                                          peso_bruto: somaPeso > 0 ? somaPeso.toFixed(2) : f.peso_bruto
+                                        };
+                                      });
+                                    }}
+                                    className={`cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/50 ${marcado ? 'bg-sky-50 dark:bg-sky-950/30' : ''}`}
+                                  >
+                                    <td className="px-2.5 py-1.5">
+                                      <input type="checkbox" checked={marcado} readOnly className="w-3.5 h-3.5 rounded border-slate-300 text-brand-600" />
+                                    </td>
+                                    <td className="px-2.5 py-1.5 font-mono">{c.numero || '—'}</td>
+                                    <td className="px-2.5 py-1.5 font-mono">57</td>
+                                    <td className="px-2.5 py-1.5 font-mono">{c.serie || '—'}</td>
+                                    <td className="px-2.5 py-1.5 font-mono text-slate-400">{(c.chave_cte || '').slice(-12)}</td>
+                                    <td className="px-2.5 py-1.5 tabular-nums">R$ {Number(c.valor_total || 0).toFixed(2)}</td>
+                                    <td className="px-2.5 py-1.5 truncate max-w-[120px]">{c.municipio_fim || '—'}</td>
+                                    <td className="px-2.5 py-1.5">{c.uf_fim || '—'}</td>
+                                  </tr>
+                                );
+                              })
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
                     {erros.documentos.map((e, i) => (
                       <p key={i} className="text-[11px] text-red-600 dark:text-red-400 mt-2 flex items-center gap-1.5">
                         <AlertTriangle className="w-3 h-3" />

@@ -234,45 +234,75 @@ async function requireInternalAuth(req, res, next) {
         return next();
     }
 
+    const candidateSlugs = Array.from(
+        new Set([expectedModuleSlug, 'coliseu-transporte', 'transporte'].filter(Boolean))
+    );
+
     try {
-        const response = await fetch(`${identityApiUrl}/internal/companies/${encodeURIComponent(tenantId)}/modules/${encodeURIComponent(expectedModuleSlug)}/validate-key`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-Internal-Api-Key': identityInternalKey
-            },
-            body: JSON.stringify({ apiKey: internalKey }),
-            signal: AbortSignal.timeout(3000)
-        });
+        let lastForbiddenReason = null;
+        let lastUnexpectedStatus = null;
 
-        if (response.status === 200) {
-            const data = await response.json();
-            if (data.valid) {
-                validationCache.set(cacheKey, { valid: true, expiresAt: Date.now() + CACHE_TTL_MS });
-                req.tenant = { id: tenantId };
-                req.device = { id: 'worker' };
-                return next();
-            }
-        }
+        for (const slug of candidateSlugs) {
+            const response = await fetch(
+                `${identityApiUrl}/internal/companies/${encodeURIComponent(tenantId)}/modules/${encodeURIComponent(slug)}/validate-key`,
+                {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Internal-Api-Key': identityInternalKey
+                    },
+                    body: JSON.stringify({ apiKey: internalKey }),
+                    signal: AbortSignal.timeout(3000)
+                }
+            );
 
-        if (response.status === 403) {
-            const data = await response.json().catch(() => ({}));
-            const reason = data.reason || data.Reason || data.error || data.Error || 'Módulo bloqueado (HTTP 403).';
-            logger.warn(`[InternalAuth] Identity retornou 403 para tenant ${tenantId}:`, data);
-
-            if (safeCompare(internalKey, internalApiKey)) {
-                logger.info(`[InternalAuth] Fallback static key OK — permitindo sync para tenant ${tenantId}`);
-                validationCache.set(cacheKey, { valid: true, expiresAt: Date.now() + CACHE_TTL_MS });
-                req.tenant = { id: tenantId };
-                req.device = { id: 'worker' };
-                return next();
+            if (response.status === 200) {
+                const data = await response.json().catch(() => ({}));
+                if (data.valid) {
+                    validationCache.set(cacheKey, { valid: true, slug, expiresAt: Date.now() + CACHE_TTL_MS });
+                    req.tenant = { id: tenantId };
+                    req.device = { id: 'worker', moduleSlug: slug };
+                    return next();
+                }
+                lastForbiddenReason = data.reason || data.Reason || data.error || 'Chave de módulo inválida.';
+                continue;
             }
 
-            validationCache.set(cacheKey, { valid: false, reason, expiresAt: Date.now() + CACHE_TTL_MS });
-            return res.status(403).json({ error: reason, code: 'MODULE_BLOCKED' });
+            if (response.status === 403 || response.status === 404) {
+                const data = await response.json().catch(() => ({}));
+                lastForbiddenReason =
+                    data.reason ||
+                    data.Reason ||
+                    data.error ||
+                    data.Error ||
+                    (response.status === 404
+                        ? `Módulo ${slug} não registrado para o tenant.`
+                        : 'Módulo bloqueado (HTTP 403).');
+                logger.warn(`[InternalAuth] Identity retornou ${response.status} em slug=${slug} para tenant ${tenantId}:`, data);
+                continue;
+            }
+
+            lastUnexpectedStatus = response.status;
         }
 
-        throw new Error(`Identity API retornou status ${response.status}`);
+        if (safeCompare(internalKey, internalApiKey)) {
+            logger.info(`[InternalAuth] Fallback static key OK — permitindo sync para tenant ${tenantId}`);
+            validationCache.set(cacheKey, { valid: true, expiresAt: Date.now() + CACHE_TTL_MS });
+            req.tenant = { id: tenantId };
+            req.device = { id: 'worker' };
+            return next();
+        }
+
+        if (lastForbiddenReason) {
+            validationCache.set(cacheKey, {
+                valid: false,
+                reason: lastForbiddenReason,
+                expiresAt: Date.now() + CACHE_TTL_MS
+            });
+            return res.status(403).json({ error: lastForbiddenReason, code: 'MODULE_BLOCKED' });
+        }
+
+        throw new Error(`Identity API retornou status ${lastUnexpectedStatus || 'desconhecido'}`);
     } catch (err) {
         logger.error('[InternalAuth] Erro ao validar no Identity API. Usando fallback.', { err: err.message, tenantId });
 
@@ -353,6 +383,10 @@ function requireSuperAdminMaster(req, res, next) {
     });
 }
 
+function clearInternalValidationCache() {
+    validationCache.clear();
+}
+
 module.exports = {
     MASTER_TENANT_ID,
     requireWebJwt,
@@ -362,6 +396,7 @@ module.exports = {
     requireInternalAuth,
     requireSyncOrWebAuth,
     invalidateUserAuthCache,
+    clearInternalValidationCache,
     safeCompare,
     isValidUuid
 };
