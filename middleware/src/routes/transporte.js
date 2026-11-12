@@ -2327,18 +2327,27 @@ router.post('/mdfes', async (req, res) => {
         }
 
         const ciotContratoIdVinc = b.ciot_contrato_id ? parseInt(b.ciot_contrato_id, 10) : null;
+        const temContratoIdVinc = Number.isFinite(ciotContratoIdVinc);
         const ciotCodVinc = b.ciot_codigo ? String(b.ciot_codigo).replace(/\D/g, '').slice(0, 12) : '';
-        if (Number.isFinite(ciotContratoIdVinc) || ciotCodVinc) {
+        const temCiotCodVinc = Boolean(ciotCodVinc);
+        if (temContratoIdVinc || temCiotCodVinc) {
             await db
                 .query(
                     `UPDATE dash_contratos_transporte
                      SET mdfe_id = $1, updated_at = NOW()
                      WHERE tenant_id = $2
                        AND (
-                         ($3::int IS NOT NULL AND id = $3)
-                         OR ($4 <> '' AND ciot_codigo = $4)
+                         ($3::boolean = TRUE AND id = $4)
+                         OR ($5::boolean = TRUE AND ciot_codigo = $6)
                        )`,
-                    [novoMdfe.id, tenantId, Number.isFinite(ciotContratoIdVinc) ? ciotContratoIdVinc : null, ciotCodVinc]
+                    [
+                        novoMdfe.id,
+                        tenantId,
+                        temContratoIdVinc,
+                        temContratoIdVinc ? ciotContratoIdVinc : null,
+                        temCiotCodVinc,
+                        temCiotCodVinc ? ciotCodVinc : null,
+                    ]
                 )
                 .catch(() => null);
         }
@@ -3635,12 +3644,13 @@ router.get('/contratos', async (req, res) => {
         }
         if (search && String(search).trim()) {
             params.push(`%${String(search).trim()}%`);
+            const pIdx = params.length;
             whereSql += ` AND (
-                c.transportador_nome ILIKE $${params.length}
-                OR c.contratante_nome ILIKE $${params.length}
-                OR COALESCE(c.ciot_codigo, '') ILIKE $${params.length}
-                OR COALESCE(c.veiculo_placa, '') ILIKE $${params.length}
-                OR COALESCE(c.motorista_nome, '') ILIKE $${params.length}
+                c.transportador_nome ILIKE $${pIdx}::text
+                OR c.contratante_nome ILIKE $${pIdx}::text
+                OR COALESCE(c.ciot_codigo, '') ILIKE $${pIdx}::text
+                OR COALESCE(c.veiculo_placa, '') ILIKE $${pIdx}::text
+                OR COALESCE(c.motorista_nome, '') ILIKE $${pIdx}::text
             )`;
         }
 
@@ -3796,6 +3806,31 @@ router.post('/contratos', async (req, res) => {
             pisoIsento,
             pisoIsencaoMotivo,
         });
+
+        const vaiEmitirAgora =
+            b.emitir_agora === true || Boolean(b.ciot_codigo && String(b.ciot_codigo).trim());
+
+        if (vaiEmitirAgora && !piso.aprovado) {
+            const motivoCurto =
+                pisoIsento && String(pisoIsencaoMotivo || '').trim().length < 15;
+            return res.status(422).json({
+                error: motivoCurto
+                    ? 'Para aplicar isenção/exceção ao Piso Mínimo da ANTT, informe o motivo legal detalhado (mínimo 15 caracteres).'
+                    : `Frete informado (R$ ${Number(b.valor_frete || 0).toFixed(2)}) está abaixo do Piso Mínimo Oficial da ANTT (R$ ${piso.piso.toFixed(2)} — ${piso.categoria_nome}, ${piso.eixos} eixos, ${piso.distancia_km} km). Ajuste o valor do frete ou marque Isenção Justificada.`,
+                code: motivoCurto ? 'ISENCAO_MOTIVO_CURTO' : 'PISO_MINIMO_NAO_ATENDIDO',
+                piso_detalhes: piso,
+            });
+        }
+
+        if (b.ciot_codigo && String(b.ciot_codigo).trim()) {
+            const checkManual = normalizarProtocoloCiot(b.ciot_codigo, b.ciot_verificador);
+            if (!checkManual.valido) {
+                return res.status(400).json({
+                    error: checkManual.erro,
+                    code: 'CIOT_FORMATO_INVALIDO',
+                });
+            }
+        }
 
         const provedorEscolhido = PROVEDORES_CIOT_SUPORTADOS.includes(
             String(b.ciot_provedor || emitRow.ciot_provedor || '').toUpperCase()

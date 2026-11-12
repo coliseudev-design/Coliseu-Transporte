@@ -102,6 +102,34 @@ test('2. Normalização Blindada 12 + 4 dígitos (SEFAZ MDF-e vs Protocolo ANTT/
   assert.match(dv, /^\d{4}$/);
 });
 
+function assertPostgresParamSafety(sql, params) {
+  const matches = [...sql.matchAll(/\$(\d+)/g)].map((m) => Number(m[1]));
+  if (matches.length === 0) {
+    assert.equal(params.length, 0, `SQL sem placeholders recebeu ${params.length} params: ${sql}`);
+    return;
+  }
+  const counts = new Map();
+  for (const idx of matches) {
+    counts.set(idx, (counts.get(idx) || 0) + 1);
+    assert.ok(
+      idx >= 1 && idx <= params.length,
+      `Placeholder $${idx} fora do intervalo de params (1..${params.length}) em: ${sql}`
+    );
+  }
+  for (const [idx, count] of counts.entries()) {
+    assert.equal(
+      count,
+      1,
+      `Placeholder $${idx} reutilizado ${count}x (risco de "inconsistent types deduced for parameter $${idx}") em: ${sql}`
+    );
+  }
+  assert.equal(
+    counts.size,
+    params.length,
+    `Quantidade de placeholders distintos (${counts.size}) difere de params.length (${params.length}) em: ${sql}`
+  );
+}
+
 test('3. Ciclo Completo CIOT Homologação + Contas a Pagar (Adiantamento + Saldo sem duplicidade) + Estorno no Cancelamento', async () => {
   const tenantUuid = '11111111-2222-3333-4444-555555555555';
   const titulosCriados = [];
@@ -144,6 +172,7 @@ test('3. Ciclo Completo CIOT Homologação + Contas a Pagar (Adiantamento + Sald
 
   const mockRunner = {
     async query(sql, params = []) {
+      assertPostgresParamSafety(sql, params);
       const norm = sql.replace(/\s+/g, ' ').trim();
       if (norm.startsWith('SELECT c.*,')) {
         return { rows: [{ ...contratoMemoria }] };
@@ -152,6 +181,7 @@ test('3. Ciclo Completo CIOT Homologação + Contas a Pagar (Adiantamento + Sald
         return { rows: [{ ...contratoMemoria }] };
       }
       if (norm.startsWith('UPDATE dash_contratos_transporte SET ciot_status = $1')) {
+        assert.equal(typeof params[10], 'boolean');
         contratoMemoria = {
           ...contratoMemoria,
           ciot_status: params[0],
@@ -290,6 +320,7 @@ test('4. Encerramento Sincronizado MDF-e -> CIOT: encerrarMdfe encerra automatic
       return { rowCount: 1 };
     }
     if (norm.includes("UPDATE dash_contratos_transporte SET ciot_status = 'ENCERRADO'")) {
+      assertPostgresParamSafety(sql, params);
       ciotEncerradoChamado = true;
       paramsUpdateCiot = params;
       return { rowCount: 1 };
@@ -324,5 +355,7 @@ test('4. Encerramento Sincronizado MDF-e -> CIOT: encerrarMdfe encerra automatic
   assert.equal(res.ciots_encerrados, 1);
   assert.equal(ciotEncerradoChamado, true);
   assert.equal(paramsUpdateCiot[1], 77);
-  assert.equal(paramsUpdateCiot[3], '261112000042');
+  assert.equal(paramsUpdateCiot[3], 77);
+  assert.equal(paramsUpdateCiot[4], true);
+  assert.equal(paramsUpdateCiot[5], '261112000042');
 });

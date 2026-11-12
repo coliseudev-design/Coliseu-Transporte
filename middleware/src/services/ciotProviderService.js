@@ -388,9 +388,10 @@ async function sincronizarFinanceiroCiot(runner, tenantId, contrato, usuario = '
         await runner
           .query(
             `INSERT INTO dash_financeiro_logs (tenant_id, titulo_id, financeiro_id, tipo_evento, usuario, descricao)
-             VALUES ($1::UUID, $2, $2, 'CRIACAO_TITULO_CIOT', $3, $4)`,
+             VALUES ($1::UUID, $2, $3, 'CRIACAO_TITULO_CIOT', $4, $5)`,
             [
               String(tenantId),
+              ins.rows[0].id,
               ins.rows[0].id,
               usuario,
               `${p.descricao} — R$ ${p.valor.toFixed(2)} (venc. ${p.vencimento})`,
@@ -438,8 +439,8 @@ async function estornarFinanceiroCiot(runner, tenantId, contrato, motivo = '', u
       await runner
         .query(
           `INSERT INTO dash_financeiro_logs (tenant_id, titulo_id, financeiro_id, tipo_evento, usuario, descricao)
-           VALUES ($1::UUID, $2, $2, 'CANCELAMENTO_CIOT', $3, $4)`,
-          [String(tenantId), idFin, usuario, `Título cancelado pelo cancelamento do CIOT: ${motivo}`]
+           VALUES ($1::UUID, $2, $3, 'CANCELAMENTO_CIOT', $4, $5)`,
+          [String(tenantId), idFin, idFin, usuario, `Título cancelado pelo cancelamento do CIOT: ${motivo}`]
         )
         .catch(() => null);
     }
@@ -609,6 +610,7 @@ async function emitirOuRegistrarCiot({
   };
   const payloadAntt = montarPayloadPadraoAntt(contratoParaPayload, c);
 
+  const marcarTransmitido = statusFinal === 'TRANSMITIDO';
   const updRes = await runner.query(
     `UPDATE dash_contratos_transporte
      SET ciot_status = $1,
@@ -619,7 +621,7 @@ async function emitirOuRegistrarCiot({
          piso_minimo_antt = $6,
          piso_minimo_aprovado = $7,
          ciot_payload_antt = $8::jsonb,
-         ciot_transmitido_em = CASE WHEN $1 = 'TRANSMITIDO' THEN COALESCE(ciot_transmitido_em, NOW()) ELSE ciot_transmitido_em END,
+         ciot_transmitido_em = CASE WHEN $11::boolean THEN COALESCE(ciot_transmitido_em, NOW()) ELSE ciot_transmitido_em END,
          ciot_erro = NULL,
          updated_at = NOW()
      WHERE id = $9 AND tenant_id = $10
@@ -635,6 +637,7 @@ async function emitirOuRegistrarCiot({
       JSON.stringify(payloadAntt),
       c.id,
       tenantId,
+      marcarTransmitido,
     ]
   );
 
@@ -714,6 +717,8 @@ async function encerrarCiotsPorMdfe(runner, tenantId, mdfe) {
   try {
     const ciotCodLimpo = digitsOnly(mdfe.ciot_codigo);
     const protSefaz = mdfe.protocolo ? `MDFE-${mdfe.protocolo}` : `MDFE-${mdfe.id}-ENC`;
+    const mdfeIdNum = Number(mdfe.id);
+    const temCiotCod = Boolean(ciotCodLimpo);
     const upd = await runner.query(
       `UPDATE dash_contratos_transporte
        SET ciot_status = 'ENCERRADO',
@@ -724,10 +729,17 @@ async function encerrarCiotsPorMdfe(runner, tenantId, mdfe) {
        WHERE tenant_id = $3
          AND ciot_status = 'TRANSMITIDO'
          AND (
-           mdfe_id = $2
-           OR ($4 <> '' AND ciot_codigo = $4)
+           mdfe_id = $4
+           OR ($5::boolean = TRUE AND ciot_codigo = $6)
          )`,
-      [String(protSefaz).slice(0, 40), mdfe.id, tenantId, ciotCodLimpo]
+      [
+        String(protSefaz).slice(0, 40),
+        mdfeIdNum,
+        tenantId,
+        mdfeIdNum,
+        temCiotCod,
+        ciotCodLimpo || null,
+      ]
     );
     return upd.rowCount || 0;
   } catch (err) {
