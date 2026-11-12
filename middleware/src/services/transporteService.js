@@ -26,6 +26,7 @@ const {
   resolverIbgeMunicipioAsync,
   normalizarUf,
 } = require('../utils/ibgeMunicipios');
+const { encerrarCiotsPorMdfe } = require('./ciotProviderService');
 
 const IBGE_UF_BY_CODE = {
   '11': 'RO', '12': 'AC', '13': 'AM', '14': 'RR', '15': 'PA', '16': 'AP', '17': 'TO',
@@ -4084,7 +4085,7 @@ class TransporteService {
       }
     }
 
-    return await this._persistirRetornoFocusMdfe(
+    const persistido = await this._persistirRetornoFocusMdfe(
       mdfeId,
       refAtual,
       resFocus,
@@ -4097,6 +4098,20 @@ class TransporteService {
         nomeMunDesc: defaultMunDesc.nome,
       }
     );
+
+    const ciotCodLink = digitsOnly(mdfe.ciot_codigo || '').slice(0, 12);
+    if (ciotCodLink) {
+      await db
+        .query(
+          `UPDATE dash_contratos_transporte
+           SET mdfe_id = COALESCE(mdfe_id, $1), updated_at = NOW()
+           WHERE tenant_id = $2 AND ciot_codigo = $3`,
+          [mdfeId, tenantId, ciotCodLink]
+        )
+        .catch(() => null);
+    }
+
+    return persistido;
   }
 
   /**
@@ -4229,7 +4244,18 @@ class TransporteService {
   static async encerrarMdfe(
     tenantId,
     mdfeId,
-    { siglaUf, sigla_uf, nomeMunicipio, nome_municipio, codigoMunicipio, codigo_municipio, dataEncerramento, data } = {}
+    {
+      siglaUf,
+      sigla_uf,
+      nomeMunicipio,
+      nome_municipio,
+      codigoMunicipio,
+      codigo_municipio,
+      dataEncerramento,
+      data,
+      encerrarCiot,
+      encerrar_ciot,
+    } = {}
   ) {
     const { rows } = await db.query(
       `SELECT m.* FROM dash_mdfes m WHERE m.id = $1 AND m.tenant_id = $2`,
@@ -4340,6 +4366,14 @@ class TransporteService {
       ]
     );
 
+    const deveEncerrarCiot = encerrarCiot !== false && encerrar_ciot !== false;
+    const ciotsEncerrados = deveEncerrarCiot
+      ? await encerrarCiotsPorMdfe(db, tenantId, {
+          ...mdfe,
+          protocolo: mdfe.protocolo || resFocus?.protocolo || null,
+        })
+      : 0;
+
     return {
       success: true,
       status: 'ENCERRADO',
@@ -4349,6 +4383,7 @@ class TransporteService {
       encerramento_municipio: ibgeEnc.nome,
       caminho_xml: caminhoXmlAutorizado,
       caminho_damdfe: caminhoDamdfeAutorizado,
+      ciots_encerrados: ciotsEncerrados,
       focus: resFocus,
     };
   }

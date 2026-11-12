@@ -1,11 +1,12 @@
 import React, { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import api from '../../services/api';
 import TabelaResponsiva from '../../components/TabelaResponsiva';
 import DocumentoDrawer from '../../components/DocumentoDrawer';
 import {
   FileText, Truck, Search, Calendar, Download, Eye,
-  RefreshCw, X, FileStack, ArrowUpRight, Send, CheckCircle2, AlertTriangle, Loader2
+  RefreshCw, X, FileStack, ArrowUpRight, Send, CheckCircle2, AlertTriangle, Loader2,
+  CheckSquare, Ban
 } from 'lucide-react';
 
 interface Documento {
@@ -41,12 +42,18 @@ interface Documento {
 }
 
 export default function DocumentosEmitidosPage() {
+  const qc = useQueryClient();
   const [tipo, setTipo] = useState<'TODOS' | 'CTE' | 'MDFE'>('TODOS');
   const [status, setStatus] = useState('TODAS');
   const [search, setSearch] = useState('');
   const [dataInicio, setDataInicio] = useState('');
   const [dataFim, setDataFim] = useState('');
   const [drawer, setDrawer] = useState<{ tipo: 'CTE' | 'MDFE'; id: number } | null>(null);
+  const [modalEncerrarDoc, setModalEncerrarDoc] = useState<Documento | null>(null);
+  const [municipioEncerrar, setMunicipioEncerrar] = useState('');
+  const [modalCancelarDoc, setModalCancelarDoc] = useState<Documento | null>(null);
+  const [justificativaCancelar, setJustificativaCancelar] = useState('');
+  const [processandoAcao, setProcessandoAcao] = useState(false);
   const [gerandoTestes, setGerandoTestes] = useState(false);
   const [gerandoMdfesTeste, setGerandoMdfesTeste] = useState(false);
   const [resultadoTestes, setResultadoTestes] = useState<{
@@ -535,6 +542,34 @@ export default function DocumentosEmitidosPage() {
                           <span className="hidden xl:inline">XML</span>
                         </button>
                       )}
+                      {d.tipo_documento === 'MDFE' && d.status === 'AUTORIZADO' && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setModalEncerrarDoc(d);
+                            setMunicipioEncerrar(d.municipio_fim || d.municipio_inicio || '');
+                          }}
+                          title="Encerrar MDF-e na SEFAZ (e encerrar CIOT vinculado)"
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800 hover:bg-amber-100 text-[11px] font-semibold transition-colors"
+                        >
+                          <CheckSquare className="w-3 h-3" />
+                          <span className="hidden 2xl:inline">Encerrar</span>
+                        </button>
+                      )}
+                      {d.status === 'AUTORIZADO' && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setModalCancelarDoc(d);
+                            setJustificativaCancelar('');
+                          }}
+                          title={`Cancelar ${d.tipo_documento === 'CTE' ? 'CT-e' : 'MDF-e'} na SEFAZ`}
+                          aria-label={`Cancelar ${d.tipo_documento === 'CTE' ? 'CT-e' : 'MDF-e'}`}
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-red-50 dark:bg-red-950/60 text-red-600 dark:text-red-400 border border-red-200 dark:border-red-900 hover:bg-red-100 text-[11px] font-semibold transition-colors"
+                        >
+                          <Ban className="w-3 h-3" />
+                        </button>
+                      )}
                     </div>
                   )
                 }
@@ -543,6 +578,131 @@ export default function DocumentosEmitidosPage() {
           </div>
         )}
       </div>
+
+      {/* Modal Rápido: Encerrar MDF-e na SEFAZ (+ CIOT vinculado) */}
+      {modalEncerrarDoc && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-slate-800 w-full max-w-md rounded-2xl p-6 shadow-2xl border border-slate-200 dark:border-slate-700 space-y-4">
+            <h3 className="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
+              <CheckSquare className="w-5 h-5 text-amber-600" />
+              Encerrar MDF-e Nº {modalEncerrarDoc.numero || modalEncerrarDoc.id}
+            </h3>
+            <p className="text-xs text-slate-500">
+              Registra o evento oficial 110112 na SEFAZ liberando o veículo/condutor e encerra automaticamente o CIOT vinculado.
+            </p>
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
+                Município de Encerramento ({modalEncerrarDoc.uf_fim}) *
+              </label>
+              <input
+                type="text"
+                value={municipioEncerrar}
+                onChange={e => setMunicipioEncerrar(e.target.value)}
+                placeholder="Ex: Dourados ou São Paulo"
+                className="w-full px-3.5 py-2.5 text-sm bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white"
+              />
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setModalEncerrarDoc(null)}
+                className="px-4 py-2 rounded-xl text-xs font-medium text-slate-600 dark:text-slate-300"
+              >
+                Voltar
+              </button>
+              <button
+                type="button"
+                disabled={processandoAcao || !municipioEncerrar.trim()}
+                onClick={async () => {
+                  setProcessandoAcao(true);
+                  try {
+                    const res = await api.post(`/transporte/mdfes/${modalEncerrarDoc.id}/encerrar`, {
+                      siglaUf: modalEncerrarDoc.uf_fim,
+                      nomeMunicipio: municipioEncerrar.trim()
+                    });
+                    setModalEncerrarDoc(null);
+                    await refetch();
+                    qc.invalidateQueries({ queryKey: ['mdfes'] });
+                    qc.invalidateQueries({ queryKey: ['ciot-consulta'] });
+                    qc.invalidateQueries({ queryKey: ['ciot-mdfe-disponiveis'] });
+                    const ciotsEnc = Number(res.data?.ciots_encerrados || 0);
+                    alert(
+                      `MDF-e encerrado com sucesso na SEFAZ!${
+                        ciotsEnc > 0 ? ` (${ciotsEnc} operação CIOT vinculada também encerrada automaticamente.)` : ''
+                      }`
+                    );
+                  } catch (e: any) {
+                    alert(e?.response?.data?.error || 'Erro ao encerrar MDF-e na SEFAZ.');
+                  } finally {
+                    setProcessandoAcao(false);
+                  }
+                }}
+                className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold disabled:opacity-50"
+              >
+                {processandoAcao ? 'Encerrando...' : 'Confirmar Encerramento'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Rápido: Cancelar CT-e ou MDF-e na SEFAZ */}
+      {modalCancelarDoc && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-slate-800 w-full max-w-md rounded-2xl p-6 shadow-2xl border border-slate-200 dark:border-slate-700 space-y-4">
+            <h3 className="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
+              <Ban className="w-5 h-5 text-red-600" />
+              Cancelar {modalCancelarDoc.tipo_documento === 'CTE' ? 'CT-e' : 'MDF-e'} Nº{' '}
+              {modalCancelarDoc.numero || modalCancelarDoc.id}
+            </h3>
+            <p className="text-xs text-slate-500">
+              Informe a justificativa fiscal de cancelamento na SEFAZ (mínimo de 15 caracteres).
+            </p>
+            <textarea
+              rows={3}
+              value={justificativaCancelar}
+              onChange={e => setJustificativaCancelar(e.target.value)}
+              placeholder="Descreva o motivo do cancelamento (mínimo 15 caracteres)..."
+              className="w-full px-3.5 py-2.5 text-sm bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white"
+            />
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setModalCancelarDoc(null)}
+                className="px-4 py-2 rounded-xl text-xs font-medium text-slate-600 dark:text-slate-300"
+              >
+                Voltar
+              </button>
+              <button
+                type="button"
+                disabled={processandoAcao || justificativaCancelar.trim().length < 15}
+                onClick={async () => {
+                  setProcessandoAcao(true);
+                  try {
+                    const rota =
+                      modalCancelarDoc.tipo_documento === 'CTE' ? 'ctes' : 'mdfes';
+                    await api.post(`/transporte/${rota}/${modalCancelarDoc.id}/cancelar`, {
+                      justificativa: justificativaCancelar.trim()
+                    });
+                    setModalCancelarDoc(null);
+                    await refetch();
+                    qc.invalidateQueries({ queryKey: ['ctes'] });
+                    qc.invalidateQueries({ queryKey: ['mdfes'] });
+                    alert('Documento cancelado com sucesso na SEFAZ!');
+                  } catch (e: any) {
+                    alert(e?.response?.data?.error || 'Erro ao cancelar documento na SEFAZ.');
+                  } finally {
+                    setProcessandoAcao(false);
+                  }
+                }}
+                className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-bold disabled:opacity-50"
+              >
+                {processandoAcao ? 'Cancelando...' : 'Confirmar Cancelamento'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Drawer de detalhes (compartilhado com as telas específicas) */}
       <DocumentoDrawer

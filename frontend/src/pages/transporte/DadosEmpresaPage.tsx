@@ -39,6 +39,12 @@ interface EmitenteForm {
   cfop_padrao_cte: string;
   natureza_padrao_cte: string;
   aliquota_icms_padrao: string;
+  ciot_provedor: 'HOMOLOGACAO_LOCAL' | 'MANUAL' | 'EFRETE' | 'PAMCARD' | 'TARGET' | 'ANTT_A1';
+  ciot_ambiente: 'homologacao' | 'producao';
+  ciot_cnpj_ipef: string;
+  ciot_usuario: string;
+  ciot_integrador_token: string;
+  ciot_senha: string;
 }
 
 function validarCnpj14(valor: string): boolean {
@@ -174,7 +180,13 @@ export default function DadosEmpresaPage() {
     serie_mdfe: '1',
     cfop_padrao_cte: '5353',
     natureza_padrao_cte: 'PRESTACAO DE SERVICO DE TRANSPORTE',
-    aliquota_icms_padrao: '12.00'
+    aliquota_icms_padrao: '12.00',
+    ciot_provedor: 'HOMOLOGACAO_LOCAL',
+    ciot_ambiente: 'homologacao',
+    ciot_cnpj_ipef: '',
+    ciot_usuario: '',
+    ciot_integrador_token: '',
+    ciot_senha: ''
   });
 
   const { data } = useQuery({
@@ -247,7 +259,13 @@ export default function DadosEmpresaPage() {
         serie_mdfe: emAtual.serie_mdfe || '1',
         cfop_padrao_cte: emAtual.cfop_padrao_cte || '5353',
         natureza_padrao_cte: emAtual.natureza_padrao_cte || 'PRESTACAO DE SERVICO DE TRANSPORTE',
-        aliquota_icms_padrao: String(emAtual.aliquota_icms_padrao ?? '12.00')
+        aliquota_icms_padrao: String(emAtual.aliquota_icms_padrao ?? '12.00'),
+        ciot_provedor: emAtual.ciot_provedor || 'HOMOLOGACAO_LOCAL',
+        ciot_ambiente: emAtual.ciot_ambiente || emAtual.focus_ambiente || 'homologacao',
+        ciot_cnpj_ipef: emAtual.ciot_cnpj_ipef || '',
+        ciot_usuario: emAtual.ciot_usuario || '',
+        ciot_integrador_token: '',
+        ciot_senha: ''
       });
     }
     }, [
@@ -257,7 +275,9 @@ export default function DadosEmpresaPage() {
       emAtual?.rntrc,
       emAtual?.razao_social,
       emAtual?.perfil_operacional,
-      emAtual?.mdfe_tipo_emitente_padrao
+      emAtual?.mdfe_tipo_emitente_padrao,
+      emAtual?.ciot_provedor,
+      emAtual?.ciot_ambiente
     ]);
 
   useEffect(() => {
@@ -1672,6 +1692,134 @@ export default function DadosEmpresaPage() {
                 className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white"
               />
             </div>
+          </div>
+        </div>
+
+        {/* 5. Integração CIOT / IPEF (ANTT) */}
+        <div className="pt-4 border-t border-slate-100 dark:border-slate-700/60">
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
+            <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2">
+              <ShieldCheck className="w-4 h-4 text-teal-600" />
+              Integração CIOT / Instituição de Pagamento de Frete (ANTT)
+            </h3>
+            <span className="text-[11px] px-2.5 py-1 rounded-full bg-teal-50 dark:bg-teal-950/50 text-teal-700 dark:text-teal-300 border border-teal-200 dark:border-teal-800 font-semibold">
+              {form.ciot_provedor === 'HOMOLOGACAO_LOCAL'
+                ? 'Simulador Homologação ANTT Ativo'
+                : form.ciot_provedor === 'MANUAL'
+                ? 'Registro Manual 12+4 Dígitos'
+                : `Conector IPEF: ${form.ciot_provedor}`}
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div>
+              <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1.5">
+                Modo / Operadora de CIOT (IPEF)
+              </label>
+              <select
+                value={form.ciot_provedor}
+                onChange={e =>
+                  setForm({
+                    ...form,
+                    ciot_provedor: e.target.value as EmitenteForm['ciot_provedor']
+                  })
+                }
+                className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white text-xs font-medium"
+              >
+                <option value="HOMOLOGACAO_LOCAL">Simulador Homologação ANTT (Gera 12+4 dígitos p/ testes)</option>
+                <option value="MANUAL">Registro Manual Blindado (Código obtido no portal IPEF/Cartão)</option>
+                <option value="EFRETE">API e-Frete PEO (Automático via WebService)</option>
+                <option value="PAMCARD">API Pamcard / Roadcard</option>
+                <option value="TARGET">API Target Bank / Meio de Pagamento</option>
+                <option value="ANTT_A1">WebService ANTT Direto (Certificado A1 — Gratuito)</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1.5">
+                Ambiente CIOT / IPEF
+              </label>
+              <select
+                value={form.ciot_ambiente}
+                onChange={e =>
+                  setForm({
+                    ...form,
+                    ciot_ambiente: e.target.value as 'homologacao' | 'producao'
+                  })
+                }
+                className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white text-xs font-medium"
+              >
+                <option value="homologacao">Homologação / Sandbox (Testes sem valor fiscal)</option>
+                <option value="producao">Produção (Validade oficial ANTT / IPEF)</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1.5">
+                CNPJ da Instituição IPEF (Opcional p/ MDF-e)
+              </label>
+              <input
+                type="text"
+                placeholder="Ex: 13670685000115 (e-Frete)"
+                value={form.ciot_cnpj_ipef}
+                onChange={e => setForm({ ...form, ciot_cnpj_ipef: e.target.value.replace(/\D/g, '').slice(0, 14) })}
+                className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white font-mono text-xs"
+              />
+            </div>
+
+            {(form.ciot_provedor === 'EFRETE' ||
+              form.ciot_provedor === 'PAMCARD' ||
+              form.ciot_provedor === 'TARGET' ||
+              form.ciot_provedor === 'ANTT_A1') && (
+              <>
+                <div>
+                  <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1.5">
+                    Token do Integrador / Chave API IPEF
+                  </label>
+                  <input
+                    type="password"
+                    autoComplete="new-password"
+                    placeholder={
+                      emAtual?.tem_ciot_token
+                        ? '•••••••• (Token salvo cifrado — preencha p/ alterar)'
+                        : 'Cole o Token da Integradora IPEF'
+                    }
+                    value={form.ciot_integrador_token}
+                    onChange={e => setForm({ ...form, ciot_integrador_token: e.target.value })}
+                    className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white font-mono text-xs"
+                  />
+                </div>
+                <div>
+                  <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1.5">
+                    Usuário IPEF
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Login na operadora de frete"
+                    value={form.ciot_usuario}
+                    onChange={e => setForm({ ...form, ciot_usuario: e.target.value })}
+                    className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white text-xs"
+                  />
+                </div>
+                <div>
+                  <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1.5">
+                    Senha IPEF
+                  </label>
+                  <input
+                    type="password"
+                    autoComplete="new-password"
+                    placeholder={
+                      emAtual?.tem_ciot_senha
+                        ? '•••••••• (Senha salva cifrada — preencha p/ alterar)'
+                        : 'Senha da conta na operadora'
+                    }
+                    value={form.ciot_senha}
+                    onChange={e => setForm({ ...form, ciot_senha: e.target.value })}
+                    className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white text-xs"
+                  />
+                </div>
+              </>
+            )}
           </div>
         </div>
 

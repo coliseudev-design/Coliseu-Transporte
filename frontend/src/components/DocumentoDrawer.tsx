@@ -92,6 +92,8 @@ export default function DocumentoDrawer({ tipo, documentoId, onClose, onVerRotei
       qc.invalidateQueries({ queryKey: ['ctes'] });
       qc.invalidateQueries({ queryKey: ['mdfes'] });
       qc.invalidateQueries({ queryKey: ['documentos-emitidos'] });
+      qc.invalidateQueries({ queryKey: ['ciot-consulta'] });
+      qc.invalidateQueries({ queryKey: ['ciot-mdfe-disponiveis'] });
       setModalCancelar(false);
       setModalCarga(false);
       setModalCondutor(false);
@@ -358,12 +360,23 @@ export default function DocumentoDrawer({ tipo, documentoId, onClose, onVerRotei
                       </div>
 
                       {doc.ciot_codigo && (
-                        <div className="flex items-center gap-2 p-3 rounded-xl bg-teal-50 dark:bg-teal-950/40 border border-teal-200 dark:border-teal-800/50">
-                          <ShieldCheck className="w-4 h-4 text-teal-600 shrink-0" />
-                          <div>
-                            <p className="text-[10px] font-semibold text-teal-700 dark:text-teal-300 uppercase tracking-wider">CIOT vinculado</p>
-                            <p className="text-xs font-mono text-teal-900 dark:text-teal-200">{doc.ciot_codigo}</p>
+                        <div className="flex items-center justify-between gap-2 p-3 rounded-xl bg-teal-50 dark:bg-teal-950/40 border border-teal-200 dark:border-teal-800/50">
+                          <div className="flex items-center gap-2">
+                            <ShieldCheck className="w-4 h-4 text-teal-600 shrink-0" />
+                            <div>
+                              <p className="text-[10px] font-semibold text-teal-700 dark:text-teal-300 uppercase tracking-wider">
+                                CIOT vinculado (ANTT)
+                              </p>
+                              <p className="text-xs font-mono font-bold text-teal-900 dark:text-teal-200">
+                                {doc.ciot_codigo}
+                              </p>
+                            </div>
                           </div>
+                          <span className="text-[10px] text-teal-700 dark:text-teal-300 font-medium">
+                            {doc.status === 'ENCERRADO'
+                              ? 'Encerrado c/ MDF-e'
+                              : 'Encerra junto ao MDF-e'}
+                          </span>
                         </div>
                       )}
 

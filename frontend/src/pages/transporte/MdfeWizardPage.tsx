@@ -114,6 +114,7 @@ export default function MdfeWizardPage() {
     condutores: [] as { id: string; nome: string; cpf: string }[],
     contratantes: [] as Contratante[],
     // CIOT (NT 2026.001 — Rejeição 684) e Pagamento
+    ciot_contrato_id: '',
     ciot_codigo: '',
     ciot_responsavel_documento: '',
     pagto_frete: [] as PagamentoFrete[],
@@ -168,6 +169,99 @@ export default function MdfeWizardPage() {
     queryFn: async () => (await api.get('/transporte/municipios')).data
   });
   const municipios = municipiosData?.data || [];
+
+  const { data: ciotsData } = useQuery({
+    queryKey: ['ciot-mdfe-disponiveis'],
+    queryFn: async () =>
+      (await api.get('/transporte/contratos', { params: { disponivel_mdfe: 'true' } })).data
+  });
+  const ciotsDisponiveis = ciotsData?.data || [];
+
+  const aplicarOperacaoCiot = (contratoIdStr: string) => {
+    const op = ciotsDisponiveis.find((c: any) => String(c.id) === String(contratoIdStr));
+    if (!op) {
+      setForm(f => ({ ...f, ciot_contrato_id: '' }));
+      return;
+    }
+    const ciot12 = String(op.ciot_codigo || '').replace(/\D/g, '').slice(0, 12);
+    const docContr = String(
+      op.contratante_documento || emitentes[0]?.cnpj || ''
+    ).replace(/\D/g, '');
+    const tipoPag =
+      op.forma_quitacao === 'PIX'
+        ? '03'
+        : op.forma_quitacao === 'CARTAO_FRETE'
+        ? '02'
+        : '01';
+    const formaPag =
+      Number(op.valor_adiantamento || 0) > 0 &&
+      Number(op.valor_adiantamento || 0) < Number(op.valor_frete || 0)
+        ? '02'
+        : '01';
+
+    const veicMatch = veiculos.find(
+      (v: any) =>
+        (op.veiculo_id && String(v.id) === String(op.veiculo_id)) ||
+        (op.veiculo_placa &&
+          String(v.placa || '').toUpperCase() === String(op.veiculo_placa).toUpperCase())
+    );
+    const motMatch = motoristas.find(
+      (m: any) =>
+        (op.motorista_id && String(m.id) === String(op.motorista_id)) ||
+        (op.motorista_cpf &&
+          String(m.cpf || '').replace(/\D/g, '') ===
+            String(op.motorista_cpf).replace(/\D/g, ''))
+    );
+
+    setForm(f => {
+      const ufIni = (op.uf_inicio || f.uf_inicio || '').toUpperCase();
+      const ufDest = (op.uf_fim || f.uf_fim || '').toUpperCase();
+      return {
+        ...f,
+        ciot_contrato_id: String(op.id),
+        ciot_codigo: ciot12,
+        ciot_responsavel_documento: mascaras.cpfCnpj(docContr),
+        uf_inicio: ufIni || f.uf_inicio,
+        uf_fim: ufDest || f.uf_fim,
+        ufs_percurso: ufIni && ufDest ? resolverPercursoUfs(ufIni, ufDest) : f.ufs_percurso,
+        veiculo_id: veicMatch ? String(veicMatch.id) : f.veiculo_id,
+        veiculo_placa: veicMatch?.placa || op.veiculo_placa || f.veiculo_placa,
+        condutores: motMatch
+          ? [{ id: String(motMatch.id), nome: motMatch.nome, cpf: motMatch.cpf }]
+          : op.motorista_nome && op.motorista_cpf && f.condutores.length === 0
+          ? [{ id: `mot-ciot-${op.id}`, nome: op.motorista_nome, cpf: op.motorista_cpf }]
+          : f.condutores,
+        contratantes: docContr
+          ? [
+              {
+                id: `contr-ciot-${op.id}`,
+                tipo: docContr.length === 11 ? 'PF' : 'PJ',
+                documento: mascaras.cpfCnpj(docContr),
+                nome: op.contratante_nome || 'CONTRATANTE'
+              }
+            ]
+          : f.contratantes,
+        pagto_frete: [
+          {
+            id: `pag-ciot-${op.id}`,
+            responsavel: mascaras.cpfCnpj(docContr),
+            componentes:
+              Number(op.valor_pedagio || 0) > 0 ? 'Frete + Vale-Pedágio' : 'Frete',
+            forma: formaPag,
+            tipo: tipoPag
+          }
+        ]
+      };
+    });
+  };
+
+  // Se abriu a tela via ?ciot_id=... vindo da Central de CIOT, importa automaticamente a operação
+  React.useEffect(() => {
+    const ciotIdUrl = searchParams.get('ciot_id');
+    if (ciotIdUrl && ciotsDisponiveis.length > 0 && form.ciot_contrato_id !== ciotIdUrl) {
+      aplicarOperacaoCiot(ciotIdUrl);
+    }
+  }, [ciotsDisponiveis.length, searchParams]);
 
   // Auto-seleciona o emitente e a modalidade padrão configurada na empresa (Carga Própria sem CT-e vs Transportadora)
   React.useEffect(() => {
@@ -426,6 +520,11 @@ export default function MdfeWizardPage() {
         ctes_ids: form.tipo_emitente === '2' ? [] : form.ctes_ids,
         cargas_ids: form.tipo_emitente === '2' ? form.cargas_ids : [],
         chaves_nfe: form.tipo_emitente === '2' ? form.chaves_nfe : [],
+        ciot_contrato_id: isCargaPropriaFrotaPropria
+          ? undefined
+          : form.ciot_contrato_id
+          ? Number(form.ciot_contrato_id)
+          : undefined,
         ciot_codigo: isCargaPropriaFrotaPropria ? '' : form.ciot_codigo,
         ciot_responsavel_documento: isCargaPropriaFrotaPropria ? '' : form.ciot_responsavel_documento,
         contratantes: isCargaPropriaFrotaPropria ? [] : form.contratantes,
@@ -906,6 +1005,42 @@ export default function MdfeWizardPage() {
                       <legend className="px-2 text-xs font-bold text-slate-500 uppercase tracking-wider">
                         CIOT (ANTT) e Pagamento de Frete <span className="text-red-500">*</span>
                       </legend>
+
+                      {/* Seletor 1-Clique de Operações CIOT Ativas */}
+                      <div className="p-3 rounded-xl bg-teal-50/70 dark:bg-teal-950/30 border border-teal-200 dark:border-teal-800/70 flex flex-col sm:flex-row sm:items-end justify-between gap-3">
+                        <div className="flex-1">
+                          <CampoFiscal
+                            rotulo="Importar Operação CIOT Cadastrada (1 Clique)"
+                            dica="Preenche automaticamente os 12 dígitos do CIOT, Contratante e Pagamento de Frete"
+                          >
+                            <SelectFiscal
+                              value={form.ciot_contrato_id}
+                              onChange={aplicarOperacaoCiot}
+                              opcoes={[
+                                {
+                                  valor: '',
+                                  rotulo:
+                                    ciotsDisponiveis.length > 0
+                                      ? `Selecionar operação CIOT ativa (${ciotsDisponiveis.length} disponível)...`
+                                      : 'Nenhuma operação CIOT ativa — digite abaixo ou crie na Central CIOT'
+                                },
+                                ...ciotsDisponiveis.map((op: any) => ({
+                                  valor: String(op.id),
+                                  rotulo: `CIOT ${op.ciot_protocolo_formatado || op.ciot_codigo} · ${op.transportador_nome} (${op.uf_inicio}→${op.uf_fim}) · R$ ${Number(op.valor_frete || 0).toFixed(2)}`
+                                }))
+                              ]}
+                            />
+                          </CampoFiscal>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => navigate('/transporte/ciot')}
+                          className="px-3 py-2 rounded-lg bg-teal-600 hover:bg-teal-700 text-white text-xs font-bold whitespace-nowrap shrink-0 transition-colors"
+                        >
+                          Abrir Central CIOT
+                        </button>
+                      </div>
+
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pb-2 border-b border-slate-100 dark:border-slate-800">
                         <CampoFiscal
                           rotulo="Código CIOT (ANTT — 12 dígitos)"

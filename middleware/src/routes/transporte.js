@@ -24,6 +24,19 @@ const {
     normalizarUf,
     listarMunicipiosDicionario,
 } = require('../utils/ibgeMunicipios');
+const {
+    EIXOS_VALIDOS,
+    calcularPisoMinimoAntt,
+    listarCategoriasCargaAntt,
+} = require('../utils/anttPisoMinimo');
+const {
+    PROVEDORES_CIOT_SUPORTADOS,
+    CNPJ_PADRAO_IPEF,
+    normalizarProtocoloCiot,
+    emitirOuRegistrarCiot,
+    encerrarCiotContrato,
+    estornarFinanceiroCiot,
+} = require('../services/ciotProviderService');
 
 let _transporteColsReady = false;
 async function ensureTransporteColumns() {
@@ -64,7 +77,13 @@ async function ensureTransporteColumns() {
               ADD COLUMN IF NOT EXISTS aliquota_cofins NUMERIC(7,4),
               ADD COLUMN IF NOT EXISTS excluir_icms_base_pis_cofins BOOLEAN DEFAULT TRUE,
               ADD COLUMN IF NOT EXISTS perfil_operacional VARCHAR(30) DEFAULT 'HIBRIDO',
-              ADD COLUMN IF NOT EXISTS mdfe_tipo_emitente_padrao VARCHAR(2) DEFAULT '1';
+              ADD COLUMN IF NOT EXISTS mdfe_tipo_emitente_padrao VARCHAR(2) DEFAULT '1',
+              ADD COLUMN IF NOT EXISTS ciot_provedor VARCHAR(30) DEFAULT 'HOMOLOGACAO_LOCAL',
+              ADD COLUMN IF NOT EXISTS ciot_ambiente VARCHAR(20) DEFAULT 'homologacao',
+              ADD COLUMN IF NOT EXISTS ciot_integrador_token TEXT,
+              ADD COLUMN IF NOT EXISTS ciot_usuario VARCHAR(120),
+              ADD COLUMN IF NOT EXISTS ciot_senha TEXT,
+              ADD COLUMN IF NOT EXISTS ciot_cnpj_ipef VARCHAR(14);
 
             ALTER TABLE dash_cargas
               ADD COLUMN IF NOT EXISTS modelo_documento VARCHAR(2) DEFAULT '55',
@@ -79,9 +98,9 @@ async function ensureTransporteColumns() {
 
             CREATE TABLE IF NOT EXISTS dash_transporte_regioes (
               id SERIAL PRIMARY KEY,
-              tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+              tenant_id UUID NOT NULL,
               nome VARCHAR(120) NOT NULL,
-              cor VARCHAR(20) DEFAULT '#0284c7',
+              cor VARCHAR(24) DEFAULT 'sky',
               uf_padrao VARCHAR(2) DEFAULT 'MS',
               cidades JSONB NOT NULL DEFAULT '[]'::jsonb,
               descricao VARCHAR(255),
@@ -90,6 +109,49 @@ async function ensureTransporteColumns() {
               updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
               UNIQUE(tenant_id, nome)
             );
+
+            ALTER TABLE dash_contratos_transporte
+              ADD COLUMN IF NOT EXISTS veiculo_id INTEGER,
+              ADD COLUMN IF NOT EXISTS veiculo_placa VARCHAR(10),
+              ADD COLUMN IF NOT EXISTS quantidade_eixos INTEGER DEFAULT 2,
+              ADD COLUMN IF NOT EXISTS motorista_id INTEGER,
+              ADD COLUMN IF NOT EXISTS motorista_nome VARCHAR(160),
+              ADD COLUMN IF NOT EXISTS motorista_cpf VARCHAR(14),
+              ADD COLUMN IF NOT EXISTS municipio_inicio VARCHAR(120),
+              ADD COLUMN IF NOT EXISTS codigo_ibge_inicio VARCHAR(7),
+              ADD COLUMN IF NOT EXISTS municipio_fim VARCHAR(120),
+              ADD COLUMN IF NOT EXISTS codigo_ibge_fim VARCHAR(7),
+              ADD COLUMN IF NOT EXISTS distancia_km NUMERIC(10,2) DEFAULT 0,
+              ADD COLUMN IF NOT EXISTS categoria_carga_antt VARCHAR(40) DEFAULT 'GERAL',
+              ADD COLUMN IF NOT EXISTS alto_desempenho BOOLEAN DEFAULT FALSE,
+              ADD COLUMN IF NOT EXISTS retorno_vazio BOOLEAN DEFAULT FALSE,
+              ADD COLUMN IF NOT EXISTS peso_carga_kg NUMERIC(12,3) DEFAULT 0,
+              ADD COLUMN IF NOT EXISTS valor_carga NUMERIC(15,2) DEFAULT 0,
+              ADD COLUMN IF NOT EXISTS ncm_carga VARCHAR(8),
+              ADD COLUMN IF NOT EXISTS chaves_nfe JSONB DEFAULT '[]'::jsonb,
+              ADD COLUMN IF NOT EXISTS chave_pix VARCHAR(120),
+              ADD COLUMN IF NOT EXISTS banco_codigo VARCHAR(10),
+              ADD COLUMN IF NOT EXISTS banco_agencia VARCHAR(15),
+              ADD COLUMN IF NOT EXISTS banco_conta VARCHAR(25),
+              ADD COLUMN IF NOT EXISTS cnpj_ipef VARCHAR(14),
+              ADD COLUMN IF NOT EXISTS data_saida DATE,
+              ADD COLUMN IF NOT EXISTS data_prevista_entrega DATE,
+              ADD COLUMN IF NOT EXISTS valor_inss NUMERIC(15,2) DEFAULT 0,
+              ADD COLUMN IF NOT EXISTS valor_irrf NUMERIC(15,2) DEFAULT 0,
+              ADD COLUMN IF NOT EXISTS valor_sest_senat NUMERIC(15,2) DEFAULT 0,
+              ADD COLUMN IF NOT EXISTS valor_outros_descontos NUMERIC(15,2) DEFAULT 0,
+              ADD COLUMN IF NOT EXISTS ciot_verificador VARCHAR(10),
+              ADD COLUMN IF NOT EXISTS ciot_provedor VARCHAR(30) DEFAULT 'HOMOLOGACAO_LOCAL',
+              ADD COLUMN IF NOT EXISTS ciot_protocolo_encerramento VARCHAR(40),
+              ADD COLUMN IF NOT EXISTS ciot_transmitido_em TIMESTAMPTZ,
+              ADD COLUMN IF NOT EXISTS ciot_encerrado_em TIMESTAMPTZ,
+              ADD COLUMN IF NOT EXISTS ciot_erro TEXT,
+              ADD COLUMN IF NOT EXISTS piso_isento BOOLEAN DEFAULT FALSE,
+              ADD COLUMN IF NOT EXISTS piso_isencao_motivo TEXT,
+              ADD COLUMN IF NOT EXISTS mdfe_id INTEGER,
+              ADD COLUMN IF NOT EXISTS gerar_financeiro BOOLEAN DEFAULT TRUE,
+              ADD COLUMN IF NOT EXISTS financeiro_ids JSONB DEFAULT '[]'::jsonb,
+              ADD COLUMN IF NOT EXISTS observacoes TEXT;
 
             ALTER TABLE dash_regras_fiscais
               ADD COLUMN IF NOT EXISTS pis_cofins_modo VARCHAR(20) DEFAULT 'NAO_APURADO',
@@ -2264,6 +2326,23 @@ router.post('/mdfes', async (req, res) => {
             );
         }
 
+        const ciotContratoIdVinc = b.ciot_contrato_id ? parseInt(b.ciot_contrato_id, 10) : null;
+        const ciotCodVinc = b.ciot_codigo ? String(b.ciot_codigo).replace(/\D/g, '').slice(0, 12) : '';
+        if (Number.isFinite(ciotContratoIdVinc) || ciotCodVinc) {
+            await db
+                .query(
+                    `UPDATE dash_contratos_transporte
+                     SET mdfe_id = $1, updated_at = NOW()
+                     WHERE tenant_id = $2
+                       AND (
+                         ($3::int IS NOT NULL AND id = $3)
+                         OR ($4 <> '' AND ciot_codigo = $4)
+                       )`,
+                    [novoMdfe.id, tenantId, Number.isFinite(ciotContratoIdVinc) ? ciotContratoIdVinc : null, ciotCodVinc]
+                )
+                .catch(() => null);
+        }
+
         return res.status(201).json({ success: true, data: novoMdfe });
     } catch (err) {
         logger.error('[Transporte API] Erro ao criar MDF-e:', err.message);
@@ -2637,6 +2716,8 @@ router.get('/emitentes', async (req, res) => {
                 '';
             const plainHomolog = String(decryptSecret(rawTokHomolog) || '').trim();
             const plainProd = String(decryptSecret(rawTokProd) || '').trim();
+            const plainCiotToken = String(decryptSecret(r.ciot_integrador_token) || '').trim();
+            const plainCiotSenha = String(decryptSecret(r.ciot_senha) || '').trim();
             return {
                 ...r,
                 focus_ambiente: r.focus_ambiente || cfg.focus_ambiente || 'homologacao',
@@ -2647,6 +2728,16 @@ router.get('/emitentes', async (req, res) => {
                 tem_token_producao: Boolean(plainProd),
                 token_homologacao_preview: plainHomolog ? `${plainHomolog.slice(0, 4)}••••` : null,
                 token_producao_preview: plainProd ? `${plainProd.slice(0, 4)}••••` : null,
+                ciot_provedor: PROVEDORES_CIOT_SUPORTADOS.includes(String(r.ciot_provedor || '').toUpperCase())
+                    ? String(r.ciot_provedor).toUpperCase()
+                    : 'HOMOLOGACAO_LOCAL',
+                ciot_ambiente: String(r.ciot_ambiente || r.focus_ambiente || 'homologacao').toLowerCase(),
+                ciot_usuario: r.ciot_usuario || '',
+                ciot_cnpj_ipef: r.ciot_cnpj_ipef || '',
+                ciot_integrador_token: maskSecret(r.ciot_integrador_token),
+                ciot_senha: maskSecret(r.ciot_senha),
+                tem_ciot_token: Boolean(plainCiotToken),
+                tem_ciot_senha: Boolean(plainCiotSenha),
                 cnpj_valido: TransporteService.validarCnpjReal(r.cnpj),
                 software_house_disponivel: masterCfg.temMasterToken,
                 tem_logo: Boolean(r.logo_base64),
@@ -2899,6 +2990,30 @@ router.post('/emitentes', async (req, res) => {
                 ? '2'
                 : '1';
 
+        const ciotProvedorRaw = String(
+            b.ciot_provedor || existingEmit.ciot_provedor || 'HOMOLOGACAO_LOCAL'
+        )
+            .toUpperCase()
+            .trim();
+        const ciotProvedor = PROVEDORES_CIOT_SUPORTADOS.includes(ciotProvedorRaw)
+            ? ciotProvedorRaw
+            : 'HOMOLOGACAO_LOCAL';
+        const ciotAmbiente =
+            String(b.ciot_ambiente || existingEmit.ciot_ambiente || ambiente).toLowerCase() === 'producao'
+                ? 'producao'
+                : 'homologacao';
+        const ciotUsuario =
+            b.ciot_usuario !== undefined ? String(b.ciot_usuario || '').trim() || null : (existingEmit.ciot_usuario || null);
+        const ciotCnpjIpef =
+            b.ciot_cnpj_ipef !== undefined
+                ? String(b.ciot_cnpj_ipef || '').replace(/\D/g, '').slice(0, 14) || null
+                : (existingEmit.ciot_cnpj_ipef || null);
+        const ciotTokenSaved = resolveSecretForSave(
+            b.ciot_integrador_token,
+            existingEmit.ciot_integrador_token
+        );
+        const ciotSenhaSaved = resolveSecretForSave(b.ciot_senha, existingEmit.ciot_senha);
+
         let saved = null;
 
         // Se está editando o emitente atual (ex: corrigindo CNPJ placeholder 00000000000100 ou "1"), atualiza in-place mantendo o ID!
@@ -2933,8 +3048,14 @@ router.post('/emitentes', async (req, res) => {
                     aliquota_icms_padrao = $26,
                     perfil_operacional = $27,
                     mdfe_tipo_emitente_padrao = $28,
+                    ciot_provedor = $29,
+                    ciot_ambiente = $30,
+                    ciot_usuario = $31,
+                    ciot_cnpj_ipef = $32,
+                    ciot_integrador_token = COALESCE(NULLIF($33, ''), ciot_integrador_token),
+                    ciot_senha = COALESCE(NULLIF($34, ''), ciot_senha),
                     updated_at = NOW()
-                 WHERE id = $29 AND tenant_id = $30
+                 WHERE id = $35 AND tenant_id = $36
                  RETURNING *`,
                 [
                     cleanCnpj,
@@ -2965,6 +3086,12 @@ router.post('/emitentes', async (req, res) => {
                     b.aliquota_icms_padrao !== undefined ? parseFloat(b.aliquota_icms_padrao) : 12.0,
                     perfilOperacional,
                     mdfeTipoEmitentePadrao,
+                    ciotProvedor,
+                    ciotAmbiente,
+                    ciotUsuario,
+                    ciotCnpjIpef,
+                    ciotTokenSaved,
+                    ciotSenhaSaved,
                     targetById.id,
                     tenantId,
                 ]
@@ -2979,7 +3106,8 @@ router.post('/emitentes', async (req, res) => {
                     uf, municipio, codigo_municipio, telefone, email,
                     focus_token, focus_token_homologacao, focus_token_producao, focus_ambiente,
                     serie_cte, serie_mdfe, cfop_padrao_cte, natureza_padrao_cte, aliquota_icms_padrao,
-                    perfil_operacional, mdfe_tipo_emitente_padrao
+                    perfil_operacional, mdfe_tipo_emitente_padrao,
+                    ciot_provedor, ciot_ambiente, ciot_usuario, ciot_cnpj_ipef, ciot_integrador_token, ciot_senha
                  ) VALUES (
                     $1, $2, $3, $4, $5, $6,
                     $7, $8,
@@ -2987,7 +3115,8 @@ router.post('/emitentes', async (req, res) => {
                     $14, $15, $16, $17, $18,
                     $19, $20, $21, $22,
                     $23, $24, $25, $26, $27,
-                    $28, $29
+                    $28, $29,
+                    $30, $31, $32, $33, $34, $35
                  )
                  ON CONFLICT (tenant_id, cnpj) DO UPDATE SET
                     razao_social = EXCLUDED.razao_social,
@@ -3017,6 +3146,12 @@ router.post('/emitentes', async (req, res) => {
                     aliquota_icms_padrao = COALESCE(EXCLUDED.aliquota_icms_padrao, dash_emitentes.aliquota_icms_padrao),
                     perfil_operacional = EXCLUDED.perfil_operacional,
                     mdfe_tipo_emitente_padrao = EXCLUDED.mdfe_tipo_emitente_padrao,
+                    ciot_provedor = EXCLUDED.ciot_provedor,
+                    ciot_ambiente = EXCLUDED.ciot_ambiente,
+                    ciot_usuario = COALESCE(EXCLUDED.ciot_usuario, dash_emitentes.ciot_usuario),
+                    ciot_cnpj_ipef = COALESCE(EXCLUDED.ciot_cnpj_ipef, dash_emitentes.ciot_cnpj_ipef),
+                    ciot_integrador_token = COALESCE(NULLIF(EXCLUDED.ciot_integrador_token, ''), dash_emitentes.ciot_integrador_token),
+                    ciot_senha = COALESCE(NULLIF(EXCLUDED.ciot_senha, ''), dash_emitentes.ciot_senha),
                     updated_at = NOW()
                  RETURNING *`,
                 [
@@ -3049,6 +3184,12 @@ router.post('/emitentes', async (req, res) => {
                     b.aliquota_icms_padrao !== undefined ? parseFloat(b.aliquota_icms_padrao) : 12.0,
                     perfilOperacional,
                     mdfeTipoEmitentePadrao,
+                    ciotProvedor,
+                    ciotAmbiente,
+                    ciotUsuario,
+                    ciotCnpjIpef,
+                    ciotTokenSaved,
+                    ciotSenhaSaved,
                 ]
             );
             saved = rows[0];
@@ -3443,35 +3584,120 @@ router.post('/partes', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────
-// 7. CONTRATOS DE TRANSPORTE + CIOT
+// 7. CONTRATOS DE TRANSPORTE + CIOT (ANTT Res. 5.867 + IPEF + Financeiro)
 // ─────────────────────────────────────────────────────────────
 
-/**
- * Piso mínimo ANTT por tipo de operação (valores base em R$ por km).
- * Atualizável via dash_regras_fiscais — nunca codificar fixo no sistema.
- */
-function calcularPisoMinimo(tipoOperacao, ufInicio, ufFim, valorFrete) {
-    // Distância média de referência por tipo de operação (km) — base de cálculo conservadora.
-    const distanciaRef = tipoOperacao === 'Carga Fracionada' ? 1200 : 800;
-    const pisoPorKm = tipoOperacao === 'Carga Lotacao' ? 1.86 : 1.55;
-    const piso = distanciaRef * pisoPorKm;
-    const floor = Math.round(piso * 100) / 100;
-    return {
-        piso: floor,
-        aprovado: Number(valorFrete || 0) >= floor,
-        // Margem de segurança de 5% para absorver variações de tabela.
-        margem: Math.round(floor * 1.05 * 100) / 100
-    };
-}
+router.get('/ciot/tabelas-antt', (_req, res) => {
+    return res.json({
+        success: true,
+        data: {
+            categorias: listarCategoriasCargaAntt(),
+            eixos: EIXOS_VALIDOS,
+            provedores: PROVEDORES_CIOT_SUPORTADOS,
+            cnpj_padrao_ipef: CNPJ_PADRAO_IPEF,
+        },
+    });
+});
+
+router.post('/ciot/calcular-piso', (req, res) => {
+    const b = req.body || {};
+    const calc = calcularPisoMinimoAntt({
+        categoriaCarga: b.categoria_carga_antt || b.categoriaCarga || 'GERAL',
+        tipoOperacao: b.tipo_operacao || b.tipoOperacao || 'Carga Lotacao',
+        quantidadeEixos: b.quantidade_eixos ?? b.quantidadeEixos ?? 2,
+        distanciaKm: b.distancia_km ?? b.distanciaKm ?? 0,
+        ufInicio: b.uf_inicio || b.ufInicio || 'MS',
+        ufFim: b.uf_fim || b.ufFim || 'MS',
+        municipioInicio: b.municipio_inicio || b.municipioInicio || '',
+        municipioFim: b.municipio_fim || b.municipioFim || '',
+        altoDesempenho: Boolean(b.alto_desempenho ?? b.altoDesempenho),
+        retornoVazio: Boolean(b.retorno_vazio ?? b.retornoVazio),
+        valorFrete: b.valor_frete ?? b.valorFrete ?? 0,
+        pisoIsento: Boolean(b.piso_isento ?? b.pisoIsento),
+        pisoIsencaoMotivo: b.piso_isencao_motivo || b.pisoIsencaoMotivo || '',
+    });
+    return res.json({ success: true, data: calc });
+});
 
 router.get('/contratos', async (req, res) => {
     const tenantId = req.tenant.id;
+    const { status = '', disponivel_mdfe = '', search = '' } = req.query || {};
     try {
+        const params = [tenantId];
+        let whereSql = `c.tenant_id = $1`;
+
+        if (status && status !== 'TODOS') {
+            params.push(String(status).toUpperCase().trim());
+            whereSql += ` AND c.ciot_status = $${params.length}`;
+        }
+        if (String(disponivel_mdfe).toLowerCase() === 'true') {
+            whereSql += ` AND c.ciot_status = 'TRANSMITIDO' AND c.ciot_codigo IS NOT NULL`;
+        }
+        if (search && String(search).trim()) {
+            params.push(`%${String(search).trim()}%`);
+            whereSql += ` AND (
+                c.transportador_nome ILIKE $${params.length}
+                OR c.contratante_nome ILIKE $${params.length}
+                OR COALESCE(c.ciot_codigo, '') ILIKE $${params.length}
+                OR COALESCE(c.veiculo_placa, '') ILIKE $${params.length}
+                OR COALESCE(c.motorista_nome, '') ILIKE $${params.length}
+            )`;
+        }
+
         const { rows } = await db.query(
-            `SELECT * FROM dash_contratos_transporte WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 300`,
-            [tenantId]
+            `SELECT c.*,
+                    m.numero AS mdfe_numero,
+                    m.serie AS mdfe_serie,
+                    m.status AS mdfe_status,
+                    m.chave_mdfe AS mdfe_chave
+             FROM dash_contratos_transporte c
+             LEFT JOIN dash_mdfes m ON m.id = c.mdfe_id AND m.tenant_id = c.tenant_id
+             WHERE ${whereSql}
+             ORDER BY c.created_at DESC
+             LIMIT 300`,
+            params
         );
-        return res.json({ success: true, data: rows });
+
+        const enriched = rows.map((r) => ({
+            ...r,
+            ciot_protocolo_formatado: r.ciot_codigo
+                ? r.ciot_verificador
+                    ? `${r.ciot_codigo}/${r.ciot_verificador}`
+                    : r.ciot_codigo
+                : null,
+        }));
+
+        const resumo = enriched.reduce(
+            (acc, r) => {
+                acc.total += 1;
+                const st = String(r.ciot_status || 'PENDENTE').toUpperCase();
+                if (st === 'TRANSMITIDO') acc.transmitidos += 1;
+                else if (st === 'ENCERRADO') acc.encerrados += 1;
+                else if (st === 'CANCELADO') acc.cancelados += 1;
+                else acc.pendentes += 1;
+
+                if (st !== 'CANCELADO') {
+                    const frete = Number(r.valor_frete || 0);
+                    const adiant = Number(r.valor_adiantamento || 0);
+                    acc.total_frete += frete;
+                    acc.total_adiantamento += adiant;
+                    acc.total_saldo += Math.max(0, frete - adiant);
+                }
+                return acc;
+            },
+            {
+                total: 0,
+                transmitidos: 0,
+                encerrados: 0,
+                pendentes: 0,
+                cancelados: 0,
+                total_frete: 0,
+                total_adiantamento: 0,
+                total_saldo: 0,
+            }
+        );
+
+        return res.json({ success: true, data: enriched, resumo });
     } catch (err) {
         return res.status(500).json({ error: err.message });
     }
@@ -3479,163 +3705,355 @@ router.get('/contratos', async (req, res) => {
 
 router.post('/contratos', async (req, res) => {
     const tenantId = req.tenant.id;
-    const {
-        contratante_nome, contratante_documento,
-        transportador_nome, transportador_documento, transportador_rntrc,
-        tipo_transporte = '2', tipo_operacao = 'Carga Lotacao',
-        uf_inicio, uf_fim,
-        valor_frete = 0, valor_adiantamento = 0, valor_pedagio = 0, valor_combustivel = 0,
-        forma_quitacao = 'PIX', emitente_id
-    } = req.body || {};
-
-    if (!contratante_nome || !transportador_nome || !uf_inicio || !uf_fim) {
-        return res.status(400).json({ error: 'contratante, transportador, uf_inicio e uf_fim são obrigatórios.' });
-    }
+    const b = req.body || {};
 
     try {
         // Resolve emitente padrão se não informado
-        let emitId = emitente_id;
-        if (!emitId) {
+        let emitRow = null;
+        if (b.emitente_id) {
             const em = await db.query(
-                `SELECT id FROM dash_emitentes WHERE tenant_id = $1 AND ativo = true ORDER BY id LIMIT 1`,
+                `SELECT * FROM dash_emitentes WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
+                [parseInt(b.emitente_id, 10), tenantId]
+            );
+            emitRow = em.rows[0] || null;
+        }
+        if (!emitRow) {
+            const em = await db.query(
+                `SELECT * FROM dash_emitentes WHERE tenant_id = $1 AND ativo = true ORDER BY id LIMIT 1`,
                 [tenantId]
             );
-            if (em.rows.length === 0) {
-                return res.status(400).json({ error: 'Cadastre uma transportadora (emitente) antes de criar contratos.' });
-            }
-            emitId = em.rows[0].id;
+            emitRow = em.rows[0] || null;
+        }
+        if (!emitRow) {
+            return res.status(400).json({ error: 'Cadastre uma empresa emitente antes de criar operações de CIOT.' });
         }
 
-        const piso = calcularPisoMinimo(tipo_operacao, uf_inicio, uf_fim, valor_frete);
+        const contratanteNome = String(b.contratante_nome || emitRow.razao_social || '').trim();
+        const contratanteDoc = String(b.contratante_documento || emitRow.cnpj || '').replace(/\D/g, '');
+        const transportadorNome = String(b.transportador_nome || '').trim();
+        const transportadorDoc = String(b.transportador_documento || '').replace(/\D/g, '');
+        const ufInicio = normalizarUf(b.uf_inicio || emitRow.uf || 'MS') || 'MS';
+        const ufFim = normalizarUf(b.uf_fim || 'MS') || 'MS';
+
+        if (!contratanteNome || !transportadorNome || !ufInicio || !ufFim) {
+            return res.status(400).json({
+                error: 'Contratante, Transportador, UF de Origem e UF de Destino são obrigatórios.',
+            });
+        }
+        if (transportadorDoc.length !== 11 && transportadorDoc.length !== 14) {
+            return res.status(400).json({
+                error: 'Informe um CPF (11 dígitos) ou CNPJ (14 dígitos) válido para o Transportador contratado.',
+            });
+        }
+
+        // Resolve códigos IBGE de origem e destino quando município foi informado
+        let munInicio = String(b.municipio_inicio || emitRow.municipio || '').trim() || null;
+        let codIbgeInicio = String(b.codigo_ibge_inicio || '').replace(/\D/g, '').slice(0, 7) || null;
+        if (munInicio && !codIbgeInicio) {
+            const rIni = await resolverIbgeMunicipioAsync(db, {
+                municipio: munInicio,
+                uf: ufInicio,
+                permitirFallbackCapital: false,
+            });
+            if (rIni?.codigo) {
+                codIbgeInicio = rIni.codigo;
+                munInicio = rIni.nome || munInicio;
+            }
+        }
+
+        let munFim = String(b.municipio_fim || '').trim() || null;
+        let codIbgeFim = String(b.codigo_ibge_fim || '').replace(/\D/g, '').slice(0, 7) || null;
+        if (munFim && !codIbgeFim) {
+            const rFim = await resolverIbgeMunicipioAsync(db, {
+                municipio: munFim,
+                uf: ufFim,
+                permitirFallbackCapital: false,
+            });
+            if (rFim?.codigo) {
+                codIbgeFim = rFim.codigo;
+                munFim = rFim.nome || munFim;
+            }
+        }
+
+        const tipoOperacao = b.tipo_operacao || 'Carga Lotacao';
+        const categoriaCarga = String(b.categoria_carga_antt || 'GERAL').toUpperCase();
+        const qtdEixos = parseInt(b.quantidade_eixos, 10) || 2;
+        const pisoIsento = Boolean(b.piso_isento);
+        const pisoIsencaoMotivo = b.piso_isencao_motivo ? String(b.piso_isencao_motivo).trim() : null;
+
+        const piso = calcularPisoMinimoAntt({
+            categoriaCarga,
+            tipoOperacao,
+            quantidadeEixos: qtdEixos,
+            distanciaKm: b.distancia_km,
+            ufInicio,
+            ufFim,
+            municipioInicio: munInicio,
+            municipioFim: munFim,
+            altoDesempenho: Boolean(b.alto_desempenho),
+            retornoVazio: Boolean(b.retorno_vazio),
+            valorFrete: b.valor_frete,
+            pisoIsento,
+            pisoIsencaoMotivo,
+        });
+
+        const provedorEscolhido = PROVEDORES_CIOT_SUPORTADOS.includes(
+            String(b.ciot_provedor || emitRow.ciot_provedor || '').toUpperCase()
+        )
+            ? String(b.ciot_provedor || emitRow.ciot_provedor).toUpperCase()
+            : 'HOMOLOGACAO_LOCAL';
+
+        const chavesNfeArr = Array.isArray(b.chaves_nfe)
+            ? b.chaves_nfe
+                  .map((ch) => String(ch || '').replace(/\D/g, ''))
+                  .filter((ch) => ch.length === 44)
+            : [];
 
         const { rows } = await db.query(
             `INSERT INTO dash_contratos_transporte (
                 tenant_id, emitente_id,
                 contratante_nome, contratante_documento,
                 transportador_nome, transportador_documento, transportador_rntrc,
-                tipo_transporte, tipo_operacao, uf_inicio, uf_fim,
+                tipo_transporte, tipo_operacao,
+                uf_inicio, municipio_inicio, codigo_ibge_inicio,
+                uf_fim, municipio_fim, codigo_ibge_fim,
+                distancia_km, categoria_carga_antt, quantidade_eixos,
+                alto_desempenho, retorno_vazio,
+                peso_carga_kg, valor_carga, ncm_carga, chaves_nfe,
+                veiculo_id, veiculo_placa,
+                motorista_id, motorista_nome, motorista_cpf,
                 valor_frete, valor_adiantamento, valor_pedagio, valor_combustivel,
-                forma_quitacao, piso_minimo_antt, piso_minimo_aprovado
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+                valor_inss, valor_irrf, valor_sest_senat, valor_outros_descontos,
+                forma_quitacao, chave_pix, banco_codigo, banco_agencia, banco_conta, cnpj_ipef,
+                data_saida, data_prevista_entrega,
+                piso_minimo_antt, piso_minimo_aprovado, piso_isento, piso_isencao_motivo,
+                ciot_provedor, gerar_financeiro, observacoes
+             ) VALUES (
+                $1,$2,
+                $3,$4,
+                $5,$6,$7,
+                $8,$9,
+                $10,$11,$12,
+                $13,$14,$15,
+                $16,$17,$18,
+                $19,$20,
+                $21,$22,$23,$24::jsonb,
+                $25,$26,
+                $27,$28,$29,
+                $30,$31,$32,$33,
+                $34,$35,$36,$37,
+                $38,$39,$40,$41,$42,$43,
+                $44,$45,
+                $46,$47,$48,$49,
+                $50,$51,$52
+             )
              RETURNING *`,
             [
-                tenantId, emitId,
-                contratante_nome, String(contratante_documento || '').replace(/\D/g, ''),
-                transportador_nome, String(transportador_documento || '').replace(/\D/g, ''), transportador_rntrc,
-                tipo_transporte, tipo_operacao, uf_inicio, uf_fim,
-                parseFloat(valor_frete || 0), parseFloat(valor_adiantamento || 0),
-                parseFloat(valor_pedagio || 0), parseFloat(valor_combustivel || 0),
-                forma_quitacao, piso.piso, piso.aprovado
+                tenantId,
+                emitRow.id,
+                contratanteNome,
+                contratanteDoc,
+                transportadorNome,
+                transportadorDoc,
+                b.transportador_rntrc ? String(b.transportador_rntrc).replace(/\D/g, '').slice(0, 20) : null,
+                String(b.tipo_transporte || '2'),
+                tipoOperacao,
+                ufInicio,
+                munInicio,
+                codIbgeInicio,
+                ufFim,
+                munFim,
+                codIbgeFim,
+                piso.distancia_km,
+                piso.categoria_codigo,
+                piso.eixos,
+                Boolean(b.alto_desempenho),
+                Boolean(b.retorno_vazio),
+                parseFloat(b.peso_carga_kg || 0) || 0,
+                parseFloat(b.valor_carga || 0) || 0,
+                b.ncm_carga ? String(b.ncm_carga).replace(/\D/g, '').slice(0, 8) : null,
+                JSON.stringify(chavesNfeArr),
+                b.veiculo_id ? parseInt(b.veiculo_id, 10) : null,
+                b.veiculo_placa
+                    ? String(b.veiculo_placa).replace(/[^A-Z0-9]/gi, '').toUpperCase().slice(0, 10)
+                    : null,
+                b.motorista_id ? parseInt(b.motorista_id, 10) : null,
+                b.motorista_nome ? String(b.motorista_nome).trim() : transportadorNome,
+                b.motorista_cpf
+                    ? String(b.motorista_cpf).replace(/\D/g, '').slice(0, 14)
+                    : transportadorDoc.slice(0, 14),
+                parseFloat(b.valor_frete || 0) || 0,
+                parseFloat(b.valor_adiantamento || 0) || 0,
+                parseFloat(b.valor_pedagio || 0) || 0,
+                parseFloat(b.valor_combustivel || 0) || 0,
+                parseFloat(b.valor_inss || 0) || 0,
+                parseFloat(b.valor_irrf || 0) || 0,
+                parseFloat(b.valor_sest_senat || 0) || 0,
+                parseFloat(b.valor_outros_descontos || 0) || 0,
+                b.forma_quitacao || 'PIX',
+                b.chave_pix ? String(b.chave_pix).trim().slice(0, 120) : null,
+                b.banco_codigo ? String(b.banco_codigo).trim().slice(0, 10) : null,
+                b.banco_agencia ? String(b.banco_agencia).trim().slice(0, 15) : null,
+                b.banco_conta ? String(b.banco_conta).trim().slice(0, 25) : null,
+                b.cnpj_ipef ? String(b.cnpj_ipef).replace(/\D/g, '').slice(0, 14) : null,
+                b.data_saida || null,
+                b.data_prevista_entrega || null,
+                piso.piso,
+                piso.aprovado,
+                pisoIsento,
+                pisoIsencaoMotivo,
+                provedorEscolhido,
+                b.gerar_financeiro !== false,
+                b.observacoes ? String(b.observacoes).trim() : null,
             ]
         );
 
+        let contratoCriado = rows[0];
+        let payloadGerado = null;
+        let financeiroIds = [];
+
+        if (b.emitir_agora === true || (b.ciot_codigo && String(b.ciot_codigo).trim())) {
+            const emitRes = await emitirOuRegistrarCiot({
+                tenantId,
+                contratoId: contratoCriado.id,
+                modoExplicito: b.ciot_codigo ? 'MANUAL' : provedorEscolhido,
+                codigoManual: b.ciot_codigo || null,
+                verificadorManual: b.ciot_verificador || null,
+                usuario: req.user?.nome || req.user?.email || 'Operador',
+            });
+            contratoCriado = emitRes.contrato;
+            payloadGerado = emitRes.payload;
+            financeiroIds = emitRes.financeiro_ids || [];
+        }
+
         return res.status(201).json({
             success: true,
-            data: rows[0],
-            piso_minimo: piso
+            data: {
+                ...contratoCriado,
+                ciot_protocolo_formatado: contratoCriado.ciot_codigo
+                    ? contratoCriado.ciot_verificador
+                        ? `${contratoCriado.ciot_codigo}/${contratoCriado.ciot_verificador}`
+                        : contratoCriado.ciot_codigo
+                    : null,
+            },
+            payload: payloadGerado,
+            piso_minimo: piso,
+            financeiro_ids: financeiroIds,
         });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return res.status(err.statusCode || 500).json({
+            error: err.message,
+            code: err.code || undefined,
+            piso_detalhes: err.piso_detalhes || undefined,
+        });
     }
 });
 
 /**
- * Gera o payload do CIOT no formato exigido pela ANTT / Instituição de Pagamento.
- * O ColiseuTransporte NÃO emite o CIOT — apenas prepara e valida.
+ * Emite o CIOT (Simulador Homologação ANTT ou Conector IPEF) ou prepara o Payload estruturado.
  */
 router.post('/contratos/:id/gerar-ciot', async (req, res) => {
     const tenantId = req.tenant.id;
     const contratoId = req.params.id;
+    const b = req.body || {};
 
     try {
-        const { rows } = await db.query(
-            `SELECT * FROM dash_contratos_transporte WHERE id = $1 AND tenant_id = $2`,
-            [contratoId, tenantId]
-        );
-        if (rows.length === 0) return res.status(404).json({ error: 'Contrato não encontrado.' });
+        const result = await emitirOuRegistrarCiot({
+            tenantId,
+            contratoId,
+            modoExplicito: b.provedor || null,
+            codigoManual: b.ciot_codigo || null,
+            verificadorManual: b.ciot_verificador || null,
+            usuario: req.user?.nome || req.user?.email || 'Operador',
+        });
 
-        const c = rows[0];
-
-        if (c.piso_minimo_aprovado === false) {
-            return res.status(422).json({
-                error: `Frete abaixo do piso mínimo da ANTT (R$ ${Number(c.piso_minimo_antt).toFixed(2)}). O CIOT não pode ser gerado.`,
-                code: 'PISO_MINIMO_NAO_ATENDIDO'
-            });
-        }
-
-        const payload = {
-            ciot: {
-                versao: '1.00',
-                tipo_operacao: c.tipo_operacao,
-                tipo_transporte: c.tipo_transporte,
-                contratante: {
-                    documento: c.contratante_documento,
-                    nome: c.contratante_nome
-                },
-                transportador: {
-                    documento: c.transportador_documento,
-                    nome: c.transportador_nome,
-                    rntrc: c.transportador_rntrc || null
-                },
-                percurso: {
-                    uf_origem: c.uf_inicio,
-                    uf_destino: c.uf_fim
-                },
-                valores: {
-                    frete: parseFloat(c.valor_frete || 0).toFixed(2),
-                    adiantamento: parseFloat(c.valor_adiantamento || 0).toFixed(2),
-                    pedagio: parseFloat(c.valor_pedagio || 0).toFixed(2),
-                    combustivel: parseFloat(c.valor_combustivel || 0).toFixed(2),
-                    piso_minimo_referencia: c.piso_minimo_antt
-                },
-                quitacao: {
-                    forma: c.forma_quitacao
-                }
+        return res.json({
+            success: true,
+            data: {
+                ...result.contrato,
+                ciot_protocolo_formatado: result.contrato.ciot_codigo
+                    ? result.contrato.ciot_verificador
+                        ? `${result.contrato.ciot_codigo}/${result.contrato.ciot_verificador}`
+                        : result.contrato.ciot_codigo
+                    : null,
             },
-            _meta: {
-                gerado_em: new Date().toISOString(),
-                origem: 'ColiseuTransporte',
-                observacao: 'Payload gerado para transmissão à Instituição de Pagamento ou à API da ANTT.'
-            }
-        };
-
-        await db.query(
-            `UPDATE dash_contratos_transporte SET ciot_status = 'GERADO', ciot_payload_antt = $1, updated_at = NOW() WHERE id = $2`,
-            [JSON.stringify(payload), contratoId]
-        );
-
-        return res.json({ success: true, payload });
+            payload: result.payload,
+            piso_minimo: result.piso_minimo,
+            financeiro_ids: result.financeiro_ids,
+        });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return res.status(err.statusCode || 500).json({
+            error: err.message,
+            code: err.code || undefined,
+            piso_detalhes: err.piso_detalhes || undefined,
+        });
     }
 });
 
 /**
- * Registra o código do CIOT retornado pela Instituição de Pagamento / ANTT.
+ * Registra o código do CIOT retornado pela Instituição de Pagamento / ANTT (12 dígitos ou 12+4 dígitos).
  */
 router.patch('/contratos/:id/ciot', async (req, res) => {
     const tenantId = req.tenant.id;
     const contratoId = req.params.id;
-    const { ciot_codigo, ciot_status = 'TRANSMITIDO' } = req.body || {};
+    const { ciot_codigo, ciot_verificador } = req.body || {};
 
-    if (!ciot_codigo) return res.status(400).json({ error: 'ciot_codigo é obrigatório.' });
+    if (!ciot_codigo) {
+        return res.status(400).json({ error: 'Informe o código CIOT de 12 dígitos (ou 12 dígitos + 4 verificadores).' });
+    }
+
+    const checkNorm = normalizarProtocoloCiot(ciot_codigo, ciot_verificador);
+    if (!checkNorm.valido) {
+        return res.status(400).json({ error: checkNorm.erro, code: 'CIOT_FORMATO_INVALIDO' });
+    }
 
     try {
-        const { rows } = await db.query(
-            `UPDATE dash_contratos_transporte
-             SET ciot_codigo = $1, ciot_status = $2, ciot_transmitido_em = NOW(), updated_at = NOW()
-             WHERE id = $3 AND tenant_id = $4 RETURNING *`,
-            [String(ciot_codigo).trim(), ciot_status, contratoId, tenantId]
-        );
-        if (rows.length === 0) return res.status(404).json({ error: 'Contrato não encontrado.' });
-        return res.json({ success: true, data: rows[0] });
+        const result = await emitirOuRegistrarCiot({
+            tenantId,
+            contratoId,
+            modoExplicito: 'MANUAL',
+            codigoManual: ciot_codigo,
+            verificadorManual: ciot_verificador || null,
+            usuario: req.user?.nome || req.user?.email || 'Operador',
+        });
+        return res.json({
+            success: true,
+            data: {
+                ...result.contrato,
+                ciot_protocolo_formatado: checkNorm.formatado,
+            },
+            financeiro_ids: result.financeiro_ids,
+        });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return res.status(err.statusCode || 500).json({
+            error: err.message,
+            code: err.code || undefined,
+        });
     }
 });
 
 /**
- * Cancela um CIOT já registrado (operação não efetivada).
+ * Encerra a operação de CIOT (libera saldo de quitação / encerra viagem na ANTT/IPEF).
+ */
+router.post('/contratos/:id/ciot/encerrar', async (req, res) => {
+    const tenantId = req.tenant.id;
+    const contratoId = req.params.id;
+    const { protocolo_encerramento } = req.body || {};
+
+    try {
+        const encerrado = await encerrarCiotContrato({
+            tenantId,
+            contratoId,
+            protocoloEncerramento: protocolo_encerramento || null,
+        });
+        return res.json({ success: true, data: encerrado });
+    } catch (err) {
+        return res.status(err.statusCode || 500).json({ error: err.message });
+    }
+});
+
+/**
+ * Cancela um CIOT já registrado (operação não efetivada) e estorna títulos pendentes no Financeiro.
  */
 router.post('/contratos/:id/ciot/cancelar', async (req, res) => {
     const tenantId = req.tenant.id;
@@ -3658,7 +4076,60 @@ router.post('/contratos/:id/ciot/cancelar', async (req, res) => {
         if (rows.length === 0) {
             return res.status(404).json({ error: 'Contrato não encontrado ou CIOT já cancelado.' });
         }
-        return res.json({ success: true, data: rows[0] });
+
+        const estornados = await estornarFinanceiroCiot(
+            db,
+            tenantId,
+            rows[0],
+            String(motivo).trim(),
+            req.user?.nome || req.user?.email || 'Operador'
+        );
+
+        return res.json({
+            success: true,
+            data: rows[0],
+            titulos_estornados: estornados,
+        });
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * Lista os títulos de Contas a Pagar (dash_financeiro) gerados pela operação de CIOT.
+ */
+router.get('/contratos/:id/financeiro', async (req, res) => {
+    const tenantId = req.tenant.id;
+    const contratoId = req.params.id;
+    try {
+        const cRes = await db.query(
+            `SELECT id, financeiro_ids, ciot_codigo, valor_frete, valor_adiantamento
+             FROM dash_contratos_transporte
+             WHERE id = $1 AND tenant_id = $2
+             LIMIT 1`,
+            [contratoId, tenantId]
+        );
+        if (cRes.rows.length === 0) {
+            return res.status(404).json({ error: 'Operação de CIOT não encontrada.' });
+        }
+        const ids = Array.isArray(cRes.rows[0].financeiro_ids)
+            ? cRes.rows[0].financeiro_ids.map(Number).filter(Number.isFinite)
+            : [];
+        if (ids.length === 0) {
+            return res.json({ success: true, data: [] });
+        }
+
+        const finRes = await db.query(
+            `SELECT id, tipo, descricao, cliente_nome, cliente_documento,
+                    data_emissao, data_vencimento, valor, valor_pago,
+                    status_pagamento, especie_nome, plano_contas_nome,
+                    numero_parcela, tipo_parcela, origem
+             FROM dash_financeiro
+             WHERE tenant_id = $1 AND id = ANY($2::int[])
+             ORDER BY numero_parcela ASC, id ASC`,
+            [tenantId, ids]
+        );
+        return res.json({ success: true, data: finRes.rows });
     } catch (err) {
         return res.status(500).json({ error: err.message });
     }
