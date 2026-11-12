@@ -4,8 +4,52 @@ import api from '../../services/api';
 import {
   MapPin, Navigation, Truck, Package, CheckCircle2, Clock,
   Route as RouteIcon, Phone, User, AlertTriangle, ChevronRight,
-  Play, Flag, ArrowLeft, Loader2, Maximize2
+  Play, Flag, ArrowLeft, Loader2, Maximize2, Camera, Eye, Crosshair
 } from 'lucide-react';
+
+function escapeHtml(val: unknown): string {
+  return String(val ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+async function comprimirCanhotoJpeg(file: File): Promise<{ dataUri: string; mime: string; kb: number }> {
+  if (file.size > 12 * 1024 * 1024) {
+    throw new Error('A foto do canhoto ultrapassa 12 MB. Escolha uma imagem menor.');
+  }
+  const srcDataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('Falha ao ler a foto do canhoto.'));
+    reader.readAsDataURL(file);
+  });
+  const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const el = new window.Image();
+    el.onload = () => resolve(el);
+    el.onerror = () => reject(new Error('Formato de imagem inválido.'));
+    el.src = srcDataUrl;
+  });
+  const maxDim = 1024;
+  const w = img.naturalWidth || img.width || 800;
+  const h = img.naturalHeight || img.height || 600;
+  const scale = w > maxDim || h > maxDim ? Math.min(maxDim / w, maxDim / h) : 1;
+  const cw = Math.max(1, Math.round(w * scale));
+  const ch = Math.max(1, Math.round(h * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = cw;
+  canvas.height = ch;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('Falha ao comprimir imagem no navegador.');
+  ctx.fillStyle = '#FFFFFF';
+  ctx.fillRect(0, 0, cw, ch);
+  ctx.drawImage(img, 0, 0, cw, ch);
+  const dataUri = canvas.toDataURL('image/jpeg', 0.72);
+  const kb = Math.max(1, Math.round(((dataUri.split(',')[1]?.length || 0) * 0.75) / 1024));
+  return { dataUri, mime: 'image/jpeg', kb };
+}
 
 interface Ponto {
   id: number;
@@ -28,6 +72,10 @@ interface Ponto {
   recebedor_nome: string;
   recebedor_documento?: string;
   observacao: string;
+  canhoto_base64?: string | null;
+  canhoto_mime?: string | null;
+  latitude_entrega?: number | null;
+  longitude_entrega?: number | null;
 }
 
 interface Roteiro {
@@ -79,6 +127,11 @@ export default function RoteiroEntregaPage() {
   const [recebedorDoc, setRecebedorDoc] = useState('');
   const [observacao, setObservacao] = useState('');
   const [statusEntrega, setStatusEntrega] = useState('ENTREGUE');
+  const [canhotoDataUri, setCanhotoDataUri] = useState<string | null>(null);
+  const [canhotoInfo, setCanhotoInfo] = useState<string | null>(null);
+  const [gpsCoords, setGpsCoords] = useState<{ lat: number; lng: number } | null>(null);
+  const [capturandoGps, setCapturandoGps] = useState(false);
+  const [previewCanhotoUri, setPreviewCanhotoUri] = useState<string | null>(null);
   const mapaRef = useRef<HTMLDivElement>(null);
   const mapaInstancia = useRef<any>(null);
   const marcadores = useRef<any[]>([]);
@@ -105,14 +158,28 @@ export default function RoteiroEntregaPage() {
   const pontos: Ponto[] = roteiroData?.data?.pontos || [];
   const metricas = roteiroData?.data?.metricas;
 
-  // Mutação para registrar entrega
+  // Mutação para registrar entrega + Comprovante Digital (POD)
   const registrarEntrega = useMutation({
-    mutationFn: async (payload: { id: number; status_entrega: string; recebedor_nome: string; recebedor_documento: string; observacao: string }) => {
+    mutationFn: async (payload: {
+      id: number;
+      status_entrega: string;
+      recebedor_nome: string;
+      recebedor_documento: string;
+      observacao: string;
+      canhoto_base64?: string | null;
+      canhoto_mime?: string | null;
+      latitude_entrega?: number | null;
+      longitude_entrega?: number | null;
+    }) => {
       return api.patch(`/transporte/roteiro/pontos/${payload.id}`, {
         status_entrega: payload.status_entrega,
         recebedor_nome: payload.recebedor_nome,
         recebedor_documento: payload.recebedor_documento,
-        observacao: payload.observacao
+        observacao: payload.observacao,
+        canhoto_base64: payload.canhoto_base64 || undefined,
+        canhoto_mime: payload.canhoto_mime || undefined,
+        latitude_entrega: payload.latitude_entrega ?? undefined,
+        longitude_entrega: payload.longitude_entrega ?? undefined
       });
     },
     onSuccess: () => {
@@ -121,6 +188,9 @@ export default function RoteiroEntregaPage() {
       setRecebedorNome('');
       setRecebedorDoc('');
       setObservacao('');
+      setCanhotoDataUri(null);
+      setCanhotoInfo(null);
+      setGpsCoords(null);
     }
   });
 
@@ -168,9 +238,10 @@ export default function RoteiroEntregaPage() {
       lineCap: 'round'
     }).addTo(mapa);
 
-    // Marcadores numerados
-    comCoordenada.forEach((p, idx) => {
+    // Marcadores numerados (com escape HTML estrito contra DOM XSS)
+    comCoordenada.forEach((p) => {
       const entregue = p.status_entrega === 'ENTREGUE';
+      const ordemSegura = Number(p.ordem_entrega) || 0;
       const icone = window.L.divIcon({
         className: 'custom-marker',
         html: `<div style="
@@ -179,7 +250,7 @@ export default function RoteiroEntregaPage() {
           color: white; display: flex; align-items: center; justify-content: center;
           font-weight: 700; font-size: 13px; font-family: system-ui, sans-serif;
           border: 3px solid white; box-shadow: 0 4px 10px rgba(0,0,0,0.3);
-        ">${p.ordem_entrega}</div>`,
+        ">${ordemSegura}</div>`,
         iconSize: [32, 32],
         iconAnchor: [16, 16]
       });
@@ -188,9 +259,9 @@ export default function RoteiroEntregaPage() {
         .addTo(mapa)
         .bindPopup(`
           <div style="font-family: system-ui, sans-serif; min-width: 200px;">
-            <div style="font-weight: 700; font-size: 14px; margin-bottom: 4px;">${p.cliente_nome}</div>
-            <div style="font-size: 12px; color: #64748B;">${p.municipio}/${p.uf}</div>
-            ${p.endereco_completo ? `<div style="font-size: 12px; margin-top: 4px;">${p.endereco_completo}</div>` : ''}
+            <div style="font-weight: 700; font-size: 14px; margin-bottom: 4px;">${escapeHtml(p.cliente_nome)}</div>
+            <div style="font-size: 12px; color: #64748B;">${escapeHtml(p.municipio)}/${escapeHtml(p.uf)}</div>
+            ${p.endereco_completo ? `<div style="font-size: 12px; margin-top: 4px;">${escapeHtml(p.endereco_completo)}</div>` : ''}
             <div style="font-size: 12px; margin-top: 6px; font-weight: 600;">${Number(p.peso_kg || 0).toLocaleString('pt-BR')} kg · R$ ${Number(p.valor_produtos || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</div>
           </div>
         `);
@@ -218,6 +289,48 @@ export default function RoteiroEntregaPage() {
     setRecebedorNome(ponto.recebedor_nome || '');
     setRecebedorDoc(ponto.recebedor_documento || '');
     setObservacao(ponto.observacao || '');
+    setCanhotoDataUri(ponto.canhoto_base64 || null);
+    setCanhotoInfo(ponto.canhoto_base64 ? 'Canhoto digital já anexado' : null);
+    setGpsCoords(
+      ponto.latitude_entrega && ponto.longitude_entrega
+        ? { lat: Number(ponto.latitude_entrega), lng: Number(ponto.longitude_entrega) }
+        : null
+    );
+  };
+
+  const handleCapturarGps = () => {
+    if (!navigator.geolocation) {
+      alert('Geolocalização não suportada neste dispositivo/navegador.');
+      return;
+    }
+    setCapturandoGps(true);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setGpsCoords({
+          lat: Number(pos.coords.latitude.toFixed(6)),
+          lng: Number(pos.coords.longitude.toFixed(6))
+        });
+        setCapturandoGps(false);
+      },
+      () => {
+        setCapturandoGps(false);
+        alert('Não foi possível obter a localização GPS atual. Verifique a permissão do navegador.');
+      },
+      { enableHighAccuracy: true, timeout: 8000 }
+    );
+  };
+
+  const handleSelecionarFotoCanhoto = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (e.target) e.target.value = '';
+    if (!file) return;
+    try {
+      const comp = await comprimirCanhotoJpeg(file);
+      setCanhotoDataUri(comp.dataUri);
+      setCanhotoInfo(`Foto comprimida (${comp.kb} KB)`);
+    } catch (err: any) {
+      alert(err.message || 'Falha ao anexar foto do canhoto.');
+    }
   };
 
   return (
@@ -515,26 +628,38 @@ export default function RoteiroEntregaPage() {
                   </div>
                 </div>
 
-                <button
-                  onClick={() => abrirModalEntrega(pontoSelecionado)}
-                  className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-700 shadow-sm transition-all shrink-0"
-                >
-                  <CheckCircle2 className="w-4 h-4" />
-                  Registrar Entrega
-                </button>
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  {pontoSelecionado.canhoto_base64 && (
+                    <button
+                      type="button"
+                      onClick={() => setPreviewCanhotoUri(pontoSelecionado.canhoto_base64 || null)}
+                      className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-semibold text-sky-700 dark:text-sky-300 bg-sky-50 dark:bg-sky-950/50 border border-sky-200 dark:border-sky-800 hover:bg-sky-100 transition-all"
+                    >
+                      <Eye className="w-4 h-4" />
+                      Ver Canhoto (POD)
+                    </button>
+                  )}
+                  <button
+                    onClick={() => abrirModalEntrega(pontoSelecionado)}
+                    className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-700 shadow-sm transition-all shrink-0"
+                  >
+                    <CheckCircle2 className="w-4 h-4" />
+                    Registrar Entrega / POD
+                  </button>
+                </div>
               </div>
             </div>
           )}
         </>
       )}
 
-      {/* Modal de baixa de entrega */}
+      {/* Modal de baixa de entrega + POD (Foto do Canhoto + Geolocalização) */}
       {modalEntrega && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-white dark:bg-slate-800 w-full max-w-md rounded-2xl p-6 shadow-xl border border-slate-200 dark:border-slate-700">
+          <div className="bg-white dark:bg-slate-800 w-full max-w-lg rounded-2xl p-6 shadow-xl border border-slate-200 dark:border-slate-700 max-h-[92vh] overflow-y-auto">
             <h2 className="text-lg font-bold text-slate-900 dark:text-white flex items-center gap-2">
               <CheckCircle2 className="w-5 h-5 text-emerald-600" />
-              Registrar Entrega
+              Registrar Entrega & Comprovante Digital (POD)
             </h2>
             <p className="text-xs text-slate-500 mt-1">
               {modalEntrega.ordem_entrega}. {modalEntrega.cliente_nome} — {modalEntrega.municipio}/{modalEntrega.uf}
@@ -554,32 +679,81 @@ export default function RoteiroEntregaPage() {
                 </select>
               </div>
 
-              <div>
-                <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1">
-                  Recebedor (nome de quem recebeu)
-                </label>
-                <input
-                  type="text" placeholder="Nome do recebedor ou responsável"
-                  value={recebedorNome}
-                  onChange={e => setRecebedorNome(e.target.value)}
-                  className="w-full px-3.5 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white"
-                />
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1">
+                    Recebedor (nome de quem recebeu)
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Nome do recebedor"
+                    value={recebedorNome}
+                    onChange={e => setRecebedorNome(e.target.value)}
+                    className="w-full px-3.5 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white text-xs"
+                  />
+                </div>
+
+                <div>
+                  <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1">CPF/RG do recebedor</label>
+                  <input
+                    type="text"
+                    placeholder="000.000.000-00"
+                    value={recebedorDoc}
+                    onChange={e => setRecebedorDoc(e.target.value)}
+                    className="w-full px-3.5 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white font-mono text-xs"
+                  />
+                </div>
               </div>
 
-              <div>
-                <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1">CPF do recebedor</label>
-                <input
-                  type="text" placeholder="000.000.000-00"
-                  value={recebedorDoc}
-                  onChange={e => setRecebedorDoc(e.target.value)}
-                  className="w-full px-3.5 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white font-mono"
-                />
+              {/* Comprovante Digital de Entrega (POD) */}
+              <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-700 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-xs font-bold text-slate-700 dark:text-slate-200 flex items-center gap-1.5">
+                    <Camera className="w-4 h-4 text-sky-600" />
+                    Foto do Canhoto Assinado & GPS (POD)
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleCapturarGps}
+                    disabled={capturandoGps}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-100"
+                  >
+                    <Crosshair className="w-3 h-3 text-emerald-600" />
+                    {capturandoGps ? 'Capturando...' : gpsCoords ? `${gpsCoords.lat}, ${gpsCoords.lng}` : 'Capturar GPS'}
+                  </button>
+                </div>
+
+                <label className="flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl border border-dashed border-sky-300 dark:border-sky-800 bg-white dark:bg-slate-900 text-xs font-semibold text-sky-700 dark:text-sky-300 cursor-pointer hover:bg-sky-50/50 transition-colors">
+                  <Camera className="w-4 h-4" />
+                  <span>{canhotoDataUri ? 'Trocar Foto do Canhoto' : 'Tirar Foto / Anexar Canhoto Assinado'}</span>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    capture="environment"
+                    onChange={handleSelecionarFotoCanhoto}
+                    className="hidden"
+                  />
+                </label>
+
+                {canhotoDataUri && (
+                  <div className="flex items-center gap-3">
+                    <img
+                      src={canhotoDataUri}
+                      alt="Canhoto"
+                      className="w-20 h-14 object-cover rounded-lg border border-slate-200 dark:border-slate-700"
+                    />
+                    <div className="text-[11px] text-emerald-700 dark:text-emerald-300 font-medium">
+                      {canhotoInfo || 'Canhoto anexado'}
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div>
                 <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1">Observação</label>
                 <textarea
-                  rows={3} placeholder="Ex: receivers assinado porSecurity, deixar na portaria..."
+                  rows={2}
+                  placeholder="Ex: Canhoto assinado na portaria / conferido sem ressalvas..."
                   value={observacao}
                   onChange={e => setObservacao(e.target.value)}
                   className="w-full px-3.5 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white text-xs"
@@ -600,7 +774,11 @@ export default function RoteiroEntregaPage() {
                   status_entrega: statusEntrega,
                   recebedor_nome: recebedorNome,
                   recebedor_documento: recebedorDoc,
-                  observacao
+                  observacao,
+                  canhoto_base64: canhotoDataUri,
+                  canhoto_mime: canhotoDataUri ? 'image/jpeg' : null,
+                  latitude_entrega: gpsCoords?.lat ?? null,
+                  longitude_entrega: gpsCoords?.lng ?? null
                 })}
                 disabled={registrarEntrega.isPending}
                 className="px-5 py-2 rounded-xl text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 shadow-sm"
@@ -608,6 +786,35 @@ export default function RoteiroEntregaPage() {
                 {registrarEntrega.isPending ? 'Salvando...' : 'Confirmar Entrega'}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal de Visualização do Canhoto Digital */}
+      {previewCanhotoUri && (
+        <div
+          className="fixed inset-0 bg-slate-900/75 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+          onClick={() => setPreviewCanhotoUri(null)}
+        >
+          <div
+            className="bg-white dark:bg-slate-800 max-w-2xl w-full rounded-2xl p-4 shadow-2xl border border-slate-200 dark:border-slate-700 space-y-3"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-bold text-slate-900 dark:text-white">Comprovante Digital de Entrega (Canhoto)</h3>
+              <button
+                type="button"
+                onClick={() => setPreviewCanhotoUri(null)}
+                className="px-3 py-1 rounded-lg text-xs font-semibold bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200"
+              >
+                Fechar
+              </button>
+            </div>
+            <img
+              src={previewCanhotoUri}
+              alt="Canhoto Assinado"
+              className="w-full max-h-[75vh] object-contain rounded-xl bg-slate-950/5"
+            />
           </div>
         </div>
       )}

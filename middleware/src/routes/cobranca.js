@@ -397,7 +397,7 @@ router.post('/disparar-email-lote', async (req, res, next) => {
                         c.id_firebird AS cliente_id_firebird
                  FROM dash_financeiro f
                  LEFT JOIN dash_clientes c ON (c.id_firebird = f.cliente_id_firebird OR c.id = f.cliente_id) AND LOWER(c.tenant_id::text) = LOWER(f.tenant_id::text)
-                 WHERE (f.id = $1 OR f.id_firebird = $1) AND ($2 = '00000000-0000-0000-0000-000000000000' OR LOWER(f.tenant_id::text) = LOWER($2::text))
+                 WHERE (f.id = $1 OR f.id_firebird = $1) AND ($2::text = '00000000-0000-0000-0000-000000000000' OR LOWER(f.tenant_id::text) = LOWER($2::text))
                  LIMIT 1`,
                 [titleId, String(tenantId)]
             );

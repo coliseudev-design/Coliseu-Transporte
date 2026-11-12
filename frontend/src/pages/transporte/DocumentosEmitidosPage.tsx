@@ -6,7 +6,7 @@ import DocumentoDrawer from '../../components/DocumentoDrawer';
 import {
   FileText, Truck, Search, Calendar, Download, Eye,
   RefreshCw, X, FileStack, ArrowUpRight, Send, CheckCircle2, AlertTriangle, Loader2,
-  CheckSquare, Ban
+  CheckSquare, Ban, Mail
 } from 'lucide-react';
 
 interface Documento {
@@ -54,6 +54,35 @@ export default function DocumentosEmitidosPage() {
   const [modalCancelarDoc, setModalCancelarDoc] = useState<Documento | null>(null);
   const [justificativaCancelar, setJustificativaCancelar] = useState('');
   const [processandoAcao, setProcessandoAcao] = useState(false);
+  const [enviandoTomadorId, setEnviandoTomadorId] = useState<number | null>(null);
+
+  const handleEnviarTomador = async (doc: Documento) => {
+    setEnviandoTomadorId(doc.id);
+    try {
+      const res = await api.post(`/transporte/ctes/${doc.id}/enviar-tomador`);
+      alert(res.data?.message || 'XML e DACTE enviados ao Tomador com sucesso!');
+    } catch (e: any) {
+      if (e?.response?.data?.requires_email) {
+        const digitado = window.prompt(
+          'Nenhum e-mail cadastrado para o Tomador deste CT-e. Digite o(s) e-mail(s) de destino (separados por vírgula):'
+        );
+        if (digitado && digitado.trim()) {
+          try {
+            const res2 = await api.post(`/transporte/ctes/${doc.id}/enviar-tomador`, {
+              emails: digitado.trim()
+            });
+            alert(res2.data?.message || 'XML e DACTE enviados com sucesso!');
+          } catch (e2: any) {
+            alert(e2?.response?.data?.error || 'Erro ao enviar XML/DACTE por e-mail.');
+          }
+        }
+      } else {
+        alert(e?.response?.data?.error || 'Erro ao enviar XML/DACTE ao Tomador.');
+      }
+    } finally {
+      setEnviandoTomadorId(null);
+    }
+  };
   const [gerandoTestes, setGerandoTestes] = useState(false);
   const [gerandoMdfesTeste, setGerandoMdfesTeste] = useState(false);
   const [resultadoTestes, setResultadoTestes] = useState<{
@@ -540,6 +569,22 @@ export default function DocumentosEmitidosPage() {
                         >
                           <Download className="w-3 h-3" />
                           <span className="hidden xl:inline">XML</span>
+                        </button>
+                      )}
+                      {d.tipo_documento === 'CTE' && d.status === 'AUTORIZADO' && (
+                        <button
+                          type="button"
+                          disabled={enviandoTomadorId === d.id}
+                          onClick={() => handleEnviarTomador(d)}
+                          title="Enviar XML + DACTE por e-mail ao Tomador"
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-sky-50 dark:bg-sky-950/60 text-sky-700 dark:text-sky-300 border border-sky-200 dark:border-sky-800 hover:bg-sky-100 text-[11px] font-semibold transition-colors disabled:opacity-50"
+                        >
+                          {enviandoTomadorId === d.id ? (
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                          ) : (
+                            <Mail className="w-3 h-3" />
+                          )}
+                          <span className="hidden 2xl:inline">Tomador</span>
                         </button>
                       )}
                       {d.tipo_documento === 'MDFE' && d.status === 'AUTORIZADO' && (

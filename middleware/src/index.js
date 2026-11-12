@@ -24,6 +24,10 @@ async function startServer() {
             logger.warn('[App] Banco de dados indisponível no boot. Servidor continuará iniciando para health-checks responderem.');
         } else {
             try {
+                // Inicializa keyring seguro persistido (JWT signing key + Vault AES-256-GCM v2 com fallback híbrido v1)
+                const { initSystemKeyring } = require('./utils/cryptoVault');
+                await initSystemKeyring(db);
+
                 // Define o ambiente no banco (usado por seeds condicionais como a frota de teste)
                 const ambiente = process.env.APP_AMBIENTE || process.env.NODE_ENV || 'production';
                 await db.query(`SELECT set_config('app.ambiente', $1, false)`, [ambiente]);
@@ -37,7 +41,11 @@ async function startServer() {
                 await db.runStartupMaintenance();
 
                 logger.info('[App] Executando migração de permissões...');
-                await db.query('ALTER TABLE dash_usuarios ADD COLUMN IF NOT EXISTS permissions JSONB DEFAULT NULL;');
+                await db.query(`
+                    ALTER TABLE dash_usuarios
+                    ADD COLUMN IF NOT EXISTS permissions JSONB DEFAULT NULL,
+                    ADD COLUMN IF NOT EXISTS precisa_alterar_senha BOOLEAN NOT NULL DEFAULT false;
+                `);
 
                 // Bootstrap opcional e seguro de administrador inicial (sem sobrescrever credenciais existentes)
                 const initialAdminEmail = (process.env.INITIAL_ADMIN_EMAIL || '').trim().toLowerCase();
@@ -77,16 +85,16 @@ async function startServer() {
                     logger.warn('[App] Erro na aplicação de migrações automáticas:', migErr.message);
                 }
 
-                // Auto-reconciliação e criação do lote de testes SEFAZ/MS em background no boot
+                // Auto-reconciliação e criação do lote de testes SEFAZ/MS em background no boot (estritamente em homologação)
                 setImmediate(async () => {
                     try {
                         const TransporteService = require('./services/transporteService');
                         const { rows: tenantsHomolog } = await db.query(
-                            `SELECT DISTINCT tenant_id FROM (
-                                SELECT tenant_id FROM dash_emitentes WHERE COALESCE(focus_ambiente, 'homologacao') <> 'producao'
-                                UNION
-                                SELECT tenant_id FROM dash_ctes
-                             ) t WHERE tenant_id IS NOT NULL`
+                            `SELECT DISTINCT tenant_id
+                             FROM dash_emitentes
+                             WHERE tenant_id IS NOT NULL
+                               AND ativo = true
+                               AND COALESCE(focus_ambiente, 'homologacao') <> 'producao'`
                         );
                         for (const row of tenantsHomolog) {
                             await TransporteService.reconciliarEGerarTestesHomologacaoMs(row.tenant_id);

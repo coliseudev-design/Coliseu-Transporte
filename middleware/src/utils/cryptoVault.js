@@ -4,9 +4,14 @@ const crypto = require('crypto');
 const config = require('../config/env');
 const logger = require('../config/logger');
 
-const STR_PREFIX = 'enc:v1:';
-const BUF_PREFIX = Buffer.from('ENC1', 'utf8');
+const STR_PREFIX_V1 = 'enc:v1:';
+const STR_PREFIX = 'enc:v2:';
+const BUF_PREFIX_V1 = Buffer.from('ENC1', 'utf8');
+const BUF_PREFIX = Buffer.from('ENC2', 'utf8');
 const MASK_PLACEHOLDER = '********';
+
+let runtimeVaultSecret = null;
+let keyringInitPromise = null;
 
 const SECRET_CONFIG_FIELDS = [
     'ai_api_key',
@@ -29,16 +34,82 @@ const SECRET_CONFIG_FIELDS = [
     'focus_webhook_secret'
 ];
 
-function getVaultKey() {
-    const rawSecret = config.security.encryptionKey || config.security.jwtDeviceKey;
-    if (!rawSecret) {
-        throw new Error('[CryptoVault] Nenhuma chave configurada em ENCRYPTION_KEY ou JWT_DEVICE_KEY.');
-    }
+function deriveAesKey(rawSecret) {
     return crypto.createHash('sha256').update(String(rawSecret), 'utf8').digest();
 }
 
+function getVaultKey() {
+    const rawSecret = config.security.encryptionKey || runtimeVaultSecret || config.security.jwtDeviceKey;
+    if (!rawSecret) {
+        throw new Error('[CryptoVault] Nenhuma chave configurada no cofre criptográfico.');
+    }
+    return deriveAesKey(rawSecret);
+}
+
+function getCandidateDecryptionKeys() {
+    const candidates = [
+        config.security.encryptionKey,
+        runtimeVaultSecret,
+        config.security.jwtDeviceKey,
+        config.security.legacyVaultFallbackKey
+    ].filter((s) => typeof s === 'string' && s.trim().length > 0);
+
+    const unique = Array.from(new Set(candidates));
+    return unique.map(deriveAesKey);
+}
+
+/**
+ * Inicializa (e persiste de forma idempotente no PostgreSQL) chaves fortes de 256 bits
+ * para assinatura JWT e cofre AES-256-GCM quando variáveis de ambiente não estão definidas no host.
+ * Mantém leitura híbrida transparente para segredos v1 já gravados em produção.
+ */
+async function initSystemKeyring(db) {
+    if (keyringInitPromise) return keyringInitPromise;
+    keyringInitPromise = (async () => {
+        try {
+            await db.query(`
+                CREATE TABLE IF NOT EXISTS dash_system_keyring (
+                    key_name VARCHAR(80) PRIMARY KEY,
+                    key_value TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+            `);
+
+            const ensurePersistentKey = async (keyName) => {
+                const generated = crypto.randomBytes(32).toString('hex');
+                const { rows } = await db.query(
+                    `INSERT INTO dash_system_keyring (key_name, key_value)
+                     VALUES ($1, $2)
+                     ON CONFLICT (key_name) DO UPDATE SET key_name = EXCLUDED.key_name
+                     RETURNING key_value`,
+                    [keyName, generated]
+                );
+                return rows[0]?.key_value || generated;
+            };
+
+            if (!config.security.jwtEnvConfigured) {
+                const persistedJwtKey = await ensurePersistentKey('jwt_signing_key');
+                config.security.jwtDeviceKey = persistedJwtKey;
+                logger.info('[CryptoVault] JWT signing key carregada do keyring seguro persistido.');
+            }
+
+            if (!config.security.encryptionKey) {
+                runtimeVaultSecret = await ensurePersistentKey('vault_master_key');
+                logger.info('[CryptoVault] Vault AES-256-GCM master key (v2) carregada com suporte híbrido v1.');
+            }
+        } catch (err) {
+            keyringInitPromise = null;
+            logger.warn('[CryptoVault] Aviso ao inicializar dash_system_keyring:', { error: err.message });
+        }
+    })();
+    return keyringInitPromise;
+}
+
 function isEncryptedSecret(value) {
-    return typeof value === 'string' && value.startsWith(STR_PREFIX);
+    return (
+        typeof value === 'string' &&
+        (value.startsWith(STR_PREFIX) || value.startsWith(STR_PREFIX_V1))
+    );
 }
 
 const BULLET_CHAR = '\u2022';
@@ -74,39 +145,55 @@ function encryptSecret(value) {
 function decryptSecret(value) {
     if (value === null || value === undefined) return value;
     const str = String(value);
-    if (!str.startsWith(STR_PREFIX)) {
+    const activePrefix = str.startsWith(STR_PREFIX)
+        ? STR_PREFIX
+        : str.startsWith(STR_PREFIX_V1)
+        ? STR_PREFIX_V1
+        : null;
+
+    if (!activePrefix) {
         // Retrocompatível com valores legados salvos em texto plano antes da blindagem
         return str;
     }
 
-    try {
-        const payload = str.slice(STR_PREFIX.length);
-        const parts = payload.split(':');
-        if (parts.length !== 3) {
-            logger.warn('[CryptoVault] Formato inválido de segredo cifrado.');
-            return '';
-        }
-
-        const [ivHex, tagHex, cipherHex] = parts;
-        const key = getVaultKey();
-        const iv = Buffer.from(ivHex, 'hex');
-        const authTag = Buffer.from(tagHex, 'hex');
-        const encrypted = Buffer.from(cipherHex, 'hex');
-
-        const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
-        decipher.setAuthTag(authTag);
-        const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]);
-        return decrypted.toString('utf8');
-    } catch (err) {
-        logger.warn('[CryptoVault] Falha ao decifrar segredo em repouso:', { error: err.message });
+    const payload = str.slice(activePrefix.length);
+    const parts = payload.split(':');
+    if (parts.length !== 3) {
+        logger.warn('[CryptoVault] Formato inválido de segredo cifrado.');
         return '';
     }
+
+    const [ivHex, tagHex, cipherHex] = parts;
+    const iv = Buffer.from(ivHex, 'hex');
+    const authTag = Buffer.from(tagHex, 'hex');
+    const encrypted = Buffer.from(cipherHex, 'hex');
+
+    const candidateKeys = getCandidateDecryptionKeys();
+    for (const key of candidateKeys) {
+        try {
+            const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+            decipher.setAuthTag(authTag);
+            const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]);
+            return decrypted.toString('utf8');
+        } catch (_) {
+            // Tenta a próxima chave candidata do keyring híbrido (v2 -> v1 legado)
+        }
+    }
+
+    logger.warn('[CryptoVault] Falha ao decifrar segredo em repouso em todas as chaves do keyring.');
+    return '';
 }
 
 function encryptBuffer(buf) {
     if (!Buffer.isBuffer(buf) || buf.length === 0) return buf;
     if (buf.length > 32 && buf.subarray(0, 4).equals(BUF_PREFIX)) {
         return buf;
+    }
+    if (buf.length > 32 && buf.subarray(0, 4).equals(BUF_PREFIX_V1)) {
+        const plain = decryptBuffer(buf);
+        if (Buffer.isBuffer(plain) && plain.length > 0 && !plain.subarray(0, 4).equals(BUF_PREFIX_V1)) {
+            buf = plain;
+        }
     }
 
     const key = getVaultKey();
@@ -120,19 +207,29 @@ function encryptBuffer(buf) {
 
 function decryptBuffer(buf) {
     if (!Buffer.isBuffer(buf) || buf.length === 0) return buf;
-    if (buf.length <= 32 || !buf.subarray(0, 4).equals(BUF_PREFIX)) {
-        // Retrocompatível com certificados PFX legados salvos sem envelope ENC1
+    const isV2 = buf.length > 32 && buf.subarray(0, 4).equals(BUF_PREFIX);
+    const isV1 = buf.length > 32 && buf.subarray(0, 4).equals(BUF_PREFIX_V1);
+    if (!isV2 && !isV1) {
+        // Retrocompatível com certificados PFX legados salvos sem envelope ENC1/ENC2
         return buf;
     }
 
-    const key = getVaultKey();
     const iv = buf.subarray(4, 16);
     const authTag = buf.subarray(16, 32);
     const encrypted = buf.subarray(32);
 
-    const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
-    decipher.setAuthTag(authTag);
-    return Buffer.concat([decipher.update(encrypted), decipher.final()]);
+    const candidateKeys = getCandidateDecryptionKeys();
+    for (const key of candidateKeys) {
+        try {
+            const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+            decipher.setAuthTag(authTag);
+            return Buffer.concat([decipher.update(encrypted), decipher.final()]);
+        } catch (_) {
+            // Tenta próxima chave do keyring híbrido
+        }
+    }
+
+    throw new Error('[CryptoVault] Não foi possível decifrar o certificado digital no keyring.');
 }
 
 function maskSecret(value) {
@@ -188,9 +285,12 @@ function maskIntegracoesRow(row) {
 
 module.exports = {
     STR_PREFIX,
+    STR_PREFIX_V1,
     BUF_PREFIX,
+    BUF_PREFIX_V1,
     MASK_PLACEHOLDER,
     SECRET_CONFIG_FIELDS,
+    initSystemKeyring,
     isEncryptedSecret,
     isMaskedValue,
     encryptSecret,

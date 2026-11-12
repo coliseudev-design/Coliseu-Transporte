@@ -584,7 +584,7 @@ router.get('/:id/tracking-destinatarios', async (req, res, next) => {
                         WHERE e.email_id = s.id
                     ), '[]'::json) AS eventos
                  FROM dash_email_sends s
-                 WHERE ($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(s.tenant_id::text) = LOWER($1::text)) 
+                 WHERE ($1::text = '00000000-0000-0000-0000-000000000000' OR LOWER(s.tenant_id::text) = LOWER($1::text)) 
                    AND s.campanha_id = $2
                  ORDER BY s.aberto DESC, s.total_aberturas DESC, s.enviado_em DESC`,
                 [String(tenantId), campanhaId]
@@ -612,7 +612,7 @@ router.get('/:id/tracking-destinatarios', async (req, res, next) => {
                     0 AS total_cliques,
                     '[]'::json AS eventos
                  FROM dash_campanhas_logs l
-                 WHERE ($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(l.tenant_id::text) = LOWER($1::text)) 
+                 WHERE ($1::text = '00000000-0000-0000-0000-000000000000' OR LOWER(l.tenant_id::text) = LOWER($1::text)) 
                    AND l.campanha_id = $2
                  ORDER BY l.created_at DESC`,
                 [String(tenantId), campanhaId]

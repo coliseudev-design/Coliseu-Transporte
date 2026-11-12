@@ -369,6 +369,14 @@ router.post('/', async (req, res, next) => {
 // GET /api/clientes/:id/detalhes-360
 router.get('/:id/detalhes-360', async (req, res, next) => {
     try {
+        const { MASTER_TENANT_ID, hasActionPermission } = require('../middleware/auth');
+        if (!hasActionPermission(req, 'permitir_ver_ficha_cliente')) {
+            return res.status(403).json({
+                error: 'Permissão insuficiente para visualizar a ficha detalhada do cliente.',
+                code: 'FORBIDDEN_ACTION'
+            });
+        }
+
         const tenantId = req.tenant.id;
         const clientId = parseInt(req.params.id, 10);
 
@@ -377,32 +385,21 @@ router.get('/:id/detalhes-360', async (req, res, next) => {
         }
 
         let cli = null;
-        // 1. Tenta buscar por ID ou ID Firebird com tenant_id
+        // Isolamento multi-tenant estrito: apenas o tenant proprietário (ou MASTER_TENANT_ID global) acessa o registro
         const cliRes = await db.query(
             `SELECT c.* FROM dash_clientes c 
-             WHERE (LOWER(c.tenant_id::text) = LOWER($1::text))
+             WHERE ($1::text = $3::text OR LOWER(c.tenant_id::text) = LOWER($1::text))
                AND (c.id = $2 OR c.id_firebird = $2) 
              LIMIT 1`,
-            [tenantId, clientId]
+            [String(tenantId), clientId, MASTER_TENANT_ID]
         ).catch(() => ({ rows: [] }));
 
         if (cliRes.rows && cliRes.rows.length > 0) {
             cli = cliRes.rows[0];
-        } else {
-            // 2. Fallback: busca por id ou id_firebird sem filtrar tenant
-            const fallbackRes = await db.query(
-                `SELECT c.* FROM dash_clientes c 
-                 WHERE (c.id = $1 OR c.id_firebird = $1) 
-                 LIMIT 1`,
-                [clientId]
-            ).catch(() => ({ rows: [] }));
-            if (fallbackRes.rows && fallbackRes.rows.length > 0) {
-                cli = fallbackRes.rows[0];
-            }
         }
 
         if (!cli) {
-            return res.status(404).json({ error: `Cliente #${clientId} não foi encontrado no banco de dados.` });
+            return res.status(404).json({ error: `Cliente #${clientId} não foi encontrado nesta empresa.` });
         }
 
         const actualClientId = cli.id || clientId;

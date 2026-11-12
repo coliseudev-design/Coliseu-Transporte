@@ -45,9 +45,27 @@ const app = express();
 app.set('trust proxy', 1);
 
 app.use(helmet({
-    contentSecurityPolicy: false,
+    contentSecurityPolicy: {
+        useDefaults: true,
+        directives: {
+            defaultSrc: ["'self'"],
+            scriptSrc: ["'self'", "'unsafe-inline'", "https://unpkg.com"],
+            styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com", "https://unpkg.com"],
+            fontSrc: ["'self'", "data:", "https://fonts.gstatic.com"],
+            imgSrc: ["'self'", "data:", "blob:", "https:"],
+            connectSrc: ["'self'", "https:"],
+            frameAncestors: ["'self'"],
+            objectSrc: ["'none'"]
+        }
+    },
     crossOriginResourcePolicy: false
 }));
+
+app.use((_req, res, next) => {
+    res.setHeader('Permissions-Policy', 'geolocation=(self), camera=(self), microphone=(), payment=()');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    next();
+});
 
 // Serve static uploaded files/arts from both public directory and /tmp fallback
 const publicDir = path.join(__dirname, '../public');
@@ -125,6 +143,29 @@ app.use(
 // Limite padrão seguro (2MB) para todas as demais rotas públicas e autenticadas
 app.use(express.json({ limit: '2mb', verify: saveRawBody }));
 app.use(express.urlencoded({ limit: '2mb', extended: true }));
+
+// Sanitizador global Defense-in-Depth para respostas HTTP 5xx (impede vazamento de SQLSTATE/infra no JSON)
+const INTERNAL_LEAK_REGEX =
+    /inconsistent types deduced|syntax error at or near|relation .* does not exist|column .* does not exist|violates .* constraint|could not determine data type|ECONNREFUSED|ENOTFOUND|password authentication failed|postgres:\/\/|postgresql:\/\/|SQLSTATE/i;
+app.use((_req, res, next) => {
+    const origJson = res.json.bind(res);
+    res.json = (body) => {
+        if (
+            res.statusCode >= 500 &&
+            body &&
+            typeof body === 'object' &&
+            typeof body.error === 'string' &&
+            INTERNAL_LEAK_REGEX.test(body.error)
+        ) {
+            return origJson({
+                ...body,
+                error: 'Erro interno ao processar a solicitação.',
+            });
+        }
+        return origJson(body);
+    };
+    return next();
+});
 
 // Rate limit estrito contra força bruta nos endpoints de autenticação
 app.use(['/api/auth/login', '/api/auth/register', '/api/auth/alterar-senha'], authLimit);

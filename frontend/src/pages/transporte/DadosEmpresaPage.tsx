@@ -45,6 +45,11 @@ interface EmitenteForm {
   ciot_usuario: string;
   ciot_integrador_token: string;
   ciot_senha: string;
+  seguro_seguradora_nome: string;
+  seguro_seguradora_cnpj: string;
+  seguro_numero_apolice: string;
+  seguro_averbacao_padrao: string;
+  enviar_dacte_automatico: boolean;
 }
 
 function validarCnpj14(valor: string): boolean {
@@ -186,7 +191,12 @@ export default function DadosEmpresaPage() {
     ciot_cnpj_ipef: '',
     ciot_usuario: '',
     ciot_integrador_token: '',
-    ciot_senha: ''
+    ciot_senha: '',
+    seguro_seguradora_nome: '',
+    seguro_seguradora_cnpj: '',
+    seguro_numero_apolice: '',
+    seguro_averbacao_padrao: '',
+    enviar_dacte_automatico: false
   });
 
   const { data } = useQuery({
@@ -265,7 +275,12 @@ export default function DadosEmpresaPage() {
         ciot_cnpj_ipef: emAtual.ciot_cnpj_ipef || '',
         ciot_usuario: emAtual.ciot_usuario || '',
         ciot_integrador_token: '',
-        ciot_senha: ''
+        ciot_senha: '',
+        seguro_seguradora_nome: emAtual.seguro_seguradora_nome || '',
+        seguro_seguradora_cnpj: emAtual.seguro_seguradora_cnpj || '',
+        seguro_numero_apolice: emAtual.seguro_numero_apolice || '',
+        seguro_averbacao_padrao: emAtual.seguro_averbacao_padrao || '',
+        enviar_dacte_automatico: Boolean(emAtual.enviar_dacte_automatico)
       });
     }
     }, [
@@ -1685,15 +1700,100 @@ export default function DadosEmpresaPage() {
               <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1.5">
                 Natureza da Operação Padrão
               </label>
-              <input
-                type="text"
-                value={form.natureza_padrao_cte}
-                onChange={e => setForm({ ...form, natureza_padrao_cte: e.target.value })}
-                className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white"
-              />
+                <input
+                  type="text"
+                  value={form.natureza_padrao_cte}
+                  onChange={e => setForm({ ...form, natureza_padrao_cte: e.target.value })}
+                  className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white"
+                />
+              </div>
+            </div>
+
+            <div className="mt-4 p-3.5 rounded-xl bg-sky-50/70 dark:bg-sky-950/30 border border-sky-200 dark:border-sky-800/60 flex items-center justify-between gap-4">
+              <div>
+                <p className="text-xs font-bold text-slate-800 dark:text-slate-100">
+                  Disparo Automático de XML + DACTE ao Tomador (CT-e)
+                </p>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                  Assim que a SEFAZ autorizar um CT-e, envia automaticamente o XML e o PDF do DACTE para o e-mail do Tomador cadastrado.
+                </p>
+              </div>
+              <label className="inline-flex items-center gap-2 cursor-pointer shrink-0">
+                <input
+                  type="checkbox"
+                  checked={form.enviar_dacte_automatico}
+                  onChange={e => setForm({ ...form, enviar_dacte_automatico: e.target.checked })}
+                  className="w-4 h-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                />
+                <span className="text-xs font-semibold text-slate-700 dark:text-slate-200">
+                  {form.enviar_dacte_automatico ? 'Ativado' : 'Desativado'}
+                </span>
+              </label>
             </div>
           </div>
-        </div>
+
+          {/* 4B. Apólice de Seguro Padrão (RCTR-C — Obrigatório p/ MDF-e Prestador de Serviço tpEmit=1) */}
+          <div className="pt-4 border-t border-slate-100 dark:border-slate-700/60">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+              <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2">
+                <ShieldCheck className="w-4 h-4 text-sky-600" />
+                Apólice de Seguro de Carga Padrão (RCTR-C — MDF-e Prestador de Serviço)
+              </h3>
+              <span className="text-[11px] px-2.5 py-0.5 rounded-full bg-sky-50 dark:bg-sky-950/50 text-sky-700 dark:text-sky-300 border border-sky-200 dark:border-sky-800 font-medium">
+                Pré-preenche o MDF-e automaticamente (evita Rejeição 698 SEFAZ)
+              </span>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+              <div>
+                <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1.5">
+                  Nome da Seguradora
+                </label>
+                <input
+                  type="text"
+                  placeholder="Ex: TOKIO MARINE SEGURADORA"
+                  value={form.seguro_seguradora_nome}
+                  onChange={e => setForm({ ...form, seguro_seguradora_nome: e.target.value })}
+                  className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white text-xs"
+                />
+              </div>
+              <div>
+                <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1.5">
+                  CNPJ da Seguradora
+                </label>
+                <input
+                  type="text"
+                  placeholder="14 dígitos"
+                  value={form.seguro_seguradora_cnpj}
+                  onChange={e => setForm({ ...form, seguro_seguradora_cnpj: e.target.value.replace(/\D/g, '').slice(0, 14) })}
+                  className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white font-mono text-xs"
+                />
+              </div>
+              <div>
+                <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1.5">
+                  Nº da Apólice RCTR-C
+                </label>
+                <input
+                  type="text"
+                  placeholder="Ex: 0654123987"
+                  value={form.seguro_numero_apolice}
+                  onChange={e => setForm({ ...form, seguro_numero_apolice: e.target.value })}
+                  className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white font-mono text-xs"
+                />
+              </div>
+              <div>
+                <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1.5">
+                  Nº Averbação Padrão / Aberta
+                </label>
+                <input
+                  type="text"
+                  placeholder="Opcional (AT&M / Porto)"
+                  value={form.seguro_averbacao_padrao}
+                  onChange={e => setForm({ ...form, seguro_averbacao_padrao: e.target.value })}
+                  className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white font-mono text-xs"
+                />
+              </div>
+            </div>
+          </div>
 
         {/* 5. Integração CIOT / IPEF (ANTT) */}
         <div className="pt-4 border-t border-slate-100 dark:border-slate-700/60">

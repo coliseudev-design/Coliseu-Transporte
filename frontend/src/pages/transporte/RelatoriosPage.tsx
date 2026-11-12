@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import api from '../../services/api';
-import { BarChart3, TrendingUp, FileText, Truck, Download, Calendar } from 'lucide-react';
+import { BarChart3, TrendingUp, FileText, Truck, Download, Calendar, BadgeCheck } from 'lucide-react';
 
 interface Resumo {
   total_ctes: number;
@@ -18,7 +18,7 @@ interface Resumo {
 }
 
 export default function RelatoriosPage() {
-  const [tipo, setTipo] = useState<'resumo' | 'cte' | 'mdfe'>('resumo');
+  const [tipo, setTipo] = useState<'resumo' | 'cte' | 'mdfe' | 'ciot'>('resumo');
 
   const { data: resumo, isLoading } = useQuery({
     queryKey: ['relatorio-fiscal', 'resumo'],
@@ -37,6 +37,12 @@ export default function RelatoriosPage() {
     enabled: tipo === 'mdfe'
   });
 
+  const { data: ciots } = useQuery({
+    queryKey: ['relatorio-fiscal', 'ciot'],
+    queryFn: async () => (await api.get('/transporte/relatorios', { params: { tipo: 'ciot' } })).data,
+    enabled: tipo === 'ciot'
+  });
+
   const r: Resumo = resumo?.data || {
     total_ctes: 0, ctes_autorizados: 0, ctes_rejeitados: 0,
     total_mdfes: 0, mdfes_autorizados: 0, mdfes_encerrados: 0,
@@ -48,8 +54,24 @@ export default function RelatoriosPage() {
 
   const exportarCsv = async () => {
     try {
-      const res = await api.get('/transporte/relatorios', { params: { tipo, formato: 'csv' }, responseType: 'blob' });
-      const url = URL.createObjectURL(new Blob([res.data]));
+      const res = await api.get('/transporte/relatorios', { params: { tipo } });
+      const rows = Array.isArray(res.data?.data)
+        ? res.data.data
+        : res.data?.data
+        ? [res.data.data]
+        : [];
+      if (rows.length === 0) {
+        alert('Nenhum registro disponível nesta aba para exportar.');
+        return;
+      }
+      const cols = Object.keys(rows[0]).filter(k => typeof rows[0][k] !== 'object' || rows[0][k] === null);
+      const escapeCsv = (v: any) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+      const csvLines = [
+        cols.join(';'),
+        ...rows.map((row: any) => cols.map(c => escapeCsv(row[c])).join(';'))
+      ];
+      const blob = new Blob(['\uFEFF' + csvLines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
       a.download = `relatorio-fiscal-${tipo}.csv`;
@@ -82,11 +104,12 @@ export default function RelatoriosPage() {
       </div>
 
       {/* Abas */}
-      <div className="flex gap-2 p-1 bg-slate-100 dark:bg-slate-900 rounded-xl w-fit">
+      <div className="flex flex-wrap gap-2 p-1 bg-slate-100 dark:bg-slate-900 rounded-xl w-fit">
         {([
           { id: 'resumo', label: 'Resumo', icon: TrendingUp },
           { id: 'cte', label: 'Detalhado CT-e', icon: FileText },
-          { id: 'mdfe', label: 'Detalhado MDF-e', icon: Truck }
+          { id: 'mdfe', label: 'Detalhado MDF-e', icon: Truck },
+          { id: 'ciot', label: 'CIOT & Retenções (Contábil)', icon: BadgeCheck }
         ] as const).map(tab => {
           const Icon = tab.icon;
           return (
@@ -236,6 +259,72 @@ export default function RelatoriosPage() {
                 )}
               </tbody>
             </table>
+          </div>
+        </div>
+      )}
+
+      {tipo === 'ciot' && (
+        <div className="space-y-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+            {[
+              { label: 'Frete Bruto TAC/ETC', val: ciots?.resumo?.frete_bruto || 0, cor: 'text-slate-900 dark:text-white' },
+              { label: 'INSS Retido (TAC)', val: ciots?.resumo?.inss || 0, cor: 'text-amber-600' },
+              { label: 'SEST / SENAT', val: ciots?.resumo?.sest_senat || 0, cor: 'text-sky-600' },
+              { label: 'IRRF Retido', val: ciots?.resumo?.irrf || 0, cor: 'text-red-600' },
+              { label: 'Líquido Contratado', val: ciots?.resumo?.liquido || 0, cor: 'text-emerald-600' }
+            ].map(card => (
+              <div key={card.label} className="bg-white dark:bg-slate-800 p-4 rounded-2xl border border-slate-200/80 dark:border-slate-700/80 shadow-sm">
+                <p className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">{card.label}</p>
+                <p className={`text-lg font-black mt-1.5 tabular-nums ${card.cor}`}>
+                  R$ {Number(card.val).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                </p>
+              </div>
+            ))}
+          </div>
+
+          <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200/80 dark:border-slate-700/80 shadow-sm overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-slate-50 dark:bg-slate-900/50 font-semibold text-slate-500 border-b border-slate-100 dark:border-slate-700/60 uppercase tracking-wider">
+                  <tr>
+                    <th className="px-4 py-3.5">CIOT / Contrato</th>
+                    <th className="px-4 py-3.5">Transportador (CPF/CNPJ)</th>
+                    <th className="px-4 py-3.5">Percurso</th>
+                    <th className="px-4 py-3.5">Bruto</th>
+                    <th className="px-4 py-3.5">INSS</th>
+                    <th className="px-4 py-3.5">SEST/SENAT</th>
+                    <th className="px-4 py-3.5">IRRF</th>
+                    <th className="px-4 py-3.5">Líquido</th>
+                    <th className="px-4 py-3.5">Status</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 dark:divide-slate-700/60">
+                  {(ciots?.data || []).map((c: any) => (
+                    <tr key={c.id} className="hover:bg-slate-50/50 dark:hover:bg-slate-700/30">
+                      <td className="px-4 py-3 font-mono font-bold text-slate-900 dark:text-white">
+                        {c.ciot_codigo || c.numero_contrato || `#${c.id}`}
+                      </td>
+                      <td className="px-4 py-3 text-slate-700 dark:text-slate-300">
+                        <div className="font-semibold">{c.transportador_nome}</div>
+                        <div className="font-mono text-[11px] text-slate-400">{c.transportador_cpf_cnpj} ({c.transportador_categoria || 'TAC'})</div>
+                      </td>
+                      <td className="px-4 py-3 text-slate-600 dark:text-slate-400">
+                        {c.municipio_inicio || c.uf_inicio}/{c.uf_inicio} → {c.municipio_fim || c.uf_fim}/{c.uf_fim}
+                      </td>
+                      <td className="px-4 py-3 font-semibold tabular-nums">R$ {Number(c.valor_frete || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</td>
+                      <td className="px-4 py-3 tabular-nums text-amber-700 dark:text-amber-400">R$ {Number(c.valor_inss || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</td>
+                      <td className="px-4 py-3 tabular-nums text-sky-700 dark:text-sky-400">R$ {Number(c.valor_sest_senat || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</td>
+                      <td className="px-4 py-3 tabular-nums text-red-700 dark:text-red-400">R$ {Number(c.valor_irrf || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</td>
+                      <td className="px-4 py-3 font-bold tabular-nums text-emerald-700 dark:text-emerald-400">R$ {Number(c.valor_liquido || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</td>
+                      <td className="px-4 py-3 font-semibold text-slate-600 dark:text-slate-300">{c.ciot_status}</td>
+                    </tr>
+                  ))}
+                  {(ciots?.data || []).length === 0 && (
+                    <tr><td colSpan={9} className="px-4 py-12 text-center text-xs text-slate-400">Nenhuma operação de CIOT registrada.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       )}

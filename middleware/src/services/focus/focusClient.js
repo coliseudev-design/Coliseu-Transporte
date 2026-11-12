@@ -86,15 +86,45 @@ class FocusClient {
   }
 
   /**
+   * Valida estritamente se uma URL absoluta pertence aos domínios oficiais da Focus NFe / S3 AWS,
+   * bloqueando qualquer tentativa de SSRF contra hosts internos, loopback ou metadata cloud.
+   */
+  static isAllowedArtifactUrl(rawUrl) {
+    if (!rawUrl || typeof rawUrl !== 'string') return false;
+    try {
+      const parsed = new URL(rawUrl.trim());
+      if (parsed.protocol !== 'https:') return false;
+      const host = parsed.hostname.toLowerCase();
+      return (
+        host === 'api.focusnfe.com.br' ||
+        host === 'homologacao.focusnfe.com.br' ||
+        host.endsWith('.focusnfe.com.br') ||
+        host === 'focusnfe.s3.sa-east-1.amazonaws.com' ||
+        host === 'focusnfe.s3.amazonaws.com' ||
+        (host.includes('focusnfe') && host.endsWith('.amazonaws.com'))
+      );
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /**
    * Converte caminhos relativos retornados pela Focus NFe (ex: /arquivos_development/... ou /arquivos/...)
-   * em URLs HTTPS absolutas apontando para o host correspondente da Focus NFe.
+   * em URLs HTTPS absolutas apontando exclusivamente para hosts oficiais da Focus NFe.
    */
   static normalizarUrlArquivo(caminhoOuUrl, ambiente = 'homologacao') {
     if (!caminhoOuUrl || typeof caminhoOuUrl !== 'string') return null;
     const clean = caminhoOuUrl.trim();
     if (!clean) return null;
     if (clean.startsWith('http://') || clean.startsWith('https://')) {
-      return clean;
+      const upgraded = clean.startsWith('http://') ? `https://${clean.slice(7)}` : clean;
+      if (!FocusClient.isAllowedArtifactUrl(upgraded)) {
+        throw new Error('URL de artefato fiscal recusada por política de segurança (host não autorizado).');
+      }
+      return upgraded;
+    }
+    if (clean.startsWith('//') || clean.includes('..')) {
+      throw new Error('Caminho relativo de artefato fiscal inválido.');
     }
     // Caminhos /arquivos_development pertencem a homologação; /arquivos a produção (api.focusnfe.com.br serve ambos)
     const base =

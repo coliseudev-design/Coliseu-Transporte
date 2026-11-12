@@ -11,12 +11,13 @@ const AsaasService = require('../services/asaasService');
 const db = require('../db/postgres');
 const logger = require('../config/logger');
 const { isMaskedValue, decryptSecret } = require('../utils/cryptoVault');
+const { requireAdmin, requireActionPermission } = require('../middleware/auth');
 
 /**
  * POST /api/asaas/test-connection
  * Testa a chave de API do Asaas.
  */
-router.post('/test-connection', async (req, res) => {
+router.post('/test-connection', requireAdmin, async (req, res) => {
   try {
     const tenantId = req.tenant ? req.tenant.id : null;
     let { token, ambiente } = req.body || {};
@@ -49,7 +50,7 @@ router.post('/test-connection', async (req, res) => {
  * POST /api/asaas/emitir-boleto
  * Emite um boleto real no Banco Asaas para um título de dash_financeiro.
  */
-router.post('/emitir-boleto', async (req, res, next) => {
+router.post('/emitir-boleto', requireActionPermission('permitir_ver_titulos_cliente'), async (req, res, next) => {
   try {
     const tenantId = req.tenant.id;
     const { titleId, vencimento, valor } = req.body;
@@ -75,7 +76,7 @@ router.post('/emitir-boleto', async (req, res, next) => {
          (f.cliente_id_firebird IS NOT NULL AND (cl.id_firebird = f.cliente_id_firebird OR cl.id = f.cliente_id_firebird))
        ) AND LOWER(cl.tenant_id::text) = LOWER(f.tenant_id::text)
        WHERE (f.id = $2 OR f.id_firebird = $2) 
-         AND ($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(f.tenant_id::text) = LOWER($1::text))`,
+         AND ($1::text = '00000000-0000-0000-0000-000000000000' OR LOWER(f.tenant_id::text) = LOWER($1::text))`,
       [String(tenantId), parseInt(titleId, 10)]
     );
 
@@ -136,7 +137,7 @@ router.post('/emitir-boleto', async (req, res, next) => {
            data_vinculo = NOW(),
            usuario_vinculo = $7
        WHERE (id = $8 OR id_firebird = $8)
-         AND ($9 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($9::text) OR tenant_id = $9::uuid)`,
+         AND ($9::text = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($9::text))`,
       [
         paymentRes.id,
         customerAsaas.id,
@@ -430,7 +431,7 @@ router.get('/extrato', async (req, res) => {
     // Busca IDs de transações excluídas/ocultadas pelo usuário
     const { rows: ocultos } = await db.query(
       `SELECT asaas_transaction_id FROM dash_asaas_extrato_ocultos 
-       WHERE ($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text))`,
+       WHERE ($1::text = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text))`,
       [String(tenantId)]
     ).catch(() => ({ rows: [] }));
 
@@ -728,7 +729,7 @@ router.get('/extrato/detalhes', async (req, res) => {
     if (descClean && descClean.length > 2) {
       const { rows: matchedCusts } = await db.query(
         `SELECT nome, documento, email, telefone FROM dash_clientes 
-         WHERE ($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text))
+         WHERE ($1::text = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text))
            AND (LOWER(nome) = LOWER($2) OR LOWER(razao_social) = LOWER($2) OR LOWER(nome_fantasia) = LOWER($2) OR LOWER(nome) LIKE LOWER($3))
          LIMIT 1`,
         [String(tenantId), descClean, `%${descClean}%`]
@@ -759,7 +760,7 @@ router.get('/extrato/detalhes', async (req, res) => {
       `SELECT f.*, c.nome AS cliente_nome_db, c.documento AS cliente_doc_db 
        FROM dash_financeiro f 
        LEFT JOIN dash_clientes c ON (c.id_firebird = f.cliente_id_firebird OR c.id = f.cliente_id) AND LOWER(c.tenant_id::text) = LOWER(f.tenant_id::text)
-       WHERE ($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(f.tenant_id::text) = LOWER($1::text)) 
+       WHERE ($1::text = '00000000-0000-0000-0000-000000000000' OR LOWER(f.tenant_id::text) = LOWER($1::text)) 
          AND (
            (f.asaas_payment_id IS NOT NULL AND f.asaas_payment_id = ANY($2::text[])) OR 
            (f.nosso_numero IS NOT NULL AND f.nosso_numero = ANY($2::text[])) OR 
@@ -1003,14 +1004,14 @@ router.post('/sincronizar-pagamentos', async (req, res) => {
         `UPDATE dash_financeiro
          SET status_pagamento = 'PAGO',
              data_pagamento = COALESCE($1::timestamptz, data_pagamento, NOW()),
-             valor_pago = COALESCE(NULLIF($2, 0), valor),
-             asaas_payment_id = COALESCE(asaas_payment_id, $3)
+             valor_pago = COALESCE(NULLIF($2::numeric, 0), valor),
+             asaas_payment_id = COALESCE(asaas_payment_id, $3::text)
          WHERE tenant_id = $4
            AND (status_pagamento != 'PAGO' OR data_pagamento IS NULL)
            AND (
-             asaas_payment_id = $3 
-             OR (nosso_numero IS NOT NULL AND (nosso_numero = $5 OR nosso_numero = $6))
-             OR (numero_documento IS NOT NULL AND (numero_documento = $5 OR numero_documento = $6))
+             asaas_payment_id::text = $3::text 
+             OR (nosso_numero IS NOT NULL AND (nosso_numero::text = $5::text OR nosso_numero::text = $6::text))
+             OR (numero_documento IS NOT NULL AND (numero_documento::text = $5::text OR numero_documento::text = $6::text))
              OR (id_firebird IS NOT NULL AND id_firebird = $7)
            )
          RETURNING id, id_firebird, nosso_numero, numero_documento, descricao, valor`,

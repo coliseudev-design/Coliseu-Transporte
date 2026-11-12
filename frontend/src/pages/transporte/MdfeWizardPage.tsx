@@ -15,7 +15,17 @@ interface Contratante { id: string; tipo: string; documento: string; nome: strin
 interface Seguro { id: string; responsavel: string; cnpj_responsavel: string; nome_seguradora: string; cnpj_seguradora?: string; numero_apolice: string; numero_averbacao: string; }
 interface ProdutoPred { id: string; tipo_carga: string; descricao: string; ncm: string; lotacao: boolean; }
 interface PagamentoFrete { id: string; responsavel: string; componentes: string; forma: string; tipo: string; }
+interface ValePedagioItem { id: string; cnpj_fornecedor: string; doc_pagador: string; numero_comprovante: string; valor: string; tipo_vale_pedagio: string; }
 interface Reboque { id: string; placa: string; tara_kg: string; capacidade_kg: string; }
+
+const OPERADORAS_VPO = [
+  { valor: '', rotulo: 'Selecionar operadora ANTT (ou digitar CNPJ)...' },
+  { valor: '04088208000165', rotulo: 'Sem Parar / CGMP (04.088.208/0001-65)' },
+  { valor: '16577631000108', rotulo: 'ConectCar (16.577.631/0001-08)' },
+  { valor: '31731568000180', rotulo: 'Veloe / Alelo (31.731.568/0001-80)' },
+  { valor: '18757057000178', rotulo: 'Move Mais (18.757.057/0001-78)' },
+  { valor: '28067397000169', rotulo: 'Taggy / Greenpass (28.067.397/0001-69)' }
+];
 
 const UFS_BRASIL = [
   'AC','AL','AP','AM','BA','CE','DF','ES','GO','MA','MT','MS','MG','PA','PB','PR','PE','PI',
@@ -113,11 +123,13 @@ export default function MdfeWizardPage() {
     reboques: [] as Reboque[],
     condutores: [] as { id: string; nome: string; cpf: string }[],
     contratantes: [] as Contratante[],
-    // CIOT (NT 2026.001 — Rejeição 684) e Pagamento
+    // CIOT (NT 2026.001 — Rejeição 684), Pagamento e Vale-Pedágio Obrigatório (VPO)
     ciot_contrato_id: '',
     ciot_codigo: '',
     ciot_responsavel_documento: '',
     pagto_frete: [] as PagamentoFrete[],
+    vale_pedagio: [] as ValePedagioItem[],
+    campos_extras: {} as Record<string, any>,
     // Documentos (CT-e para tpEmit 1/3 | NF-e do ERP ou chave manual para tpEmit 2 Carga Própria)
     ctes_ids: [] as number[],
     cargas_ids: [] as number[],
@@ -176,6 +188,34 @@ export default function MdfeWizardPage() {
       (await api.get('/transporte/contratos', { params: { disponivel_mdfe: 'true' } })).data
   });
   const ciotsDisponiveis = ciotsData?.data || [];
+
+  const { data: camposDinamicosData } = useQuery({
+    queryKey: ['campos-dinamicos-mdfe'],
+    queryFn: async () => (await api.get('/transporte/campos')).data
+  });
+  const camposMdfeAtivos = useMemo(
+    () =>
+      (camposDinamicosData?.data || []).filter(
+        (c: any) => c.ativo !== false && (c.documento === 'MDFE' || c.documento === 'AMBOS')
+      ),
+    [camposDinamicosData]
+  );
+
+  const construirSeguroPadrao = (em: any): Seguro[] => {
+    if (!em?.seguro_seguradora_nome && !em?.seguro_numero_apolice) return [];
+    const cnpjEmit = String(em.cnpj || '').replace(/\D/g, '');
+    return [
+      {
+        id: `seg-padrao-${em.id || Date.now()}`,
+        responsavel: '1',
+        cnpj_responsavel: mascaras.cpfCnpj(cnpjEmit),
+        nome_seguradora: String(em.seguro_seguradora_nome || ''),
+        cnpj_seguradora: mascaras.cpfCnpj(String(em.seguro_seguradora_cnpj || '')),
+        numero_apolice: String(em.seguro_numero_apolice || ''),
+        numero_averbacao: String(em.seguro_averbacao_padrao || '')
+      }
+    ];
+  };
 
   const aplicarOperacaoCiot = (contratoIdStr: string) => {
     const op = ciotsDisponiveis.find((c: any) => String(c.id) === String(contratoIdStr));
@@ -250,7 +290,24 @@ export default function MdfeWizardPage() {
             forma: formaPag,
             tipo: tipoPag
           }
-        ]
+        ],
+        vale_pedagio:
+          Number(op.valor_pedagio || 0) > 0 ||
+          op.vale_pedagio_fornecedora_cnpj ||
+          op.vale_pedagio_comprovante
+            ? [
+                {
+                  id: `vpo-ciot-${op.id}`,
+                  cnpj_fornecedor: mascaras.cpfCnpj(
+                    String(op.vale_pedagio_fornecedora_cnpj || '')
+                  ),
+                  doc_pagador: mascaras.cpfCnpj(docContr),
+                  numero_comprovante: String(op.vale_pedagio_comprovante || ''),
+                  valor: Number(op.valor_pedagio || 0).toFixed(2),
+                  tipo_vale_pedagio: '01'
+                }
+              ]
+            : f.vale_pedagio
       };
     });
   };
@@ -277,14 +334,21 @@ export default function MdfeWizardPage() {
               em.mdfe_tipo_emitente_padrao ||
                 (em.perfil_operacional === 'CARGA_PROPRIA' ? '2' : '1')
             );
+      const tipoFinal = tipoEmitPadrao === '2' ? '2' : '1';
       setForm(f => ({
         ...f,
         emitente_id: String(em.id),
-        tipo_emitente: tipoEmitPadrao === '2' ? '2' : '1',
+        tipo_emitente: tipoFinal,
         serie: em.serie_mdfe || f.serie || '1',
         uf_inicio: f.uf_inicio || em.uf || '',
         codigo_municipio_carga: f.codigo_municipio_carga || em.codigo_municipio || '',
-        municipio_carga: f.municipio_carga || em.municipio || ''
+        municipio_carga: f.municipio_carga || em.municipio || '',
+        seguros:
+          f.seguros.length > 0
+            ? f.seguros
+            : tipoFinal === '1'
+            ? construirSeguroPadrao(em)
+            : f.seguros
       }));
     }
   }, [emitentes.length]);
@@ -404,8 +468,17 @@ export default function MdfeWizardPage() {
     if (!form.valor_total_carga) e.produtos.push('Valor total da carga é obrigatório.');
     if (!form.peso_bruto) e.produtos.push('Peso bruto é obrigatório.');
 
+    for (const c of camposMdfeAtivos) {
+      if (c.obrigatorio) {
+        const val = form.campos_extras?.[c.chave];
+        if (val === undefined || val === null || String(val).trim() === '') {
+          e.dados.push(`O campo personalizado "${c.rotulo}" é obrigatório.`);
+        }
+      }
+    }
+
     return e;
-  }, [form, ufsSaoLimitrofes, ambienteAtivo, isCargaPropriaFrotaPropria, isVeiculoTerceiro, ufsNfeSelecionadas]);
+  }, [form, ufsSaoLimitrofes, ambienteAtivo, isCargaPropriaFrotaPropria, isVeiculoTerceiro, ufsNfeSelecionadas, camposMdfeAtivos]);
 
   const totalErros = Object.values(erros).flat();
 
@@ -529,6 +602,8 @@ export default function MdfeWizardPage() {
         ciot_responsavel_documento: isCargaPropriaFrotaPropria ? '' : form.ciot_responsavel_documento,
         contratantes: isCargaPropriaFrotaPropria ? [] : form.contratantes,
         pagto_frete: isCargaPropriaFrotaPropria ? [] : form.pagto_frete,
+        vale_pedagio: isCargaPropriaFrotaPropria ? [] : form.vale_pedagio,
+        campos_extras: form.campos_extras || {},
         valor_carga: parseFloat(form.valor_total_carga || '0') || 0,
         peso_bruto: parseFloat(form.peso_bruto || '0') || 0
       };
@@ -1106,6 +1181,102 @@ export default function MdfeWizardPage() {
                           {e}
                         </p>
                       ))}
+
+                      {/* Vale-Pedágio Obrigatório ANTT (VPO — Lei 10.209/2001 / Res. 2.885) */}
+                      <div className="pt-3 border-t border-slate-100 dark:border-slate-800 space-y-2">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[11px] font-bold text-slate-700 dark:text-slate-200">
+                            Vale-Pedágio Obrigatório ANTT (Tag &lt;valePed&gt;)
+                          </span>
+                          <span className="text-[10px] text-slate-400">
+                            Sem Parar · ConectCar · Veloe · Move Mais · Taggy
+                          </span>
+                        </div>
+                        <ListaEditavelFiscal<ValePedagioItem>
+                          titulo=""
+                          itens={form.vale_pedagio}
+                          onChange={itens => setCampo('vale_pedagio', itens)}
+                          novoItem={() => ({
+                            id: `${Date.now()}-${Math.random()}`,
+                            cnpj_fornecedor: '',
+                            doc_pagador:
+                              form.contratantes[0]?.documento ||
+                              mascaras.cpfCnpj(String(emitenteSelecionado?.cnpj || '')),
+                            numero_comprovante: '',
+                            valor: '',
+                            tipo_vale_pedagio: '01'
+                          })}
+                          rotuloBotao="Adicionar Vale-Pedágio"
+                          vazio="Opcional quando não houver pedágio antecipado na rota (ou isento)."
+                          className="border-0"
+                          renderItem={(item, _i, atualizar, remover) => (
+                            <div className="space-y-2 p-2.5 rounded-xl bg-slate-50/70 dark:bg-slate-900/40 border border-slate-200/70 dark:border-slate-700/70">
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                <SelectFiscal
+                                  value={
+                                    OPERADORAS_VPO.some(
+                                      o =>
+                                        o.valor &&
+                                        o.valor === item.cnpj_fornecedor.replace(/\D/g, '')
+                                    )
+                                      ? item.cnpj_fornecedor.replace(/\D/g, '')
+                                      : ''
+                                  }
+                                  onChange={v => {
+                                    if (v) {
+                                      atualizar({
+                                        ...item,
+                                        cnpj_fornecedor: mascaras.cpfCnpj(v)
+                                      });
+                                    }
+                                  }}
+                                  opcoes={OPERADORAS_VPO}
+                                />
+                                <InputFiscal
+                                  value={item.cnpj_fornecedor}
+                                  onChange={v =>
+                                    atualizar({ ...item, cnpj_fornecedor: mascaras.cpfCnpj(v) })
+                                  }
+                                  placeholder="CNPJ Fornecedora VPO (14 dígitos)"
+                                />
+                              </div>
+                              <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
+                                <InputFiscal
+                                  value={item.doc_pagador}
+                                  onChange={v =>
+                                    atualizar({ ...item, doc_pagador: mascaras.cpfCnpj(v) })
+                                  }
+                                  placeholder="CPF/CNPJ Pagador"
+                                />
+                                <InputFiscal
+                                  value={item.numero_comprovante}
+                                  onChange={v => atualizar({ ...item, numero_comprovante: v })}
+                                  placeholder="Nº Comprovante Compra"
+                                />
+                                <InputFiscal
+                                  type="number"
+                                  step="0.01"
+                                  value={item.valor}
+                                  onChange={v => atualizar({ ...item, valor: v })}
+                                  placeholder="Valor R$"
+                                />
+                                <div className="flex items-end gap-2">
+                                  <SelectFiscal
+                                    value={item.tipo_vale_pedagio || '01'}
+                                    onChange={v => atualizar({ ...item, tipo_vale_pedagio: v })}
+                                    opcoes={[
+                                      { valor: '01', rotulo: '01 — TAG' },
+                                      { valor: '02', rotulo: '02 — Cupom' },
+                                      { valor: '03', rotulo: '03 — Cartão' }
+                                    ]}
+                                  />
+                                  <BotaoRemover onClick={remover} />
+                                </div>
+                              </div>
+                            </div>
+                          )}
+                        />
+                      </div>
                     </fieldset>
                   )}
 
@@ -1513,6 +1684,50 @@ export default function MdfeWizardPage() {
                       )}
                     />
                   </fieldset>
+                  {/* Observações Fiscais (infAdic) & Campos Personalizados */}
+                  <fieldset className="border border-slate-200 dark:border-slate-700 rounded-xl p-4 space-y-3">
+                    <legend className="px-2 text-xs font-bold text-slate-500 uppercase tracking-wider">
+                      Observações do DAMDFE &amp; Campos Extras
+                    </legend>
+                    {camposMdfeAtivos.length > 0 && (
+                      <div className="space-y-2.5 pb-2 border-b border-slate-100 dark:border-slate-800">
+                        {camposMdfeAtivos.map((c: any) => {
+                          const valorAtual =
+                            form.campos_extras?.[c.chave] !== undefined
+                              ? form.campos_extras[c.chave]
+                              : c.valor_padrao || '';
+                          return (
+                            <CampoFiscal
+                              key={c.id || c.chave}
+                              rotulo={c.rotulo}
+                              obrigatorio={Boolean(c.obrigatorio)}
+                              dica={c.ajuda || `Chave: ${c.chave}`}
+                            >
+                              <InputFiscal
+                                type={c.tipo === 'NUMERO' ? 'number' : c.tipo === 'DATA' ? 'date' : 'text'}
+                                value={String(valorAtual || '')}
+                                onChange={v =>
+                                  setForm(f => ({
+                                    ...f,
+                                    campos_extras: { ...(f.campos_extras || {}), [c.chave]: v }
+                                  }))
+                                }
+                                placeholder={c.valor_padrao || c.rotulo}
+                              />
+                            </CampoFiscal>
+                          );
+                        })}
+                      </div>
+                    )}
+                    <CampoFiscal rotulo="Informações Adicionais ao Contribuinte / Fisco">
+                      <TextareaFiscal
+                        value={form.informacao_adicional}
+                        onChange={v => setCampo('informacao_adicional', v)}
+                        placeholder="Observações impressas no DAMDFE..."
+                        rows={3}
+                      />
+                    </CampoFiscal>
+                  </fieldset>
                 </div>
               </div>
             </div>
@@ -1521,6 +1736,27 @@ export default function MdfeWizardPage() {
           {/* ─── ABA SEGURO ─── */}
           {aba === 'seguro' && (
             <div className="space-y-4">
+              {emitenteSelecionado &&
+                (emitenteSelecionado.seguro_seguradora_nome ||
+                  emitenteSelecionado.seguro_numero_apolice) && (
+                  <div className="p-3 rounded-xl bg-sky-50/70 dark:bg-sky-950/30 border border-sky-200 dark:border-sky-800/60 flex items-center justify-between gap-3">
+                    <div className="text-xs text-sky-900 dark:text-sky-200">
+                      <p className="font-bold">
+                        Apólice RCTR-C Padrão Cadastrada: {emitenteSelecionado.seguro_seguradora_nome || 'Seguradora'}
+                      </p>
+                      <p className="text-[11px] text-sky-700 dark:text-sky-300">
+                        Apólice Nº {emitenteSelecionado.seguro_numero_apolice || '—'} · Averbação {emitenteSelecionado.seguro_averbacao_padrao || '—'}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setCampo('seguros', construirSeguroPadrao(emitenteSelecionado))}
+                      className="px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-700 text-white text-xs font-bold shrink-0 transition-colors"
+                    >
+                      Aplicar Apólice Padrão
+                    </button>
+                  </div>
+                )}
               <fieldset className="border border-slate-200 dark:border-slate-700 rounded-xl p-4">
                 <legend className="px-2 text-xs font-bold text-slate-500 uppercase tracking-wider">
                   Seguros da Carga

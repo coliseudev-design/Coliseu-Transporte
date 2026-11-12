@@ -9,7 +9,7 @@ import SeletorNotasErp from '../../components/fiscal/SeletorNotasErp';
 import {
   FileText, Users, Wallet, Package, Truck, FileText as FileIcon,
   Save, Send, ChevronLeft, ChevronRight, AlertTriangle,
-  Plus, X, Loader2, ShieldCheck, Info
+  Plus, X, Loader2, ShieldCheck, Info, Calculator
 } from 'lucide-react';
 
 interface Componente {
@@ -193,11 +193,14 @@ export default function CteWizardPage() {
     rntrc: '',
     taf: '',
     numero_registro_estadual: '',
-    // Aba 6 — Observações
-    observacoes: ''
+    // Aba 6 — Observações & Campos Dinâmicos
+    observacoes: '',
+    campos_extras: {} as Record<string, any>
   });
 
   const [novoDoc, setNovoDoc] = useState({ chave: '', tipo: 'NFE', numero: '' });
+  const [calculandoTabela, setCalculandoTabela] = useState(false);
+  const [infoTabelaAplicada, setInfoTabelaAplicada] = useState<string>('');
 
   // ── Carregamentos ──
   const { data: emitentesData } = useQuery({
@@ -229,6 +232,18 @@ export default function CteWizardPage() {
     queryFn: async () => (await api.get('/transporte/regras')).data
   });
   const regrasFiscais = regrasFiscaisData?.data || [];
+
+  const { data: camposDinamicosData } = useQuery({
+    queryKey: ['campos-dinamicos-cte'],
+    queryFn: async () => (await api.get('/transporte/campos')).data
+  });
+  const camposCteAtivos = useMemo(
+    () =>
+      (camposDinamicosData?.data || []).filter(
+        (c: any) => c.ativo !== false && (c.documento === 'CTE' || c.documento === 'AMBOS')
+      ),
+    [camposDinamicosData]
+  );
 
   const { data: cteExistente } = useQuery({
     queryKey: ['cte-wizard', cteId],
@@ -364,7 +379,11 @@ export default function CteWizardPage() {
         remetente_dados: c.remetente_dados || f.remetente_dados,
         destinatario_dados: c.destinatario_dados || f.destinatario_dados,
         componentes_valor: c.componentes_valor || [],
-        documentos: c.documentos || c.documentos_json || []
+        documentos: c.documentos || c.documentos_json || [],
+        campos_extras:
+          c.campos_extras && typeof c.campos_extras === 'object'
+            ? c.campos_extras
+            : f.campos_extras || {}
       }));
     }
   }, [cteExistente]);
@@ -496,8 +515,18 @@ export default function CteWizardPage() {
       e.rodoviario.push('RNTRC é obrigatório para CT-e Rodoviário.');
     }
 
+    // Aba 6 — Campos personalizados obrigatórios
+    for (const c of camposCteAtivos) {
+      if (c.obrigatorio) {
+        const val = form.campos_extras?.[c.chave];
+        if (val === undefined || val === null || String(val).trim() === '') {
+          e.observacoes.push(`O campo "${c.rotulo}" é obrigatório.`);
+        }
+      }
+    }
+
     return e;
-  }, [form, totalComponentes, baseCalculo, aliquotaIcms, valorReceber]);
+  }, [form, totalComponentes, baseCalculo, aliquotaIcms, valorReceber, camposCteAtivos]);
 
   const errosPorPasso = erros;
   const errosDoPassoAtual = erros[STEPS[passoAtual].id] || [];
@@ -676,8 +705,61 @@ export default function CteWizardPage() {
       destinatario_dados: formBase.destinatario_dados,
       modal_os_dados: formBase.modelo === '67' ? { taf: formBase.taf, numero_registro_estadual: formBase.numero_registro_estadual } : undefined,
       documentos: formBase.documentos,
-      cargas_ids: cargasIds
+      cargas_ids: cargasIds,
+      campos_extras: formBase.campos_extras || {}
     };
+  };
+
+  const calcularPelaTabelaFrete = async () => {
+    setCalculandoTabela(true);
+    setInfoTabelaAplicada('');
+    try {
+      const docTomador =
+        form.tomador === '0'
+          ? form.remetente_dados.documento
+          : form.tomador === '3'
+          ? form.destinatario_dados.documento
+          : form.tomador === '4'
+          ? form.tomador_outros_documento
+          : form.tomador_documento;
+
+      const res = await api.post('/transporte/tabelas-frete/calcular', {
+        uf_inicio: form.uf_inicio,
+        uf_fim: form.uf_fim || form.uf_inicio,
+        cliente_documento: docTomador || '',
+        peso_kg: parseFloat(form.peso_bruto || '0') || 0,
+        valor_carga: parseFloat(form.valor_total_carga || '0') || 0
+      });
+
+      if (!res.data?.encontrada || !res.data?.calculo) {
+        alert(
+          'Nenhuma Tabela de Frete Comercial ativa correspondeu à rota/tomador informados. Cadastre em Configurações → Regras Fiscais & Tabelas de Frete.'
+        );
+        return;
+      }
+
+      const calc = res.data.calculo;
+      const comps: Componente[] = (calc.componentes || []).map((c: any, idx: number) => ({
+        id: `tab-${Date.now()}-${idx}`,
+        nome: String(c.nome || 'FRETE_VALOR'),
+        valor: Number(c.valor || 0).toFixed(2)
+      }));
+      const vTotal = Number(calc.valor_total || 0).toFixed(2);
+
+      setForm(f => ({
+        ...f,
+        componentes_valor: comps,
+        valor_total: vTotal,
+        valor_receber: vTotal
+      }));
+      setInfoTabelaAplicada(
+        `Tabela aplicada: ${res.data.tabela?.nome || 'Padrão'} — Total R$ ${Number(calc.valor_total || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`
+      );
+    } catch (err: any) {
+      alert(err.response?.data?.error || 'Não foi possível calcular o frete pela tabela comercial.');
+    } finally {
+      setCalculandoTabela(false);
+    }
   };
 
   const preencherTesteHomologacao = () => {
@@ -1310,6 +1392,32 @@ export default function CteWizardPage() {
         {/* ─── ABA 3: SERVIÇOS E IMPOSTOS ─── */}
         {passoAtual === 2 && (
           <div className="space-y-6">
+            <div className="p-3.5 rounded-2xl bg-sky-50/70 dark:bg-sky-950/30 border border-sky-200 dark:border-sky-800/60 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <p className="text-xs font-bold text-sky-900 dark:text-sky-200 flex items-center gap-1.5">
+                  <Calculator className="w-4 h-4 text-sky-600" />
+                  Precificação Automática por Tabela de Frete Comercial
+                </p>
+                <p className="text-[11px] text-sky-800/80 dark:text-sky-300/80 mt-0.5">
+                  Calcula Frete Peso, Ad Valorem, GRIS, Pedágio e Taxa de Despacho conforme UF ({form.uf_inicio || '—'} → {form.uf_fim || '—'}), Peso ({form.peso_bruto || '0'} kg) e Valor da Carga.
+                </p>
+                {infoTabelaAplicada && (
+                  <p className="text-[11px] font-bold text-emerald-700 dark:text-emerald-300 mt-1">
+                    ✓ {infoTabelaAplicada}
+                  </p>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={calcularPelaTabelaFrete}
+                disabled={calculandoTabela}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 disabled:opacity-50 text-white text-xs font-bold whitespace-nowrap shrink-0 transition-colors"
+              >
+                {calculandoTabela ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Calculator className="w-3.5 h-3.5" />}
+                Calcular pela Tabela de Frete
+              </button>
+            </div>
+
             <ListaEditavelFiscal<Componente>
               titulo="Componentes do Valor da Prestação"
               itens={form.componentes_valor}
@@ -1749,7 +1857,88 @@ export default function CteWizardPage() {
 
         {/* ─── ABA 6: OBSERVAÇÕES ─── */}
         {passoAtual === 5 && (
-          <div className="space-y-4">
+          <div className="space-y-5">
+            {camposCteAtivos.length > 0 && (
+              <fieldset className="border border-slate-200 dark:border-slate-700 rounded-2xl p-4 space-y-3">
+                <legend className="px-2 text-xs font-bold text-slate-600 dark:text-slate-300 uppercase tracking-wider">
+                  Campos Personalizados (Enviados nas Observações Fiscais xObs)
+                </legend>
+                <GradeCampos>
+                  {camposCteAtivos.map((c: any) => {
+                    const valorAtual =
+                      form.campos_extras?.[c.chave] !== undefined
+                        ? form.campos_extras[c.chave]
+                        : c.valor_padrao || '';
+                    const opcoesArr = Array.isArray(c.opcoes)
+                      ? c.opcoes
+                      : typeof c.opcoes === 'string' && c.opcoes.trim()
+                      ? (() => {
+                          try {
+                            return JSON.parse(c.opcoes);
+                          } catch {
+                            return c.opcoes.split(',').map((s: string) => s.trim());
+                          }
+                        })()
+                      : [];
+                    return (
+                      <CampoFiscal
+                        key={c.id || c.chave}
+                        rotulo={c.rotulo}
+                        obrigatorio={Boolean(c.obrigatorio)}
+                        dica={c.ajuda || `Chave: ${c.chave}`}
+                        erro={erros.observacoes.find(e => e.includes(`"${c.rotulo}"`))}
+                      >
+                        {c.tipo === 'SELECAO' ? (
+                          <SelectFiscal
+                            value={String(valorAtual || '')}
+                            onChange={v =>
+                              setForm(f => ({
+                                ...f,
+                                campos_extras: { ...(f.campos_extras || {}), [c.chave]: v }
+                              }))
+                            }
+                            opcoes={opcoesArr.map((op: any) =>
+                              typeof op === 'object'
+                                ? { valor: String(op.valor ?? op.label ?? ''), rotulo: String(op.rotulo ?? op.label ?? op.valor ?? '') }
+                                : { valor: String(op), rotulo: String(op) }
+                            )}
+                            placeholder="Selecione..."
+                          />
+                        ) : c.tipo === 'BOOLEANO' ? (
+                          <SelectFiscal
+                            value={String(valorAtual === true || valorAtual === 'Sim' ? 'Sim' : valorAtual === false || valorAtual === 'Não' ? 'Não' : '')}
+                            onChange={v =>
+                              setForm(f => ({
+                                ...f,
+                                campos_extras: { ...(f.campos_extras || {}), [c.chave]: v }
+                              }))
+                            }
+                            opcoes={[
+                              { valor: 'Sim', rotulo: 'Sim' },
+                              { valor: 'Não', rotulo: 'Não' }
+                            ]}
+                            placeholder="Selecione..."
+                          />
+                        ) : (
+                          <InputFiscal
+                            type={c.tipo === 'NUMERO' ? 'number' : c.tipo === 'DATA' ? 'date' : 'text'}
+                            value={String(valorAtual || '')}
+                            onChange={v =>
+                              setForm(f => ({
+                                ...f,
+                                campos_extras: { ...(f.campos_extras || {}), [c.chave]: v }
+                              }))
+                            }
+                            placeholder={c.valor_padrao || c.rotulo}
+                          />
+                        )}
+                      </CampoFiscal>
+                    );
+                  })}
+                </GradeCampos>
+              </fieldset>
+            )}
+
             <CampoFiscal rotulo="Observações Gerais do CT-e (xObs)" dica="Informação adicional impressa no DACTE e enviada no XML">
               <TextareaFiscal
                 value={form.observacoes}

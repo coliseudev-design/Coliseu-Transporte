@@ -133,8 +133,8 @@ router.put('/:id', async (req, res, next) => {
         const { rows } = await db.query(
             `UPDATE dash_automacoes
              SET 
-                template_id = CASE WHEN $1::text = '__CLEAR__' THEN NULL WHEN $1 IS NOT NULL THEN $1::integer ELSE template_id END,
-                template_email_id = CASE WHEN $2::text = '__CLEAR__' THEN NULL WHEN $2 IS NOT NULL THEN $2::integer ELSE template_email_id END,
+                template_id = CASE WHEN $1::text = '__CLEAR__' THEN NULL WHEN $1::text IS NOT NULL THEN ($1::text)::integer ELSE template_id END,
+                template_email_id = CASE WHEN $2::text = '__CLEAR__' THEN NULL WHEN $2::text IS NOT NULL THEN ($2::text)::integer ELSE template_email_id END,
                 ativo = COALESCE($3, ativo),
                 gatilho = COALESCE($4, gatilho),
                 tempo_segundos = COALESCE($5, tempo_segundos),

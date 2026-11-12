@@ -319,6 +319,8 @@ const inFlightMdfeEmissoes = new Map();
 const tenantEmissionChains = new Map();
 const tenantsLoteHomologMsInicializado = new Set();
 
+const _realDbQueryRef = db.query;
+
 function runTenantSequential(tenantId, taskFn) {
   const key = String(tenantId || 'default');
   const prev = tenantEmissionChains.get(key) || Promise.resolve();
@@ -330,6 +332,92 @@ function runTenantSequential(tenantId, taskFn) {
   });
   tenantEmissionChains.set(key, tail);
   return next;
+}
+
+/**
+ * Aloca numeração sequencial de CT-e ou MDF-e de forma atômica (com lock transacional no emitente
+ * quando conectado ao PostgreSQL real, e compatibilidade transparente com mocks de db.query em testes).
+ */
+async function alocarNumeroFiscalAtomico({
+  tenantId,
+  tabela,
+  docId,
+  numeroAtual,
+  precisaNovoNumeroHomolog,
+}) {
+  if (tabela !== 'dash_ctes' && tabela !== 'dash_mdfes') {
+    throw new Error(`Tabela fiscal inválida para numeração: ${tabela}`);
+  }
+
+  const calcularNumero = (maxNumExistente) =>
+    precisaNovoNumeroHomolog
+      ? Math.max(maxNumExistente + 1, Number(docId || 1) + 10)
+      : Number(numeroAtual) > 0
+      ? Number(numeroAtual)
+      : Math.max(maxNumExistente + 1, 1);
+
+  const usarLockTransacional =
+    db.query === _realDbQueryRef && db.pool && typeof db.pool.connect === 'function';
+
+  if (usarLockTransacional) {
+    const client = await db.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+        `num_seq:${tabela}:${String(tenantId)}`,
+      ]);
+      await client.query(
+        'SELECT id FROM dash_emitentes WHERE tenant_id = $1 FOR UPDATE',
+        [tenantId]
+      );
+      const { rows } = await client.query(
+        `SELECT COALESCE(MAX(numero), 0)::int AS max_num FROM ${tabela} WHERE tenant_id = $1 AND id <> $2`,
+        [tenantId, docId]
+      );
+      const maxNumExistente = Number(rows[0]?.max_num || 0);
+      const numeroEnvio = calcularNumero(maxNumExistente);
+      await client.query(
+        `UPDATE ${tabela} SET numero = $1 WHERE id = $2 AND tenant_id = $3`,
+        [numeroEnvio, docId, tenantId]
+      );
+      await client.query('COMMIT');
+      return { maxNumExistente, numeroEnvio };
+    } catch (txErr) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw txErr;
+    } finally {
+      client.release();
+    }
+  }
+
+  const { rows } = await db.query(
+    `SELECT COALESCE(MAX(numero), 0)::int AS max_num FROM ${tabela} WHERE tenant_id = $1 AND id <> $2`,
+    [tenantId, docId]
+  );
+  const maxNumExistente = Number(rows[0]?.max_num || 0);
+  const numeroEnvio = calcularNumero(maxNumExistente);
+  return { maxNumExistente, numeroEnvio };
+}
+
+function comporObservacaoComCamposExtras(baseTexto, camposExtrasRaw, maxLen = 2000) {
+  let extras = camposExtrasRaw;
+  if (typeof extras === 'string') {
+    try {
+      extras = JSON.parse(extras);
+    } catch (_) {
+      extras = null;
+    }
+  }
+  const base = String(baseTexto || '').trim();
+  if (!extras || typeof extras !== 'object' || Array.isArray(extras)) {
+    return base ? base.slice(0, maxLen) : '';
+  }
+  const partesExtras = Object.entries(extras)
+    .filter(([, val]) => val !== null && val !== undefined && String(val).trim() !== '')
+    .map(([chave, val]) => `${chave}: ${String(val).trim()}`)
+    .filter((trecho) => !base.includes(trecho));
+  const finalStr = [base, ...partesExtras].filter(Boolean).join(' | ');
+  return finalStr.slice(0, maxLen);
 }
 
 function extrairTagXml(bloco, tag) {
@@ -1062,7 +1150,15 @@ class TransporteService {
           ? await client.consultarCteOs(cte.ref, true)
           : await client.consultarCte(cte.ref, true);
         if (stCheck && mapFocusStatusToDb(stCheck.status, 'PROCESSANDO') === 'AUTORIZADO') {
-          return await this._persistirRetornoFocusCte(cteId, cte.ref, stCheck, client.ambiente);
+          return await this._persistirRetornoFocusCte(
+            cteId,
+            cte.ref,
+            stCheck,
+            client.ambiente,
+            null,
+            null,
+            tenantId
+          );
         }
       } catch (_) {
         // segue para emissão limpa com nova ref e numeração sequencial
@@ -1373,12 +1469,7 @@ class TransporteService {
     const retiraFlag = cte.retirar_mercadoria === true || cte.retirar_mercadoria === '0' ? '0' : '1';
     const serieEnvio = Number(cte.serie || emitente.serie_cte || 1) || 1;
 
-    // Aloca numeração sequencial única para evitar colisão de (série, número) na Focus NFe / SEFAZ
-    const { rows: maxNumRows } = await db.query(
-      `SELECT COALESCE(MAX(numero), 0)::int AS max_num FROM dash_ctes WHERE tenant_id = $1 AND id <> $2`,
-      [tenantId, cteId]
-    );
-    const maxNumExistente = Number(maxNumRows[0]?.max_num || 0);
+    // Aloca numeração sequencial única e atômica para evitar colisão de (série, número) na Focus NFe / SEFAZ
     const precisaNovoNumeroHomolog =
       emitente.focus_ambiente !== 'producao' &&
       (cte.status === 'REJEITADO' ||
@@ -1386,11 +1477,19 @@ class TransporteService {
         !cte.numero ||
         Number(cte.numero) <= 2 ||
         Boolean(opts.forcarNovaEmissao));
-    let numeroEnvio = precisaNovoNumeroHomolog
-      ? Math.max(maxNumExistente + 1, Number(cte.id || 1) + 10)
-      : Number(cte.numero) > 0
-      ? Number(cte.numero)
-      : Math.max(maxNumExistente + 1, 1);
+    const alocacaoCte = await alocarNumeroFiscalAtomico({
+      tenantId,
+      tabela: 'dash_ctes',
+      docId: cteId,
+      numeroAtual: cte.numero,
+      precisaNovoNumeroHomolog,
+    });
+    let numeroEnvio = alocacaoCte.numeroEnvio;
+    const observacaoCteComposta = comporObservacaoComCamposExtras(
+      cte.observacoes,
+      cte.campos_extras,
+      2000
+    );
 
     const payload = {
       // Identificação (conforme ConhecimentoTransporteXML da Focus NFe v2)
@@ -1507,8 +1606,8 @@ class TransporteService {
             }),
           }),
 
-      // Observações gerais (campo oficial Focus NFe: observacao)
-      ...(cte.observacoes ? { observacao: String(cte.observacoes).slice(0, 2000) } : {}),
+      // Observações gerais + campos dinâmicos (campo oficial Focus NFe: observacao)
+      ...(observacaoCteComposta ? { observacao: observacaoCteComposta } : {}),
     };
 
     // Expedidor (se informado ou se tomador == '1')
@@ -1607,7 +1706,7 @@ class TransporteService {
           numero = $15,
           status = 'PROCESSANDO',
           updated_at = NOW()
-       WHERE id = $3`,
+       WHERE id = $3 AND tenant_id = $20`,
       [
         ref,
         JSON.stringify(payload),
@@ -1628,6 +1727,7 @@ class TransporteService {
         valorPisCalc,
         valorCofinsCalc,
         JSON.stringify(pendenciasFiscais),
+        tenantId,
       ]
     );
 
@@ -1658,8 +1758,8 @@ class TransporteService {
         payloadEnvio.data_emissao = formatarDataHoraSefaz(emitente.uf || ibgeEnvio.uf);
         ref = this.gerarRef('CTE', tenantId, `${cte.id}${sufixoNovaRef}`);
         await db.query(
-          `UPDATE dash_ctes SET ref = $1, numero = $2, payload_focus = $3, updated_at = NOW() WHERE id = $4`,
-          [ref, numeroEnvio, JSON.stringify(payloadEnvio), cteId]
+          `UPDATE dash_ctes SET ref = $1, numero = $2, payload_focus = $3, updated_at = NOW() WHERE id = $4 AND tenant_id = $5`,
+          [ref, numeroEnvio, JSON.stringify(payloadEnvio), cteId, tenantId]
         );
       }
       try {
@@ -1681,8 +1781,8 @@ class TransporteService {
             data_emissao: formatarDataHoraSefaz(emitente.uf || ibgeEnvio.uf),
           };
           await db.query(
-            `UPDATE dash_ctes SET ref = $1, numero = $2, payload_focus = $3, updated_at = NOW() WHERE id = $4`,
-            [ref, numeroEnvio, JSON.stringify(payloadNovoNumero), cteId]
+            `UPDATE dash_ctes SET ref = $1, numero = $2, payload_focus = $3, updated_at = NOW() WHERE id = $4 AND tenant_id = $5`,
+            [ref, numeroEnvio, JSON.stringify(payloadNovoNumero), cteId, tenantId]
           );
           return isCteOs
             ? await client.emitirCteOs(ref, payloadNovoNumero)
@@ -1740,8 +1840,8 @@ class TransporteService {
         } catch (fallbackErr) {
           await db
             .query(
-              `UPDATE dash_ctes SET status = 'REJEITADO', mensagem_sefaz = $1, updated_at = NOW() WHERE id = $2`,
-              [String(fallbackErr.message || 'Erro de validação Focus NFe').slice(0, 500), cteId]
+              `UPDATE dash_ctes SET status = 'REJEITADO', mensagem_sefaz = $1, updated_at = NOW() WHERE id = $2 AND tenant_id = $3`,
+              [String(fallbackErr.message || 'Erro de validação Focus NFe').slice(0, 500), cteId, tenantId]
             )
             .catch(() => {});
           throw fallbackErr;
@@ -1749,8 +1849,8 @@ class TransporteService {
       } else {
         await db
           .query(
-            `UPDATE dash_ctes SET status = 'REJEITADO', mensagem_sefaz = $1, updated_at = NOW() WHERE id = $2`,
-            [String(emitErr.message || 'Erro de validação Focus NFe').slice(0, 500), cteId]
+            `UPDATE dash_ctes SET status = 'REJEITADO', mensagem_sefaz = $1, updated_at = NOW() WHERE id = $2 AND tenant_id = $3`,
+            [String(emitErr.message || 'Erro de validação Focus NFe').slice(0, 500), cteId, tenantId]
           )
           .catch(() => {});
         throw emitErr;
@@ -1830,7 +1930,8 @@ class TransporteService {
       resFocus || {},
       client.ambiente,
       numeroEnvio,
-      String(serieEnvio)
+      String(serieEnvio),
+      tenantId
     );
   }
 
@@ -1840,7 +1941,8 @@ class TransporteService {
     resFocus,
     ambiente = 'homologacao',
     numeroFallback = null,
-    serieFallback = null
+    serieFallback = null,
+    tenantId = null
   ) {
     const novoStatus = mapFocusStatusToDb(resFocus?.status, 'PROCESSANDO');
     const chaveCteNormalizada =
@@ -1882,6 +1984,25 @@ class TransporteService {
       ? String(resFocus.serie)
       : serieDaChave || (serieFallback ? String(serieFallback) : null);
 
+    const persistParams = [
+      novoStatus,
+      statusSefazNormalizado,
+      mensagemSefazNormalizada,
+      chaveCteNormalizada,
+      numeroFinal,
+      serieFinal,
+      protocoloNormalizado,
+      caminhoXmlNormalizado,
+      caminhoDacteNormalizado,
+      JSON.stringify(resFocus || {}),
+      cteId,
+    ];
+    let whereTenantClause = '';
+    if (tenantId !== null && tenantId !== undefined) {
+      persistParams.push(tenantId);
+      whereTenantClause = ` AND tenant_id = $${persistParams.length}`;
+    }
+
     await db.query(
       `UPDATE dash_ctes SET
           status = $1,
@@ -1895,20 +2016,8 @@ class TransporteService {
           caminho_dacte = COALESCE($9, caminho_dacte),
           retorno_focus = $10,
           updated_at = NOW()
-       WHERE id = $11`,
-      [
-        novoStatus,
-        statusSefazNormalizado,
-        mensagemSefazNormalizada,
-        chaveCteNormalizada,
-        numeroFinal,
-        serieFinal,
-        protocoloNormalizado,
-        caminhoXmlNormalizado,
-        caminhoDacteNormalizado,
-        JSON.stringify(resFocus || {}),
-        cteId,
-      ]
+       WHERE id = $11${whereTenantClause}`,
+      persistParams
     );
 
     return {
@@ -1987,7 +2096,8 @@ class TransporteService {
       st,
       client.ambiente,
       cte.numero,
-      cte.serie
+      cte.serie,
+      tenantId
     );
   }
 
@@ -2145,8 +2255,8 @@ class TransporteService {
             true, '0', $7,
             $8, $9, $10,
             $11, $12, $13,
-            $14, $14, $15, $16, '01', $17,
-            $18::jsonb, '00', $14, $19, $20,
+            $14::numeric, $14::numeric, $15, $16, '01', $17,
+            $18::jsonb, '00', $14::numeric, $19, $20,
             0.10, 0.00, 0.90, '000001', '000', '000001',
             $21, 'CAIXAS', $22,
             '4', $23,
@@ -2743,8 +2853,8 @@ class TransporteService {
           mensagem_sefaz = COALESCE($1, mensagem_sefaz),
           retorno_focus = jsonb_set(COALESCE(retorno_focus, '{}'::jsonb), '{cancelamento}', $2::jsonb),
           updated_at = NOW()
-       WHERE id = $3`,
-      [resFocus.mensagem_sefaz || 'CT-e cancelado', JSON.stringify(resFocus), cteId]
+       WHERE id = $3 AND tenant_id = $4`,
+      [resFocus.mensagem_sefaz || 'CT-e cancelado', JSON.stringify(resFocus), cteId, tenantId]
     );
 
     return { success: true, focus: resFocus };
@@ -2774,8 +2884,8 @@ class TransporteService {
       `UPDATE dash_ctes
        SET retorno_focus = jsonb_set(COALESCE(retorno_focus,'{}'::jsonb), '{carta_correcao}', $1::jsonb),
            updated_at = NOW()
-       WHERE id = $2`,
-      [JSON.stringify(resFocus), cteId]
+       WHERE id = $2 AND tenant_id = $3`,
+      [JSON.stringify(resFocus), cteId, tenantId]
     );
 
     return { success: true, focus: resFocus };
@@ -2806,8 +2916,8 @@ class TransporteService {
       `UPDATE dash_ctes
        SET retorno_focus = jsonb_set(COALESCE(retorno_focus,'{}'::jsonb), '{prestacao_desacordo}', $1::jsonb),
            updated_at = NOW()
-       WHERE id = $2`,
-      [JSON.stringify(resFocus), cteId]
+       WHERE id = $2 AND tenant_id = $3`,
+      [JSON.stringify(resFocus), cteId, tenantId]
     );
     return { success: true, focus: resFocus };
   }
@@ -2829,8 +2939,8 @@ class TransporteService {
       `UPDATE dash_ctes
        SET retorno_focus = jsonb_set(COALESCE(retorno_focus,'{}'::jsonb), '{insucesso_entrega}', $1::jsonb),
            updated_at = NOW()
-       WHERE id = $2`,
-      [JSON.stringify(resFocus), cteId]
+       WHERE id = $2 AND tenant_id = $3`,
+      [JSON.stringify(resFocus), cteId, tenantId]
     );
     return { success: true, focus: resFocus };
   }
@@ -2897,7 +3007,8 @@ class TransporteService {
     ambiente,
     fallbackNumero = null,
     fallbackSerie = null,
-    extraCols = {}
+    extraCols = {},
+    tenantId = null
   ) {
     const novoStatus = mapFocusStatusToDb(resFocus?.status, 'PROCESSANDO');
     const chaveMdfeNormalizada =
@@ -2926,6 +3037,28 @@ class TransporteService {
       ? String(fallbackSerie)
       : null;
 
+    const persistMdfeParams = [
+      novoStatus,
+      statusSefazMdfe,
+      mensagemSefazMdfe,
+      chaveMdfeNormalizada,
+      numeroFinal,
+      serieFinal,
+      protocoloMdfeNormalizado,
+      caminhoXmlMdfeNormalizado,
+      caminhoDamdfeNormalizado,
+      extraCols.placaTracao || null,
+      extraCols.codMunDesc || null,
+      extraCols.nomeMunDesc || null,
+      JSON.stringify(resFocus || {}),
+      mdfeId,
+    ];
+    let whereMdfeTenantClause = '';
+    if (tenantId !== null && tenantId !== undefined) {
+      persistMdfeParams.push(tenantId);
+      whereMdfeTenantClause = ` AND tenant_id = $${persistMdfeParams.length}`;
+    }
+
     await db.query(
       `UPDATE dash_mdfes SET
           status = $1,
@@ -2942,23 +3075,8 @@ class TransporteService {
           municipio_descarregamento = COALESCE($12, municipio_descarregamento),
           retorno_focus = $13,
           updated_at = NOW()
-       WHERE id = $14`,
-      [
-        novoStatus,
-        statusSefazMdfe,
-        mensagemSefazMdfe,
-        chaveMdfeNormalizada,
-        numeroFinal,
-        serieFinal,
-        protocoloMdfeNormalizado,
-        caminhoXmlMdfeNormalizado,
-        caminhoDamdfeNormalizado,
-        extraCols.placaTracao || null,
-        extraCols.codMunDesc || null,
-        extraCols.nomeMunDesc || null,
-        JSON.stringify(resFocus || {}),
-        mdfeId,
-      ]
+       WHERE id = $14${whereMdfeTenantClause}`,
+      persistMdfeParams
     );
 
     return {
@@ -3023,7 +3141,9 @@ class TransporteService {
             stCheck,
             client.ambiente,
             mdfe.numero,
-            mdfe.serie
+            mdfe.serie,
+            {},
+            tenantId
           );
         }
       } catch (_) {
@@ -3068,28 +3188,23 @@ class TransporteService {
     const ufInicio = normalizarUf(mdfe.uf_inicio || emitente.uf || 'MS') || 'MS';
     const ufFim = normalizarUf(primeiroDocUfFim || mdfe.uf_fim || emitente.uf || 'MS') || 'MS';
 
-    // Numeração sequencial segura por tenant
+    // Numeração sequencial segura e atômica por tenant
     const serieEnvio = Number(mdfe.serie || emitente.serie_mdfe || 1);
-    const { rows: maxNumRows } = await db.query(
-      `SELECT COALESCE(MAX(numero), 0)::int AS max_num
-       FROM dash_mdfes
-       WHERE tenant_id = $1 AND id <> $2`,
-      [tenantId, mdfeId]
-    );
-    const maxNumExistente = Number(maxNumRows[0]?.max_num || 0);
-    // Se o MDF-e foi REJEITADO pela SEFAZ (cStat != 100, ex.: 684) e já possui numeração >= 2 (ex.: MDF-e nº 10),
-    // a SEFAZ não consumiu o número fiscal — preservamos o mesmo número na reemissão (avançando apenas se retornar 204/539).
     const precisaNovoNumeroHomolog =
       isHomolog &&
       (mdfe.status === 'PROCESSANDO' ||
         !mdfe.numero ||
         Number(mdfe.numero) <= 1 ||
         Boolean(opts.forcarNovoNumero));
-    let numeroEnvio = precisaNovoNumeroHomolog
-      ? Math.max(maxNumExistente + 1, Number(mdfe.id || 1) + 10)
-      : Number(mdfe.numero) > 0
-      ? Number(mdfe.numero)
-      : Math.max(maxNumExistente + 1, 1);
+    const alocacaoMdfe = await alocarNumeroFiscalAtomico({
+      tenantId,
+      tabela: 'dash_mdfes',
+      docId: mdfeId,
+      numeroAtual: mdfe.numero,
+      precisaNovoNumeroHomolog,
+    });
+    const maxNumExistente = alocacaoMdfe.maxNumExistente;
+    let numeroEnvio = alocacaoMdfe.numeroEnvio;
 
     // 1. Municípios de Carregamento
     const munCarregRaw = parseJsonSafe(mdfe.municipios_carregamento, []);
@@ -3398,7 +3513,32 @@ class TransporteService {
       : [];
 
     if (tipoEmitenteFinal === '1' && segurosPayload.length === 0) {
-      if (isHomolog) {
+      const segEmitNome = String(emitente.seguro_seguradora_nome || '').trim();
+      const segEmitCnpj = digitsOnly(emitente.seguro_seguradora_cnpj || '');
+      const segEmitApolice = String(emitente.seguro_numero_apolice || '').trim();
+      const segEmitAverb = String(emitente.seguro_averbacao_padrao || '').trim();
+
+      if (segEmitNome || segEmitApolice) {
+        segurosPayload.push({
+          responsavel_seguro: '1',
+          nome_seguradora: (segEmitNome || 'SEGURADORA RCTR-C').slice(0, 30),
+          ...(validarCnpjReal(segEmitCnpj)
+            ? { cnpj_seguradora: segEmitCnpj }
+            : isHomolog
+            ? { cnpj_seguradora: '61198164000160' }
+            : {}),
+          ...(segEmitApolice
+            ? { numero_apolice: segEmitApolice.slice(0, 20) }
+            : isHomolog
+            ? { numero_apolice: '0000540012345' }
+            : {}),
+          ...(segEmitAverb
+            ? { numero_averbacao: [segEmitAverb.slice(0, 40)] }
+            : isHomolog
+            ? { numero_averbacao: ['00000000000000000001'] }
+            : {}),
+        });
+      } else if (isHomolog) {
         segurosPayload.push({
           responsavel_seguro: '1',
           nome_seguradora: 'PORTO SEGURO CIA DE SEGUROS',
@@ -3408,7 +3548,7 @@ class TransporteService {
         });
       } else {
         throw new Error(
-          'Seguro da carga (seguradora, CNPJ, apólice e averbação) é obrigatório na SEFAZ para Prestador de Serviço de Transporte.'
+          'Seguro da carga (seguradora, CNPJ, apólice e averbação) é obrigatório na SEFAZ para Prestador de Serviço de Transporte. Preencha na aba Seguros ou cadastre a Apólice Padrão em Dados da Empresa.'
         );
       }
     }
@@ -3853,6 +3993,48 @@ class TransporteService {
       }
     }
 
+    // 10c. Vale-Pedágio Obrigatório ANTT (<valePed> / <disp>) — Resolução ANTT nº 6.024/2023
+    const valePedRaw = parseJsonSafe(mdfe.vale_pedagio, []);
+    const valesPedagioPayload = [];
+    if (!isCargaPropriaFrotaPropria && Array.isArray(valePedRaw)) {
+      for (const vp of valePedRaw) {
+        if (!vp) continue;
+        const cnpjForn = digitsOnly(
+          vp.cnpj_fornecedor || vp.cnpj_fornecedora || vp.fornecedora_cnpj || ''
+        );
+        const numComp = digitsOnly(
+          vp.numero_comprovante || vp.numero_compra || vp.comprovante || ''
+        ).slice(0, 20);
+        const valVp = parseFloat(vp.valor_vale_pedagio ?? vp.valor ?? 0);
+        if (cnpjForn.length !== 14 || !validarCnpjReal(cnpjForn) || !numComp || !(valVp > 0)) {
+          continue;
+        }
+        const docRespVp = digitsOnly(
+          vp.cnpj_responsavel || vp.cpf_responsavel || vp.cnpj_pg || vp.cpf_pg || vp.responsavel_documento || ''
+        );
+        const tpVale = ['01', '04'].includes(String(vp.tipo_vale_pedagio || '').trim())
+          ? String(vp.tipo_vale_pedagio).trim()
+          : '01';
+        valesPedagioPayload.push({
+          cnpj_fornecedor: cnpjForn,
+          ...(docRespVp.length === 11 && validarCpfReal(docRespVp)
+            ? { cpf_responsavel: docRespVp }
+            : docRespVp.length === 14 && validarCnpjReal(docRespVp)
+            ? { cnpj_responsavel: docRespVp }
+            : {}),
+          numero_comprovante: numComp,
+          valor_vale_pedagio: valVp.toFixed(2),
+          tipo_vale_pedagio: tpVale,
+        });
+      }
+    }
+
+    const infoComplementarMdfe = comporObservacaoComCamposExtras(
+      mdfe.informacao_adicional,
+      mdfe.campos_extras,
+      5000
+    );
+
     const montarPayloadFocus = (numMdfe, placaAtual, ciotListaAtual) => ({
       emitente: tipoEmitenteFinal,
       ...(tipoTransporteFocus ? { tipo_transporte: tipoTransporteFocus } : {}),
@@ -3920,6 +4102,9 @@ class TransporteService {
         ...(!isCargaPropriaFrotaPropria && pagamentosPayload.length > 0
           ? { pagamentos: pagamentosPayload }
           : {}),
+        ...(!isCargaPropriaFrotaPropria && valesPedagioPayload.length > 0
+          ? { vales_pedagio: valesPedagioPayload }
+          : {}),
         placa_veiculo: placaAtual,
         ...(renavamTracao.length >= 9 ? { renavam_veiculo: renavamTracao.slice(0, 11) } : {}),
         tara_veiculo: taraVeiculo,
@@ -3957,8 +4142,8 @@ class TransporteService {
         ...(reboquesPayload.length > 0 ? { veiculos_reboque: reboquesPayload } : {}),
       },
 
-      ...(mdfe.informacao_adicional
-        ? { informacao_complementar: String(mdfe.informacao_adicional).slice(0, 5000) }
+      ...(infoComplementarMdfe
+        ? { informacao_complementar: infoComplementarMdfe }
         : {}),
     });
 
@@ -3980,7 +4165,7 @@ class TransporteService {
          SET ref = $1, serie = $2, numero = $3, veiculo_placa = $4,
              payload_focus = $5, ciot_codigo = COALESCE($7, ciot_codigo),
              status = 'PROCESSANDO', updated_at = NOW()
-         WHERE id = $6`,
+         WHERE id = $6 AND tenant_id = $8`,
         [
           refAtual,
           String(serieEnvio),
@@ -3989,6 +4174,7 @@ class TransporteService {
           JSON.stringify(payloadEnviado),
           mdfeId,
           ciotPayload[0]?.ciot || null,
+          tenantId,
         ]
       );
 
@@ -3997,8 +4183,8 @@ class TransporteService {
       } catch (emitErr) {
         await db
           .query(
-            `UPDATE dash_mdfes SET status = 'REJEITADO', mensagem_sefaz = $1, updated_at = NOW() WHERE id = $2`,
-            [String(emitErr.message || 'Erro de validação Focus NFe').slice(0, 500), mdfeId]
+            `UPDATE dash_mdfes SET status = 'REJEITADO', mensagem_sefaz = $1, updated_at = NOW() WHERE id = $2 AND tenant_id = $3`,
+            [String(emitErr.message || 'Erro de validação Focus NFe').slice(0, 500), mdfeId, tenantId]
           )
           .catch(() => {});
         throw emitErr;
@@ -4096,7 +4282,8 @@ class TransporteService {
         placaTracao,
         codMunDesc: defaultMunDesc.codigo,
         nomeMunDesc: defaultMunDesc.nome,
-      }
+      },
+      tenantId
     );
 
     const ciotCodLink = digitsOnly(mdfe.ciot_codigo || '').slice(0, 12);
@@ -4172,7 +4359,7 @@ class TransporteService {
           caminho_damdfe = COALESCE($9, caminho_damdfe),
           retorno_focus = jsonb_set(COALESCE(retorno_focus, '{}'::jsonb), '{ultima_consulta}', $10::jsonb),
           updated_at = NOW()
-       WHERE id = $11`,
+       WHERE id = $11 AND tenant_id = $12`,
       [
         novoStatus,
         statusSefazNormalizado,
@@ -4185,6 +4372,7 @@ class TransporteService {
         caminhoDamdfeNormalizado,
         JSON.stringify(st || {}),
         mdfeId,
+        tenantId,
       ]
     );
 
@@ -4225,12 +4413,13 @@ class TransporteService {
           mensagem_sefaz = COALESCE($2, mensagem_sefaz),
           retorno_focus = jsonb_set(COALESCE(retorno_focus, '{}'::jsonb), '{cancelamento}', $3::jsonb),
           updated_at = NOW()
-       WHERE id = $4`,
+       WHERE id = $4 AND tenant_id = $5`,
       [
         resFocus?.status_sefaz || null,
         resFocus?.mensagem_sefaz || 'MDF-e cancelado',
         JSON.stringify(resFocus || {}),
         mdfeId,
+        tenantId,
       ]
     );
 
@@ -4353,7 +4542,7 @@ class TransporteService {
           encerramento_municipio = $6,
           retorno_focus = jsonb_set(COALESCE(retorno_focus, '{}'::jsonb), '{encerramento}', $7::jsonb),
           updated_at = NOW()
-       WHERE id = $8`,
+       WHERE id = $8 AND tenant_id = $9`,
       [
         statusSefazEnc,
         msgSefazEnc,
@@ -4363,6 +4552,7 @@ class TransporteService {
         ibgeEnc.nome,
         JSON.stringify(resFocus || {}),
         mdfeId,
+        tenantId,
       ]
     );
 
@@ -4558,8 +4748,8 @@ class TransporteService {
     });
 
     await db.query(
-      `UPDATE dash_mdfes SET retorno_focus = jsonb_set(COALESCE(retorno_focus,'{}'::jsonb), '{inclusao_condutor}', $1::jsonb), updated_at = NOW() WHERE id = $2`,
-      [JSON.stringify(resFocus), mdfeId]
+      `UPDATE dash_mdfes SET retorno_focus = jsonb_set(COALESCE(retorno_focus,'{}'::jsonb), '{inclusao_condutor}', $1::jsonb), updated_at = NOW() WHERE id = $2 AND tenant_id = $3`,
+      [JSON.stringify(resFocus), mdfeId, tenantId]
     );
 
     return { success: true, focus: resFocus };
@@ -4592,8 +4782,8 @@ class TransporteService {
     });
 
     await db.query(
-      `UPDATE dash_mdfes SET retorno_focus = jsonb_set(COALESCE(retorno_focus,'{}'::jsonb), '{inclusao_dfe}', $1::jsonb), updated_at = NOW() WHERE id = $2`,
-      [JSON.stringify(resFocus), mdfeId]
+      `UPDATE dash_mdfes SET retorno_focus = jsonb_set(COALESCE(retorno_focus,'{}'::jsonb), '{inclusao_dfe}', $1::jsonb), updated_at = NOW() WHERE id = $2 AND tenant_id = $3`,
+      [JSON.stringify(resFocus), mdfeId, tenantId]
     );
 
     return { success: true, focus: resFocus };
@@ -4647,7 +4837,7 @@ class TransporteService {
                 numero = COALESCE($8, numero),
                 serie = COALESCE($9, serie),
                 updated_at = NOW()
-             WHERE id = $10`,
+             WHERE id = $10 AND tenant_id = $11`,
             [
               novoStatus,
               extrairStatusSefazFocus(st),
@@ -4665,6 +4855,7 @@ class TransporteService {
               st.numero ? parseInt(st.numero, 10) : null,
               st.serie ? String(st.serie) : null,
               c.id,
+              c.tenant_id,
             ]
           );
           reconciliados++;
@@ -4769,7 +4960,7 @@ class TransporteService {
       }
     } else {
       try {
-        const { focus } = await this.getFocusClient(docRecord.tenant_id, docRecord.emitente_id);
+        const { client: focus } = await this.getFocusClient(docRecord.tenant_id, docRecord.emitente_id);
         if (docType === 'MDFE') {
           authoritative = await focus.consultarMdfe(ref, true);
         } else if (String(docRecord.modelo) === '67') {
@@ -4836,9 +5027,9 @@ class TransporteService {
       const cteRes = await db.query(
         `UPDATE dash_ctes SET
             status = CASE
-                WHEN $1 = 'autorizado' THEN 'AUTORIZADO'
-                WHEN $1 = 'cancelado' THEN 'CANCELADO'
-                WHEN $1 = 'erro_autorizacao' OR $1 = 'denegado' THEN 'REJEITADO'
+                WHEN $1::text = 'autorizado' THEN 'AUTORIZADO'
+                WHEN $1::text = 'cancelado' THEN 'CANCELADO'
+                WHEN $1::text = 'erro_autorizacao' OR $1::text = 'denegado' THEN 'REJEITADO'
                 ELSE status
             END,
             chave_cte = COALESCE($2, chave_cte),
@@ -4852,7 +5043,7 @@ class TransporteService {
             updated_at = NOW()
          WHERE id = $10 AND tenant_id = $11 RETURNING id, tenant_id`,
         [
-          effStatus,
+          String(effStatus || '').toLowerCase(),
           chaveFinal,
           xmlFinal,
           dacteFinal,
@@ -4868,13 +5059,14 @@ class TransporteService {
       return { success: true, tipo: 'CTE', id: cteRes.rows[0]?.id || docRecord.id };
     }
 
+    const effStatusLower = String(effStatus || '').toLowerCase();
     const mdfeRes = await db.query(
       `UPDATE dash_mdfes SET
           status = CASE
-              WHEN $1 = 'autorizado' THEN 'AUTORIZADO'
-              WHEN $1 = 'cancelado' THEN 'CANCELADO'
-              WHEN $1 = 'encerrado' THEN 'ENCERRADO'
-              WHEN $1 = 'erro_autorizacao' THEN 'REJEITADO'
+              WHEN $1::text = 'autorizado' THEN 'AUTORIZADO'
+              WHEN $1::text = 'cancelado' THEN 'CANCELADO'
+              WHEN $1::text = 'encerrado' THEN 'ENCERRADO'
+              WHEN $1::text = 'erro_autorizacao' THEN 'REJEITADO'
               ELSE status
           END,
           chave_mdfe = COALESCE($2, chave_mdfe),
@@ -4888,7 +5080,7 @@ class TransporteService {
           updated_at = NOW()
        WHERE id = $10 AND tenant_id = $11 RETURNING id, tenant_id`,
       [
-        effStatus,
+        effStatusLower,
         chaveFinal,
         xmlFinal,
         damdfeFinal,
@@ -4901,6 +5093,20 @@ class TransporteService {
         docRecord.tenant_id,
       ]
     );
+
+    if (effStatusLower === 'encerrado') {
+      try {
+        await encerrarCiotsPorMdfe(db, docRecord.tenant_id, {
+          ...docRecord,
+          protocolo: protocoloFinal || docRecord.protocolo || null,
+        });
+      } catch (ciotErr) {
+        logger.warn('[Webhook Focus] Aviso ao encerrar CIOT vinculado ao MDF-e:', {
+          mdfeId: docRecord.id,
+          error: ciotErr.message,
+        });
+      }
+    }
 
     return { success: true, tipo: 'MDFE', id: mdfeRes.rows[0]?.id || docRecord.id };
   }
@@ -6367,7 +6573,7 @@ class TransporteService {
         .query(
           `UPDATE dash_cargas
            SET dados_nfe = jsonb_set(COALESCE(dados_nfe, '{}'::jsonb), '{manifestacao_destinatario}', to_jsonb($1::text)),
-               status = CASE WHEN $1 IN ('desconhecimento', 'nao_realizada') THEN 'CANCELADA' ELSE status END,
+               status = CASE WHEN $1::text IN ('desconhecimento', 'nao_realizada') THEN 'CANCELADA' ELSE status END,
                updated_at = NOW()
            WHERE tenant_id = $2 AND chave_acesso = $3`,
           [tipoNorm, tenantId, chave]
@@ -6393,5 +6599,6 @@ TransporteService.resolverPercursoUfs = resolverPercursoUfs;
 TransporteService.validarPlacaVeiculoSefaz = validarPlacaVeiculoSefaz;
 TransporteService.gerarPlacaMercosulHomolog = gerarPlacaMercosulHomolog;
 TransporteService.gerarCiotHomologacao = gerarCiotHomologacao;
+TransporteService.comporObservacaoComCamposExtras = comporObservacaoComCamposExtras;
 
 module.exports = TransporteService;

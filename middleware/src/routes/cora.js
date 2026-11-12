@@ -11,6 +11,7 @@ const CoraService = require('../services/CoraService');
 const db = require('../db/postgres');
 const logger = require('../config/logger');
 const { isMaskedValue, decryptSecret } = require('../utils/cryptoVault');
+const { requireAdmin, requireActionPermission } = require('../middleware/auth');
 
 async function resolveTempCoraConfig(tenantId, body) {
     const { cora_cert_pem, cora_private_key, cora_client_id } = body || {};
@@ -36,7 +37,7 @@ async function resolveTempCoraConfig(tenantId, body) {
 // POST /api/cora/test-connection
 // Testa a conexão com o Banco Cora usando as credenciais salvas no banco.
 // ─────────────────────────────────────────────────────────────────────────────
-router.post('/test-connection', async (req, res) => {
+router.post('/test-connection', requireAdmin, async (req, res) => {
     try {
         const tenantId = req.tenant?.id;
         if (!tenantId) return res.status(401).json({ error: 'Tenant não identificado.' });
@@ -54,7 +55,7 @@ router.post('/test-connection', async (req, res) => {
 // POST /api/cora/emitir-boleto
 // Emite um boleto registrado no Banco Cora para um título de dash_financeiro.
 // ─────────────────────────────────────────────────────────────────────────────
-router.post('/emitir-boleto', async (req, res) => {
+router.post('/emitir-boleto', requireActionPermission('permitir_ver_titulos_cliente'), async (req, res) => {
     try {
         const tenantId = req.tenant.id;
         const { titleId, vencimento, valor, juros, multa, desconto } = req.body;
@@ -592,7 +593,7 @@ router.get('/saldo', async (req, res) => {
 // POST /api/cora/pagar-boleto
 // Inicia o pagamento de um boleto via linha digitável.
 // ─────────────────────────────────────────────────────────────────────────────
-router.post('/pagar-boleto', async (req, res) => {
+router.post('/pagar-boleto', requireAdmin, async (req, res) => {
     try {
         const tenantId = req.tenant.id;
         const { digitable_line, scheduled_at } = req.body;
@@ -610,7 +611,7 @@ router.post('/pagar-boleto', async (req, res) => {
 // POST /api/cora/registrar-webhook
 // Registra o endpoint de webhook do Coliseu Transporte no Banco Cora.
 // ─────────────────────────────────────────────────────────────────────────────
-router.post('/registrar-webhook', async (req, res) => {
+router.post('/registrar-webhook', requireAdmin, async (req, res) => {
     try {
         const tenantId = req.tenant.id;
         const { webhook_url } = req.body || {};

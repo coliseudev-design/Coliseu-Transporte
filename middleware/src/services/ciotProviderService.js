@@ -221,6 +221,74 @@ function escapeXml(val) {
 }
 
 /**
+ * Calcula automaticamente as retenções legais de frete para Transportador Autônomo de Cargas (TAC — Pessoa Física):
+ * - Base INSS e SEST/SENAT: 20% do valor bruto do frete (IN RFB nº 2.110/2022)
+ *   • INSS segurado TAC: 11% sobre a base de 20% (= 2,20% do bruto, limitado ao teto previdenciário)
+ *   • SEST/SENAT: 2,5% sobre a base de 20% (= 0,50% do bruto)
+ * - Base IRRF Transporte de Cargas: 10% do valor bruto (Lei nº 12.794/2013), deduzidos INSS, SEST/SENAT e dependentes.
+ */
+function calcularRetencoesTac({
+  valorFrete = 0,
+  tipoTransporte = '2',
+  documentoTransportador = '',
+  dependentes = 0,
+} = {}) {
+  const bruto = Math.max(0, Number(valorFrete || 0));
+  const docLimpo = digitsOnly(documentoTransportador);
+  const isTacPf =
+    String(tipoTransporte) === '2' && (docLimpo.length === 0 || docLimpo.length === 11);
+
+  if (!isTacPf || bruto <= 0) {
+    return {
+      aplicavel: false,
+      valor_bruto: Math.round(bruto * 100) / 100,
+      base_inss_sest: 0,
+      valor_inss: 0,
+      valor_sest_senat: 0,
+      base_irrf: 0,
+      valor_irrf: 0,
+      total_retencoes: 0,
+      valor_liquido: Math.round(bruto * 100) / 100,
+    };
+  }
+
+  const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+  const base20 = round2(bruto * 0.2);
+  const TETO_RETENCAO_INSS = 897.32;
+  const valorInss = Math.min(TETO_RETENCAO_INSS, round2(base20 * 0.11));
+  const valorSestSenat = round2(base20 * 0.025);
+
+  const deducaoDependentes = Math.max(0, parseInt(dependentes, 10) || 0) * 189.59;
+  const baseIrrf = Math.max(0, round2(bruto * 0.1 - valorInss - valorSestSenat - deducaoDependentes));
+
+  let irrf = 0;
+  if (baseIrrf > 4664.68) {
+    irrf = baseIrrf * 0.275 - 896.0;
+  } else if (baseIrrf > 3751.05) {
+    irrf = baseIrrf * 0.225 - 662.77;
+  } else if (baseIrrf > 2826.65) {
+    irrf = baseIrrf * 0.15 - 381.44;
+  } else if (baseIrrf > 2259.2) {
+    irrf = baseIrrf * 0.075 - 169.44;
+  }
+  const valorIrrf = Math.max(0, round2(irrf));
+  const totalRetencoes = round2(valorInss + valorSestSenat + valorIrrf);
+  const valorLiquido = Math.max(0, round2(bruto - totalRetencoes));
+
+  return {
+    aplicavel: true,
+    valor_bruto: round2(bruto),
+    base_inss_sest: base20,
+    valor_inss: valorInss,
+    valor_sest_senat: valorSestSenat,
+    base_irrf: baseIrrf,
+    valor_irrf: valorIrrf,
+    total_retencoes: totalRetencoes,
+    valor_liquido: valorLiquido,
+  };
+}
+
+/**
  * Conector SOAP oficial e-Frete PEO (Sandbox & Produção) usando fetch nativo do Node 20+.
  */
 async function emitirViaEfrete(contrato, emitente, credenciais) {
@@ -300,6 +368,192 @@ async function emitirViaEfrete(contrato, emitente, credenciais) {
     provedor: 'EFRETE',
     cnpj_ipef: CNPJ_PADRAO_IPEF.EFRETE,
     raw_retorno: xmlResp.slice(0, 4000),
+  };
+}
+
+/**
+ * Conector SOAP oficial e-Frete PEO — EncerrarOperacaoTransporte (Sandbox & Produção).
+ */
+async function encerrarViaEfrete(contrato, credenciais) {
+  const isProd = String(credenciais.ambiente || 'homologacao').toLowerCase() === 'producao';
+  const endpoint = isProd
+    ? 'https://www.efrete.com.br/Services/PefService.asmx'
+    : 'https://dev.efrete.com.br/Services/PefService.asmx';
+
+  if (!credenciais.integrador || !credenciais.usuario || !credenciais.senha) {
+    throw new Error(
+      'Credenciais da IPEF e-Frete incompletas para encerramento em Produção. Configure Token do Integrador, Usuário e Senha em Dados da Empresa.'
+    );
+  }
+
+  const codigoFormatado = contrato.ciot_verificador
+    ? `${digitsOnly(contrato.ciot_codigo)}/${digitsOnly(contrato.ciot_verificador)}`
+    : digitsOnly(contrato.ciot_codigo);
+
+  const soapEnvelope = `<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+               xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+               xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Body>
+    <EncerrarOperacaoTransporte xmlns="http://schemas.ipc.adm.br/efrete/pef">
+      <request xmlns="http://schemas.ipc.adm.br/efrete/pef/EncerrarOperacaoTransporte">
+        <Integrador xmlns="http://schemas.ipc.adm.br/efrete/objects">${escapeXml(credenciais.integrador)}</Integrador>
+        <Versao xmlns="http://schemas.ipc.adm.br/efrete/objects">2</Versao>
+        <CodigoIdentificacaoOperacao>${escapeXml(codigoFormatado)}</CodigoIdentificacaoOperacao>
+        <PesoCarga>${Number(contrato.peso_carga_kg || 0).toFixed(2)}</PesoCarga>
+        <Frete>
+          <ValorBruto>${Number(contrato.valor_frete || 0).toFixed(2)}</ValorBruto>
+        </Frete>
+      </request>
+    </EncerrarOperacaoTransporte>
+  </soap:Body>
+</soap:Envelope>`;
+
+  const resp = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'text/xml; charset=utf-8',
+      SOAPAction: '"http://schemas.ipc.adm.br/efrete/pef/EncerrarOperacaoTransporte"',
+    },
+    body: soapEnvelope,
+  });
+
+  const xmlResp = await resp.text();
+  const matchProt =
+    xmlResp.match(/<ProtocoloEncerramento>([^<]+)<\/ProtocoloEncerramento>/i) ||
+    xmlResp.match(/<Protocolo>([^<]+)<\/Protocolo>/i);
+  if (!matchProt) {
+    const matchErro = xmlResp.match(/<Mensagem>([^<]+)<\/Mensagem>/i);
+    throw new Error(
+      `Retorno e-Frete Encerramento (${resp.status}): ${matchErro ? matchErro[1] : 'Operadora não retornou ProtocoloEncerramento.'}`
+    );
+  }
+  return {
+    protocolo: String(matchProt[1]).trim().slice(0, 40),
+    raw_retorno: xmlResp.slice(0, 4000),
+  };
+}
+
+/**
+ * Conector SOAP oficial e-Frete PEO — CancelarOperacaoTransporte (Sandbox & Produção).
+ */
+async function cancelarViaEfrete(contrato, motivo, credenciais) {
+  const isProd = String(credenciais.ambiente || 'homologacao').toLowerCase() === 'producao';
+  const endpoint = isProd
+    ? 'https://www.efrete.com.br/Services/PefService.asmx'
+    : 'https://dev.efrete.com.br/Services/PefService.asmx';
+
+  if (!credenciais.integrador || !credenciais.usuario || !credenciais.senha) {
+    throw new Error(
+      'Credenciais da IPEF e-Frete incompletas para cancelamento em Produção. Configure Token do Integrador, Usuário e Senha em Dados da Empresa.'
+    );
+  }
+
+  const codigoFormatado = contrato.ciot_verificador
+    ? `${digitsOnly(contrato.ciot_codigo)}/${digitsOnly(contrato.ciot_verificador)}`
+    : digitsOnly(contrato.ciot_codigo);
+
+  const soapEnvelope = `<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+               xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+               xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Body>
+    <CancelarOperacaoTransporte xmlns="http://schemas.ipc.adm.br/efrete/pef">
+      <request xmlns="http://schemas.ipc.adm.br/efrete/pef/CancelarOperacaoTransporte">
+        <Integrador xmlns="http://schemas.ipc.adm.br/efrete/objects">${escapeXml(credenciais.integrador)}</Integrador>
+        <Versao xmlns="http://schemas.ipc.adm.br/efrete/objects">2</Versao>
+        <CodigoIdentificacaoOperacao>${escapeXml(codigoFormatado)}</CodigoIdentificacaoOperacao>
+        <Motivo>${escapeXml(String(motivo || '').slice(0, 250))}</Motivo>
+      </request>
+    </CancelarOperacaoTransporte>
+  </soap:Body>
+</soap:Envelope>`;
+
+  const resp = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'text/xml; charset=utf-8',
+      SOAPAction: '"http://schemas.ipc.adm.br/efrete/pef/CancelarOperacaoTransporte"',
+    },
+    body: soapEnvelope,
+  });
+
+  const xmlResp = await resp.text();
+  const matchProt =
+    xmlResp.match(/<ProtocoloCancelamento>([^<]+)<\/ProtocoloCancelamento>/i) ||
+    xmlResp.match(/<Protocolo>([^<]+)<\/Protocolo>/i);
+  if (!matchProt) {
+    const matchErro = xmlResp.match(/<Mensagem>([^<]+)<\/Mensagem>/i);
+    throw new Error(
+      `Retorno e-Frete Cancelamento (${resp.status}): ${matchErro ? matchErro[1] : 'Operadora não retornou ProtocoloCancelamento.'}`
+    );
+  }
+  return {
+    protocolo: String(matchProt[1]).trim().slice(0, 40),
+    raw_retorno: xmlResp.slice(0, 4000),
+  };
+}
+
+/**
+ * Conector REST padronizado para Pamcard / Target em Produção (quando token/endpoint da integradora está ativo).
+ */
+async function transmitirEventoRestIpef({ provedor, operacao, contrato, motivo = '', credenciais }) {
+  const isProd = String(credenciais.ambiente || 'homologacao').toLowerCase() === 'producao';
+  const baseUrls = {
+    PAMCARD: isProd
+      ? 'https://api.pamcard.com.br/ciot/v1'
+      : 'https://sandbox.pamcard.com.br/ciot/v1',
+    TARGET: isProd
+      ? 'https://api.targetmeiosdepagamento.com.br/ciot/v1'
+      : 'https://sandbox.targetmeiosdepagamento.com.br/ciot/v1',
+  };
+  const baseUrl = baseUrls[provedor];
+  if (!baseUrl || !credenciais.integrador) {
+    throw new Error(
+      `Credenciais da operadora ${provedor} não configuradas para ${operacao} em Produção.`
+    );
+  }
+
+  const codigoCiot = digitsOnly(contrato.ciot_codigo);
+  const actionPath = operacao === 'ENCERRAR' ? 'encerrar' : 'cancelar';
+  const resp = await fetch(`${baseUrl}/operacoes/${encodeURIComponent(codigoCiot)}/${actionPath}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${credenciais.integrador}`,
+      ...(credenciais.usuario ? { 'X-Ipef-User': credenciais.usuario } : {}),
+    },
+    body: JSON.stringify({
+      ciot_codigo: codigoCiot,
+      ciot_verificador: contrato.ciot_verificador || null,
+      contratante_documento: digitsOnly(contrato.contratante_documento),
+      valor_frete: Number(contrato.valor_frete || 0),
+      peso_carga_kg: Number(contrato.peso_carga_kg || 0),
+      ...(motivo ? { motivo: String(motivo).slice(0, 250) } : {}),
+    }),
+  });
+
+  const bodyText = await resp.text();
+  let parsedJson = null;
+  try {
+    parsedJson = JSON.parse(bodyText);
+  } catch (_) {
+    parsedJson = null;
+  }
+
+  if (!resp.ok) {
+    const errMsg = parsedJson?.mensagem || parsedJson?.message || parsedJson?.error || bodyText.slice(0, 200);
+    throw new Error(`Retorno ${provedor} (${resp.status}): ${errMsg}`);
+  }
+
+  const prot =
+    parsedJson?.protocolo ||
+    parsedJson?.protocolo_encerramento ||
+    parsedJson?.protocolo_cancelamento ||
+    `${provedor}-${operacao.slice(0, 3)}-${codigoCiot.slice(-6)}`;
+  return {
+    protocolo: String(prot).trim().slice(0, 40),
+    raw_retorno: bodyText.slice(0, 4000),
   };
 }
 
@@ -665,7 +919,7 @@ async function emitirOuRegistrarCiot({
 }
 
 /**
- * Encerra uma operação de CIOT específica (gerando protocolo de encerramento).
+ * Encerra uma operação de CIOT específica (transmitindo à IPEF quando em Produção ou registrando protocolo).
  */
 async function encerrarCiotContrato({
   runner = db,
@@ -674,7 +928,17 @@ async function encerrarCiotContrato({
   protocoloEncerramento = null,
 }) {
   const { rows } = await runner.query(
-    `SELECT * FROM dash_contratos_transporte WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
+    `SELECT c.*,
+            e.focus_ambiente,
+            e.ciot_provedor AS emit_ciot_provedor,
+            e.ciot_ambiente AS emit_ciot_ambiente,
+            e.ciot_integrador_token AS emit_ciot_token,
+            e.ciot_usuario AS emit_ciot_usuario,
+            e.ciot_senha AS emit_ciot_senha
+     FROM dash_contratos_transporte c
+     LEFT JOIN dash_emitentes e ON e.id = c.emitente_id AND e.tenant_id = c.tenant_id
+     WHERE c.id = $1 AND c.tenant_id = $2
+     LIMIT 1`,
     [contratoId, tenantId]
   );
   if (rows.length === 0) {
@@ -692,9 +956,34 @@ async function encerrarCiotContrato({
     return c;
   }
 
-  const protFinal =
-    String(protocoloEncerramento || '').trim() ||
-    `ENC-${c.ciot_codigo || c.id}-${String(Date.now()).slice(-6)}`;
+  let protFinal = String(protocoloEncerramento || '').trim();
+  const ambienteEfetivo = String(c.emit_ciot_ambiente || c.focus_ambiente || 'homologacao').toLowerCase();
+  const provedorEfetivo = String(c.ciot_provedor || c.emit_ciot_provedor || 'HOMOLOGACAO_LOCAL').toUpperCase();
+
+  if (!protFinal && ambienteEfetivo === 'producao' && c.ciot_codigo) {
+    const credenciais = {
+      ambiente: ambienteEfetivo,
+      integrador: String(decryptSecret(c.emit_ciot_token) || '').trim(),
+      usuario: String(c.emit_ciot_usuario || '').trim(),
+      senha: String(decryptSecret(c.emit_ciot_senha) || '').trim(),
+    };
+    if (provedorEfetivo === 'EFRETE') {
+      const retSoap = await encerrarViaEfrete(c, credenciais);
+      protFinal = retSoap.protocolo;
+    } else if (provedorEfetivo === 'PAMCARD' || provedorEfetivo === 'TARGET') {
+      const retRest = await transmitirEventoRestIpef({
+        provedor: provedorEfetivo,
+        operacao: 'ENCERRAR',
+        contrato: c,
+        credenciais,
+      });
+      protFinal = retRest.protocolo;
+    }
+  }
+
+  if (!protFinal) {
+    protFinal = `ENC-${c.ciot_codigo || c.id}-${String(Date.now()).slice(-6)}`;
+  }
 
   const upd = await runner.query(
     `UPDATE dash_contratos_transporte
@@ -707,6 +996,229 @@ async function encerrarCiotContrato({
     [protFinal.slice(0, 40), contratoId, tenantId]
   );
   return upd.rows[0];
+}
+
+/**
+ * Cancela uma operação de CIOT (transmitindo o cancelamento à IPEF quando em Produção e estornando títulos abertos).
+ */
+async function cancelarCiotContrato({
+  runner = db,
+  tenantId,
+  contratoId,
+  motivo = '',
+  protocoloCancelamento = null,
+  usuario = 'Operador',
+}) {
+  const motivoLimpo = String(motivo || '').trim();
+  if (motivoLimpo.length < 10) {
+    const err = new Error('Informe o motivo do cancelamento do CIOT (mínimo 10 caracteres).');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const { rows } = await runner.query(
+    `SELECT c.*,
+            e.focus_ambiente,
+            e.ciot_provedor AS emit_ciot_provedor,
+            e.ciot_ambiente AS emit_ciot_ambiente,
+            e.ciot_integrador_token AS emit_ciot_token,
+            e.ciot_usuario AS emit_ciot_usuario,
+            e.ciot_senha AS emit_ciot_senha
+     FROM dash_contratos_transporte c
+     LEFT JOIN dash_emitentes e ON e.id = c.emitente_id AND e.tenant_id = c.tenant_id
+     WHERE c.id = $1 AND c.tenant_id = $2
+     LIMIT 1`,
+    [contratoId, tenantId]
+  );
+  if (rows.length === 0) {
+    const err = new Error('Operação de CIOT não encontrada.');
+    err.statusCode = 404;
+    throw err;
+  }
+  const c = rows[0];
+  if (c.ciot_status === 'CANCELADO') {
+    return { contrato: c, titulos_estornados: 0 };
+  }
+
+  let protCanc = String(protocoloCancelamento || '').trim();
+  const ambienteEfetivo = String(c.emit_ciot_ambiente || c.focus_ambiente || 'homologacao').toLowerCase();
+  const provedorEfetivo = String(c.ciot_provedor || c.emit_ciot_provedor || 'HOMOLOGACAO_LOCAL').toUpperCase();
+
+  if (!protCanc && ambienteEfetivo === 'producao' && c.ciot_codigo) {
+    const credenciais = {
+      ambiente: ambienteEfetivo,
+      integrador: String(decryptSecret(c.emit_ciot_token) || '').trim(),
+      usuario: String(c.emit_ciot_usuario || '').trim(),
+      senha: String(decryptSecret(c.emit_ciot_senha) || '').trim(),
+    };
+    if (provedorEfetivo === 'EFRETE') {
+      const retSoap = await cancelarViaEfrete(c, motivoLimpo, credenciais);
+      protCanc = retSoap.protocolo;
+    } else if (provedorEfetivo === 'PAMCARD' || provedorEfetivo === 'TARGET') {
+      const retRest = await transmitirEventoRestIpef({
+        provedor: provedorEfetivo,
+        operacao: 'CANCELAR',
+        contrato: c,
+        motivo: motivoLimpo,
+        credenciais,
+      });
+      protCanc = retRest.protocolo;
+    }
+  }
+
+  if (!protCanc) {
+    protCanc = `CANC-${c.ciot_codigo || c.id}-${String(Date.now()).slice(-6)}`;
+  }
+
+  const upd = await runner.query(
+    `UPDATE dash_contratos_transporte
+     SET ciot_status = 'CANCELADO',
+         ciot_protocolo_cancelamento = $1,
+         ciot_cancelado_motivo = $2,
+         ciot_cancelado_em = NOW(),
+         updated_at = NOW()
+     WHERE id = $3 AND tenant_id = $4
+     RETURNING *`,
+    [protCanc.slice(0, 40), motivoLimpo.slice(0, 500), contratoId, tenantId]
+  );
+
+  const estornados = await estornarFinanceiroCiot(runner, tenantId, c, motivoLimpo, usuario);
+  return {
+    contrato: upd.rows[0],
+    protocolo_cancelamento: protCanc,
+    titulos_estornados: estornados,
+  };
+}
+
+/**
+ * Gera HTML limpo e pronto para impressão (A4) do Contrato de Prestação de Serviço de Transporte & RPA (TAC).
+ */
+function gerarHtmlContratoRpa(contrato, emitente = {}) {
+  const esc = escapeXml;
+  const fmtMoeda = (v) =>
+    Number(v || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+  const bruto = Number(contrato.valor_frete || 0);
+  const adiantamento = Number(contrato.valor_adiantamento || 0);
+  const pedagio = Number(contrato.valor_pedagio || 0);
+  const combustivel = Number(contrato.valor_combustivel || 0);
+  const inss = Number(contrato.valor_inss || 0);
+  const sestSenat = Number(contrato.valor_sest_senat || 0);
+  const irrf = Number(contrato.valor_irrf || 0);
+  const outrosDesc = Number(contrato.valor_outros_descontos || 0);
+  const totalRet = inss + sestSenat + irrf + outrosDesc;
+  const saldoQuitacao = Math.max(0, bruto - adiantamento - totalRet);
+  const protocoloFormatado = contrato.ciot_codigo
+    ? contrato.ciot_verificador
+      ? `${contrato.ciot_codigo}/${contrato.ciot_verificador}`
+      : contrato.ciot_codigo
+    : 'PENDENTE DE TRANSMISSÃO';
+  const dataEmissaoFmt = new Date(contrato.created_at || Date.now()).toLocaleDateString('pt-BR');
+
+  return `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <title>Contrato de Transporte &amp; RPA — CIOT ${esc(protocoloFormatado)}</title>
+  <style>
+    * { box-sizing: border-box; font-family: 'Segoe UI', Arial, sans-serif; }
+    body { margin: 24px; color: #0f172a; font-size: 12px; line-height: 1.45; }
+    .header { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 2px solid #0f172a; padding-bottom: 12px; margin-bottom: 16px; }
+    .title { font-size: 16px; font-weight: 800; text-transform: uppercase; }
+    .badge { background: #e0f2fe; color: #0369a1; border: 1px solid #7dd3fc; padding: 4px 10px; border-radius: 6px; font-weight: 700; font-size: 12px; }
+    .section { border: 1px solid #cbd5e1; border-radius: 6px; padding: 10px 12px; margin-bottom: 12px; }
+    .section-title { font-size: 11px; font-weight: 800; text-transform: uppercase; color: #334155; margin-bottom: 8px; border-bottom: 1px solid #e2e8f0; padding-bottom: 4px; }
+    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+    .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+    .label { font-size: 10px; color: #64748b; text-transform: uppercase; font-weight: 700; }
+    .val { font-size: 12px; font-weight: 600; color: #0f172a; }
+    table { width: 100%; border-collapse: collapse; margin-top: 6px; }
+    th, td { border: 1px solid #cbd5e1; padding: 6px 8px; text-align: left; }
+    th { background: #f8fafc; font-size: 10px; text-transform: uppercase; color: #475569; }
+    .right { text-align: right; }
+    .highlight { background: #f0fdf4; font-weight: 800; font-size: 13px; }
+    .signatures { display: grid; grid-template-columns: 1fr 1fr; gap: 36px; margin-top: 42px; text-align: center; }
+    .sig-line { border-top: 1px solid #0f172a; padding-top: 6px; font-size: 11px; }
+    .no-print { margin-bottom: 16px; }
+    @media print { .no-print { display: none; } body { margin: 8mm; } }
+  </style>
+</head>
+<body>
+  <div class="no-print">
+    <button onclick="window.print()" style="padding:8px 16px;background:#0284c7;color:#fff;border:none;border-radius:6px;font-weight:700;cursor:pointer;">
+      Imprimir / Salvar PDF
+    </button>
+  </div>
+  <div class="header">
+    <div>
+      <div class="title">Contrato de Prestação de Transporte Rodoviário de Cargas &amp; RPA</div>
+      <div>Resolução ANTT nº 5.867/2020 e Resolução ANTT nº 5.862/2019 (PEO / CIOT)</div>
+      <div style="margin-top:4px;color:#475569;">Emissão: <strong>${esc(dataEmissaoFmt)}</strong> | Contrato Interno Nº <strong>#${esc(contrato.id)}</strong></div>
+    </div>
+    <div class="badge">CIOT: ${esc(protocoloFormatado)}<br/><small>Status: ${esc(contrato.ciot_status || 'GERADO')}</small></div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">1. Identificação do Contratante</div>
+    <div class="grid-2">
+      <div><div class="label">Razão Social / Nome</div><div class="val">${esc(contrato.contratante_nome || emitente.razao_social || '-')}</div></div>
+      <div><div class="label">CNPJ / CPF</div><div class="val">${esc(contrato.contratante_documento || emitente.cnpj || '-')}</div></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">2. Transportador Contratado (TAC / ETC) &amp; Conjunto Veicular</div>
+    <div class="grid">
+      <div><div class="label">Transportador</div><div class="val">${esc(contrato.transportador_nome || '-')}</div></div>
+      <div><div class="label">CPF / CNPJ</div><div class="val">${esc(contrato.transportador_documento || '-')}</div></div>
+      <div><div class="label">RNTRC ANTT</div><div class="val">${esc(contrato.transportador_rntrc || 'ISENTO')}</div></div>
+      <div><div class="label">Motorista Condutor</div><div class="val">${esc(contrato.motorista_nome || contrato.transportador_nome || '-')} (${esc(contrato.motorista_cpf || '-')})</div></div>
+      <div><div class="label">Placa de Tração / Eixos</div><div class="val">${esc(contrato.veiculo_placa || '-')} • ${esc(contrato.quantidade_eixos || 2)} eixos</div></div>
+      <div><div class="label">Dados de Quitação</div><div class="val">${esc(contrato.forma_quitacao || 'PIX')} ${contrato.chave_pix ? `(${esc(contrato.chave_pix)})` : ''}</div></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">3. Percurso, Carga &amp; Conformidade do Piso Mínimo ANTT</div>
+    <div class="grid">
+      <div><div class="label">Origem</div><div class="val">${esc(contrato.municipio_inicio || '')} / ${esc(contrato.uf_inicio || '')}</div></div>
+      <div><div class="label">Destino</div><div class="val">${esc(contrato.municipio_fim || '')} / ${esc(contrato.uf_fim || '')}</div></div>
+      <div><div class="label">Distância Estimada</div><div class="val">${esc(contrato.distancia_km || 0)} km</div></div>
+      <div><div class="label">Categoria ANTT / Peso</div><div class="val">${esc(contrato.categoria_carga_antt || 'GERAL')} • ${esc(contrato.peso_carga_kg || 0)} kg</div></div>
+      <div><div class="label">Piso Mínimo Oficial ANTT</div><div class="val">${fmtMoeda(contrato.piso_minimo_antt)}</div></div>
+      <div><div class="label">Vale-Pedágio Obrigatório</div><div class="val">${pedagio > 0 ? `${fmtMoeda(pedagio)} ${contrato.vale_pedagio_comprovante ? `(Comp. ${esc(contrato.vale_pedagio_comprovante)})` : ''}` : 'Não aplicável / Isento'}</div></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">4. Demonstrativo Financeiro &amp; Retenções Legais (RPA — IN RFB 2.110/2022)</div>
+    <table>
+      <thead>
+        <tr><th>Rubrica</th><th>Base Legal / Referência</th><th class="right">Valor (R$)</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>(+) Valor Bruto do Frete Contratado</strong></td><td>Prestação de transporte rodoviário</td><td class="right"><strong>${fmtMoeda(bruto)}</strong></td></tr>
+        <tr><td>(i) Vale-Pedágio Fornecido Separadamente (Não integra base)</td><td>Lei nº 10.209/2001 / Res. ANTT 6.024</td><td class="right">${fmtMoeda(pedagio)}</td></tr>
+        ${combustivel > 0 ? `<tr><td>(i) Vale-Combustível</td><td>Destaque contratual</td><td class="right">${fmtMoeda(combustivel)}</td></tr>` : ''}
+        <tr><td>(-) Retenção INSS Autônomo (TAC)</td><td>11% sobre 20% do frete bruto (2,20%)</td><td class="right">- ${fmtMoeda(inss)}</td></tr>
+        <tr><td>(-) Retenção SEST / SENAT</td><td>2,5% sobre 20% do frete bruto (0,50%)</td><td class="right">- ${fmtMoeda(sestSenat)}</td></tr>
+        <tr><td>(-) Retenção IRRF Transporte de Cargas</td><td>Tabela progressiva sobre 10% do frete bruto</td><td class="right">- ${fmtMoeda(irrf)}</td></tr>
+        ${outrosDesc > 0 ? `<tr><td>(-) Outros Descontos Contratuais</td><td>Avarias / Adiantamentos extras</td><td class="right">- ${fmtMoeda(outrosDesc)}</td></tr>` : ''}
+        <tr><td>(-) Adiantamento de Viagem Concedido</td><td>Saída do veículo</td><td class="right">- ${fmtMoeda(adiantamento)}</td></tr>
+        <tr class="highlight"><td><strong>(=) SALDO LÍQUIDO DE QUITAÇÃO A PAGAR NA ENTREGA</strong></td><td>Forma: ${esc(contrato.forma_quitacao || 'PIX')}</td><td class="right"><strong>${fmtMoeda(saldoQuitacao)}</strong></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p style="font-size:10.5px;color:#334155;margin-top:10px;">
+    Declaro ter recebido/contratado os valores discriminados neste Contrato de Transporte e Recibo de Pagamento a Autônomo (RPA), em plena conformidade com o Piso Mínimo de Frete (Resolução ANTT nº 5.867/2020), comprometendo-me à entrega fiel das mercadorias descritas nos documentos fiscais vinculados e à devolução do comprovante de entrega assinado.
+  </p>
+
+  <div class="signatures">
+    <div class="sig-line"><strong>${esc(contrato.contratante_nome || emitente.razao_social || 'CONTRATANTE')}</strong><br/>CNPJ/CPF: ${esc(contrato.contratante_documento || emitente.cnpj || '')}</div>
+    <div class="sig-line"><strong>${esc(contrato.transportador_nome || 'TRANSPORTADOR CONTRATADO')}</strong><br/>CPF/CNPJ: ${esc(contrato.transportador_documento || '')} • RNTRC: ${esc(contrato.transportador_rntrc || '')}</div>
+  </div>
+</body>
+</html>`;
 }
 
 /**
@@ -754,10 +1266,13 @@ module.exports = {
   calcularDigitoVerificadorCiot4,
   normalizarProtocoloCiot,
   gerarCodigoCiotHomologacao,
+  calcularRetencoesTac,
   montarPayloadPadraoAntt,
   sincronizarFinanceiroCiot,
   estornarFinanceiroCiot,
   emitirOuRegistrarCiot,
   encerrarCiotContrato,
+  cancelarCiotContrato,
   encerrarCiotsPorMdfe,
+  gerarHtmlContratoRpa,
 };

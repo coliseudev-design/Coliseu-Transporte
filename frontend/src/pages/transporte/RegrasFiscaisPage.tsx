@@ -1,7 +1,38 @@
 import React, { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import api from '../../services/api';
-import { Settings, Plus, Pencil, Trash2, Scale, Percent, Info } from 'lucide-react';
+import { Settings, Plus, Pencil, Trash2, Scale, Percent, Info, Calculator } from 'lucide-react';
+
+interface TabelaFrete {
+  id?: number;
+  nome: string;
+  uf_origem: string;
+  uf_destino: string;
+  regiao_nome: string;
+  cliente_documento: string;
+  taxa_fixa: string;
+  valor_por_kg: string;
+  frete_minimo: string;
+  percentual_ad_valorem: string;
+  percentual_gris: string;
+  pedagio_por_100kg: string;
+  ativo: boolean;
+}
+
+const TABELA_VAZIA: TabelaFrete = {
+  nome: '',
+  uf_origem: 'MS',
+  uf_destino: '',
+  regiao_nome: '',
+  cliente_documento: '',
+  taxa_fixa: '0.00',
+  valor_por_kg: '0.45',
+  frete_minimo: '80.00',
+  percentual_ad_valorem: '0.30',
+  percentual_gris: '0.15',
+  pedagio_por_100kg: '4.50',
+  ativo: true
+};
 
 interface Regra {
   id: number;
@@ -72,6 +103,43 @@ export default function RegrasFiscaisPage() {
   const [editando, setEditando] = useState<FormRegra | null>(null);
   const [salvando, setSalvando] = useState(false);
   const [aplicandoMs, setAplicandoMs] = useState(false);
+  const [editandoTabela, setEditandoTabela] = useState<TabelaFrete | null>(null);
+  const [salvandoTabela, setSalvandoTabela] = useState(false);
+
+  const { data: tabelasResp, refetch: refetchTabelas } = useQuery({
+    queryKey: ['tabelas-frete'],
+    queryFn: async () => (await api.get('/transporte/tabelas-frete')).data
+  });
+  const tabelasFrete: any[] = tabelasResp?.data || [];
+
+  const salvarTabelaFrete = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editandoTabela) return;
+    setSalvandoTabela(true);
+    try {
+      if (editandoTabela.id) {
+        await api.put(`/transporte/tabelas-frete/${editandoTabela.id}`, editandoTabela);
+      } else {
+        await api.post('/transporte/tabelas-frete', editandoTabela);
+      }
+      setEditandoTabela(null);
+      await refetchTabelas();
+    } catch (err: any) {
+      alert(err.response?.data?.error || 'Erro ao salvar Tabela de Frete.');
+    } finally {
+      setSalvandoTabela(false);
+    }
+  };
+
+  const excluirTabelaFrete = async (id: number) => {
+    if (!confirm('Excluir esta Tabela de Frete?')) return;
+    try {
+      await api.delete(`/transporte/tabelas-frete/${id}`);
+      await refetchTabelas();
+    } catch (err: any) {
+      alert(err.response?.data?.error || 'Erro ao excluir Tabela de Frete.');
+    }
+  };
 
   const { data, isLoading, refetch } = useQuery({
     queryKey: ['regras-fiscais'],
@@ -612,6 +680,237 @@ export default function RegrasFiscaisPage() {
                   className="px-5 py-2 rounded-xl text-xs font-semibold text-white bg-brand-600 hover:bg-brand-700 disabled:opacity-50 shadow-sm"
                 >
                   {salvando ? 'Salvando...' : 'Salvar Regra'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ═══ SEÇÃO: TABELAS DE FRETE COMERCIAIS (AUTOMAÇÃO DO CT-E) ═══ */}
+      <div className="bg-white dark:bg-slate-800 p-6 rounded-2xl shadow-sm border border-slate-200/80 dark:border-slate-700/80 space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-bold text-slate-900 dark:text-white flex items-center gap-2">
+              <Calculator className="w-5 h-5 text-sky-600" />
+              Tabelas de Frete Comerciais (Cálculo Automático no CT-e)
+            </h2>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+              Parametrize Frete Peso (R$/kg + Taxa Fixa + Mínimo), Ad Valorem (%), GRIS (%) e Pedágio por fração de 100 kg para preencher o CT-e em 1 clique.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setEditandoTabela({ ...TABELA_VAZIA })}
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold text-white bg-sky-600 hover:bg-sky-700 shadow-sm"
+          >
+            <Plus className="w-4 h-4" />
+            Nova Tabela de Frete
+          </button>
+        </div>
+
+        {tabelasFrete.length === 0 ? (
+          <div className="p-8 text-center rounded-xl border border-dashed border-slate-200 dark:border-slate-700 text-xs text-slate-400">
+            Nenhuma Tabela de Frete cadastrada. Clique em "Nova Tabela de Frete" para automatizar o cálculo de componentes na emissão de CT-e.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="bg-slate-50 dark:bg-slate-900/50 font-semibold text-slate-500 uppercase border-b border-slate-100 dark:border-slate-700">
+                <tr>
+                  <th className="px-4 py-3">Tabela</th>
+                  <th className="px-4 py-3">Rota / Cliente</th>
+                  <th className="px-4 py-3">Frete Peso / Mín.</th>
+                  <th className="px-4 py-3">Ad Valorem / GRIS</th>
+                  <th className="px-4 py-3">Pedágio / 100kg</th>
+                  <th className="px-4 py-3 text-right">Ações</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-700/60">
+                {tabelasFrete.map(tb => (
+                  <tr key={tb.id} className="hover:bg-slate-50/50 dark:hover:bg-slate-700/30">
+                    <td className="px-4 py-3 font-bold text-slate-900 dark:text-white">{tb.nome}</td>
+                    <td className="px-4 py-3 font-mono text-slate-600 dark:text-slate-300">
+                      {(tb.uf_origem || 'Qualquer')} → {(tb.uf_destino || 'Qualquer')}
+                      {tb.regiao_nome ? ` · ${tb.regiao_nome}` : ''}
+                      {tb.cliente_documento ? ` · Doc ${tb.cliente_documento}` : ''}
+                    </td>
+                    <td className="px-4 py-3 tabular-nums">
+                      R$ {Number(tb.valor_por_kg || 0).toFixed(2)}/kg + R$ {Number(tb.taxa_fixa || 0).toFixed(2)} (Mín R$ {Number(tb.frete_minimo || 0).toFixed(2)})
+                    </td>
+                    <td className="px-4 py-3 tabular-nums">
+                      {Number(tb.percentual_ad_valorem || 0).toFixed(2)}% / {Number(tb.percentual_gris || 0).toFixed(2)}%
+                    </td>
+                    <td className="px-4 py-3 tabular-nums">
+                      R$ {Number(tb.pedagio_por_100kg || 0).toFixed(2)}
+                    </td>
+                    <td className="px-4 py-3 text-right space-x-1">
+                      <button
+                        type="button"
+                        onClick={() => setEditandoTabela({
+                          id: tb.id,
+                          nome: tb.nome || '',
+                          uf_origem: tb.uf_origem || '',
+                          uf_destino: tb.uf_destino || '',
+                          regiao_nome: tb.regiao_nome || '',
+                          cliente_documento: tb.cliente_documento || '',
+                          taxa_fixa: String(tb.taxa_fixa ?? '0'),
+                          valor_por_kg: String(tb.valor_por_kg ?? '0'),
+                          frete_minimo: String(tb.frete_minimo ?? '0'),
+                          percentual_ad_valorem: String(tb.percentual_ad_valorem ?? '0'),
+                          percentual_gris: String(tb.percentual_gris ?? '0'),
+                          pedagio_por_100kg: String(tb.pedagio_por_100kg ?? '0'),
+                          ativo: Boolean(tb.ativo)
+                        })}
+                        className="inline-flex p-1.5 rounded-lg bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300"
+                      >
+                        <Pencil className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => excluirTabelaFrete(tb.id)}
+                        className="inline-flex p-1.5 rounded-lg bg-red-50 dark:bg-red-950/50 text-red-600"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {editandoTabela && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white dark:bg-slate-800 w-full max-w-xl rounded-2xl p-6 shadow-xl border border-slate-200 dark:border-slate-700 my-8">
+            <h3 className="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2 mb-4">
+              <Calculator className="w-5 h-5 text-sky-600" />
+              {editandoTabela.id ? 'Editar Tabela de Frete' : 'Nova Tabela de Frete'}
+            </h3>
+            <form onSubmit={salvarTabelaFrete} className="space-y-3 text-xs">
+              <div>
+                <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">Nome da Tabela *</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="Ex: Tabela Padrão Fracionado MS → SP"
+                  value={editandoTabela.nome}
+                  onChange={e => setEditandoTabela({ ...editandoTabela, nome: e.target.value })}
+                  className="w-full px-3.5 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white"
+                />
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div>
+                  <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">UF Origem</label>
+                  <input
+                    type="text"
+                    maxLength={2}
+                    placeholder="MS"
+                    value={editandoTabela.uf_origem}
+                    onChange={e => setEditandoTabela({ ...editandoTabela, uf_origem: e.target.value.toUpperCase() })}
+                    className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">UF Destino</label>
+                  <input
+                    type="text"
+                    maxLength={2}
+                    placeholder="Opcional"
+                    value={editandoTabela.uf_destino}
+                    onChange={e => setEditandoTabela({ ...editandoTabela, uf_destino: e.target.value.toUpperCase() })}
+                    className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl font-mono"
+                  />
+                </div>
+                <div className="col-span-2">
+                  <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">CNPJ/CPF Tomador (Opcional)</label>
+                  <input
+                    type="text"
+                    placeholder="Exclusiva p/ cliente"
+                    value={editandoTabela.cliente_documento}
+                    onChange={e => setEditandoTabela({ ...editandoTabela, cliente_documento: e.target.value.replace(/\D/g, '').slice(0, 14) })}
+                    className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl font-mono"
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">Valor por Kg (R$)</label>
+                  <input
+                    type="number"
+                    step="0.0001"
+                    value={editandoTabela.valor_por_kg}
+                    onChange={e => setEditandoTabela({ ...editandoTabela, valor_por_kg: e.target.value })}
+                    className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">Taxa Fixa Despacho (R$)</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={editandoTabela.taxa_fixa}
+                    onChange={e => setEditandoTabela({ ...editandoTabela, taxa_fixa: e.target.value })}
+                    className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">Frete Mínimo (R$)</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={editandoTabela.frete_minimo}
+                    onChange={e => setEditandoTabela({ ...editandoTabela, frete_minimo: e.target.value })}
+                    className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">Ad Valorem (%)</label>
+                  <input
+                    type="number"
+                    step="0.0001"
+                    value={editandoTabela.percentual_ad_valorem}
+                    onChange={e => setEditandoTabela({ ...editandoTabela, percentual_ad_valorem: e.target.value })}
+                    className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">GRIS (%)</label>
+                  <input
+                    type="number"
+                    step="0.0001"
+                    value={editandoTabela.percentual_gris}
+                    onChange={e => setEditandoTabela({ ...editandoTabela, percentual_gris: e.target.value })}
+                    className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">Pedágio / 100 kg (R$)</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={editandoTabela.pedagio_por_100kg}
+                    onChange={e => setEditandoTabela({ ...editandoTabela, pedagio_por_100kg: e.target.value })}
+                    className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl font-mono"
+                  />
+                </div>
+              </div>
+              <div className="flex justify-end gap-2 pt-3 border-t border-slate-100 dark:border-slate-700">
+                <button
+                  type="button"
+                  onClick={() => setEditandoTabela(null)}
+                  className="px-4 py-2 rounded-xl font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-100"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={salvandoTabela}
+                  className="px-5 py-2 rounded-xl font-bold text-white bg-sky-600 hover:bg-sky-700 disabled:opacity-50"
+                >
+                  {salvandoTabela ? 'Salvando...' : 'Salvar Tabela'}
                 </button>
               </div>
             </form>

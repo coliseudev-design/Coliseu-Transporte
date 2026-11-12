@@ -11,14 +11,40 @@ const { MASTER_TENANT_ID, requireAdmin, invalidateUserAuthCache, isValidUuid } =
 // Todas as rotas de gestão de usuários exigem perfil Administrador (Master global ou Master/Admin da própria empresa)
 router.use(requireAdmin);
 
-let usuariosSchemaReady = false;
-async function ensureUsuariosSchema() {
-    if (usuariosSchemaReady) return;
-    await db.query(`
-        ALTER TABLE dash_usuarios
-        ADD COLUMN IF NOT EXISTS precisa_alterar_senha BOOLEAN NOT NULL DEFAULT false
-    `);
-    usuariosSchemaReady = true;
+async function obterLimiteLicencasTenant(tenantId) {
+    if (tenantId === MASTER_TENANT_ID) return 9999;
+    const { identityApiUrl, identityInternalKey, expectedModuleSlug } = config.security;
+    if (!identityApiUrl || !identityInternalKey) {
+        const err = new Error('Erro de infraestrutura do sistema de licenças');
+        err.statusCode = 500;
+        throw err;
+    }
+
+    const baseUrl = identityApiUrl.replace(/\/+$/, '');
+    const url = `${baseUrl}/internal/companies/${encodeURIComponent(tenantId)}/modules/${encodeURIComponent(expectedModuleSlug)}/info`;
+    const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-Internal-Api-Key': identityInternalKey
+        },
+        signal: AbortSignal.timeout(4000)
+    });
+
+    if (response.status !== 200) {
+        const data = await response.json().catch(() => ({}));
+        const err = new Error(data.reason || data.error || 'Empresa inativa ou módulo bloqueado.');
+        err.statusCode = 403;
+        throw err;
+    }
+
+    const data = await response.json().catch(() => ({}));
+    if (data.valid === false) {
+        const err = new Error(data.reason || 'Licença do módulo Coliseu Transporte inativa.');
+        err.statusCode = 403;
+        throw err;
+    }
+    return Number(data.deviceLimit || 0);
 }
 
 /**
@@ -27,7 +53,6 @@ async function ensureUsuariosSchema() {
  */
 router.get('/', async (req, res) => {
     try {
-        await ensureUsuariosSchema();
         const tenantId = req.tenant.id;
         const { ensureGruposTableAndSeeds } = require('./gruposAcesso');
         await ensureGruposTableAndSeeds(tenantId);
@@ -221,6 +246,51 @@ router.put('/:id/status', async (req, res) => {
         // Não deixa a pessoa se desativar sozinha (segurança)
         if (String(targetId) === String(req.user.id) && !ativo) {
             return res.status(400).json({ error: 'Você não pode inativar seu próprio usuário.' });
+        }
+
+        // Busca o usuário alvo primeiro para respeitar isolamento de tenant e limite de licenças na reativação
+        const targetLookup = await db.query(
+            `SELECT id, tenant_id, email, ativo
+             FROM dash_usuarios
+             WHERE id = $1
+               AND ($2 = $3 OR tenant_id = $2)
+             LIMIT 1`,
+            [targetId, req.tenant.id, MASTER_TENANT_ID]
+        );
+        if (targetLookup.rowCount === 0) {
+            return res.status(404).json({ error: 'Usuário não encontrado ou você não tem permissão para editá-lo.' });
+        }
+        const targetUser = targetLookup.rows[0];
+
+        if (ativo === true && !targetUser.ativo && targetUser.tenant_id !== MASTER_TENANT_ID) {
+            const isMasterSupportCreation =
+                req.tenant.id === MASTER_TENANT_ID &&
+                (String(targetUser.email || '').toLowerCase().endsWith('@coliseusistemas.com.br') ||
+                 String(targetUser.email || '').toLowerCase().endsWith('@silenus.com.br'));
+
+            if (!isMasterSupportCreation) {
+                let deviceLimit = 0;
+                try {
+                    deviceLimit = await obterLimiteLicencasTenant(targetUser.tenant_id);
+                } catch (licErr) {
+                    return res.status(licErr.statusCode || 503).json({
+                        error: licErr.message || 'Servidor de licenças indisponível.'
+                    });
+                }
+
+                const countRes = await db.query(
+                    `SELECT COUNT(*)::int AS total
+                     FROM dash_usuarios
+                     WHERE tenant_id = $1 AND ativo = true`,
+                    [targetUser.tenant_id]
+                );
+                const currentActive = Number(countRes.rows[0]?.total || 0);
+                if (currentActive >= deviceLimit) {
+                    return res.status(403).json({
+                        error: `O limite de licenças (${deviceLimit}) desta empresa já está ocupado. Inative outro usuário antes de reativar esta conta.`
+                    });
+                }
+            }
         }
 
         let query = `UPDATE dash_usuarios SET ativo = $1 WHERE id = $2`;

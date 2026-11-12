@@ -41,7 +41,9 @@ async function resolveLocalUser(userId) {
 
     const res = await db.query(
         `SELECT u.id, u.tenant_id, u.email, u.nome, u.role, u.ativo, u.grupo_id,
-                g.nome AS grupo_nome
+                g.nome AS grupo_nome,
+                g.permissoes_menus,
+                g.permissoes_acoes
          FROM dash_usuarios u
          LEFT JOIN dash_grupos_acesso g ON g.id = u.grupo_id AND g.tenant_id = u.tenant_id
          WHERE u.id = $1
@@ -126,18 +128,26 @@ async function requireWebJwt(req, res, next) {
                 nome: dbUser.nome,
                 role: dbUser.role || 'viewer',
                 grupo_id: dbUser.grupo_id,
-                grupo_nome: dbUser.grupo_nome || null
+                grupo_nome: dbUser.grupo_nome || null,
+                permissoes_menus: dbUser.permissoes_menus || null,
+                permissoes_acoes: dbUser.permissoes_acoes || null
             };
         } else {
-            // Compatibilidade com tokens externos emitidos pelo servidor de licenças (Device/OAuth)
+            // Compatibilidade restrita para tokens de dispositivo: proibido assumir MASTER_TENANT_ID ou privilégio admin sem registro local
+            if (tenantId === MASTER_TENANT_ID) {
+                logger.warn('[Auth] Token sem vínculo local tentou acessar MASTER_TENANT_ID', { ip: req.ip, path: req.path });
+                return res.status(403).json({ error: 'Token externo não permitido para o tenant Master.', code: 'FORBIDDEN_EXTERNAL_MASTER' });
+            }
             req.tenant = { id: tenantId, name: decoded.companyName || 'Unknown' };
             req.user = {
                 id: rawUserId || 'external',
                 sub: rawUserId || 'external',
                 email: decoded.email || null,
-                role: decoded.role || 'viewer',
-                grupo_id: decoded.grupoId || null,
-                grupo_nome: null
+                role: 'viewer',
+                grupo_id: null,
+                grupo_nome: null,
+                permissoes_menus: null,
+                permissoes_acoes: null
             };
             if (decoded.deviceId) {
                 req.device = { id: decoded.deviceId };
@@ -346,21 +356,78 @@ async function requireSyncOrWebAuth(req, res, next) {
     });
 }
 
+function isTenantAdminOrMaster(req) {
+    const role = String(req.user?.role || '').toLowerCase();
+    const grupoNome = String(req.user?.grupo_nome || '').toLowerCase();
+    const isMasterTenant = req.tenant?.id === MASTER_TENANT_ID;
+    return isMasterTenant || role === 'master' || role === 'admin' || grupoNome === 'master';
+}
+
+function hasActionPermission(req, actionKey) {
+    if (isTenantAdminOrMaster(req)) return true;
+    const acoes = req.user?.permissoes_acoes;
+    if (acoes && typeof acoes === 'object' && actionKey in acoes) {
+        return Boolean(acoes[actionKey]);
+    }
+    return false;
+}
+
+function hasMenuPermission(req, menuKey, submenuKey = null) {
+    if (isTenantAdminOrMaster(req)) return true;
+    const menus = req.user?.permissoes_menus;
+    if (!menus || typeof menus !== 'object') return false;
+    const mod = menus[menuKey];
+    if (!mod || mod.acesso === false) return false;
+    if (submenuKey && mod.submenus && mod.submenus[submenuKey] === false) return false;
+    return true;
+}
+
+const ACTION_LABELS = {
+    permitir_emitir_cte: 'Emitir / editar CT-e',
+    permitir_emitir_mdfe: 'Emitir / gerenciar MDF-e',
+    permitir_cancelar_documentos: 'Cancelar documentos fiscais na SEFAZ',
+    permitir_gerenciar_ciot: 'Emitir / encerrar / quitar CIOT',
+    permitir_gerenciar_certificados: 'Gerenciar certificados digitais A1 e dados fiscais da empresa',
+    permitir_gerenciar_usuarios: 'Gerenciar usuários e grupos de acesso',
+    permitir_ver_ficha_cliente: 'Visualizar ficha detalhada de clientes',
+    permitir_ver_titulos_cliente: 'Visualizar / movimentar títulos financeiros'
+};
+
+function requireActionPermission(...actionKeys) {
+    return (req, res, next) => {
+        if (isTenantAdminOrMaster(req)) {
+            return next();
+        }
+        for (const key of actionKeys) {
+            if (hasActionPermission(req, key)) {
+                return next();
+            }
+        }
+        const label = actionKeys.map((k) => ACTION_LABELS[k] || k).join(' ou ');
+        logger.warn('[RBAC] Ação bloqueada por falta de permissão no grupo de acesso', {
+            userId: req.user?.id,
+            email: req.user?.email,
+            role: req.user?.role,
+            grupo: req.user?.grupo_nome,
+            required: actionKeys,
+            path: req.originalUrl
+        });
+        return res.status(403).json({
+            error: `Permissão insuficiente. Seu perfil de acesso não permite: ${label}.`,
+            code: 'FORBIDDEN_ACTION',
+            requiredPermissions: actionKeys
+        });
+    };
+}
+
 /**
  * Verifica se o usuário autenticado possui privilégio Super Admin / Master da Software House.
+ * Estritamente reservado ao tenant Master global ou role 'master' explícita no banco.
  */
 function isSuperAdminMaster(req) {
     const role = String(req.user?.role || '').toLowerCase();
-    const email = String(req.user?.email || '').toLowerCase();
     const isMasterTenant = req.tenant?.id === MASTER_TENANT_ID;
-
-    if (isMasterTenant || role === 'master') {
-        return true;
-    }
-    if (role === 'admin' && (email.endsWith('@coliseusistemas.com.br') || email.endsWith('@silenus.com.br'))) {
-        return true;
-    }
-    return false;
+    return isMasterTenant || role === 'master';
 }
 
 /**
@@ -391,6 +458,10 @@ module.exports = {
     MASTER_TENANT_ID,
     requireWebJwt,
     requireAdmin,
+    requireActionPermission,
+    isTenantAdminOrMaster,
+    hasActionPermission,
+    hasMenuPermission,
     requireSuperAdminMaster,
     isSuperAdminMaster,
     requireInternalAuth,

@@ -690,12 +690,12 @@ class CoraService {
                 const { rows: matchRows } = await db.query(
                     `SELECT f.id, f.id_firebird, f.tenant_id, f.nosso_numero, f.numero_documento, f.valor, f.valor_pago, f.status_pagamento, f.status_boleto, f.asaas_payment_id, f.descricao
                      FROM dash_financeiro f
-                     WHERE (LOWER(f.tenant_id::text) = LOWER($1::text) OR $1 = '00000000-0000-0000-0000-000000000000')
+                     WHERE (LOWER(f.tenant_id::text) = LOWER($1::text) OR $1::text = '00000000-0000-0000-0000-000000000000')
                        AND (
-                         f.asaas_payment_id = $2
-                         OR ($3::text IS NOT NULL AND $3::text != '' AND f.nosso_numero IS NOT NULL AND (f.nosso_numero = $3 OR f.nosso_numero = $4))
-                         OR ($3::text IS NOT NULL AND $3::text != '' AND f.numero_documento IS NOT NULL AND (f.numero_documento = $3 OR f.numero_documento = $4))
-                         OR ($5::text IS NOT NULL AND f.id_firebird::text = $5)
+                         f.asaas_payment_id::text = $2::text
+                         OR ($3::text IS NOT NULL AND $3::text != '' AND f.nosso_numero IS NOT NULL AND (f.nosso_numero::text = $3::text OR f.nosso_numero::text = $4::text))
+                         OR ($3::text IS NOT NULL AND $3::text != '' AND f.numero_documento IS NOT NULL AND (f.numero_documento::text = $3::text OR f.numero_documento::text = $4::text))
+                         OR ($5::text IS NOT NULL AND f.id_firebird::text = $5::text)
                        )
                      ORDER BY f.id DESC LIMIT 1`,
                     [tenantId, coraId, nossoNumero || '', String(nossoNumero || '').replace(/^0+/, ''), codeDigits]
@@ -714,7 +714,7 @@ class CoraService {
                            (f.cliente_id IS NOT NULL AND c.id = f.cliente_id) OR
                            (f.cliente_id_firebird IS NOT NULL AND (c.id_firebird = f.cliente_id_firebird OR c.id = f.cliente_id_firebird))
                          ) AND LOWER(c.tenant_id::text) = LOWER(f.tenant_id::text)
-                         WHERE (LOWER(f.tenant_id::text) = LOWER($1::text) OR $1 = '00000000-0000-0000-0000-000000000000')
+                         WHERE (LOWER(f.tenant_id::text) = LOWER($1::text) OR $1::text = '00000000-0000-0000-0000-000000000000')
                            AND ABS(COALESCE(f.valor, 0) - $2) < 0.05
                            AND (
                              REPLACE(REPLACE(REPLACE(COALESCE(c.documento, f.cliente_documento, ''), '.', ''), '-', ''), '/', '') = $3
@@ -740,7 +740,7 @@ class CoraService {
                                (f.cliente_id IS NOT NULL AND c.id = f.cliente_id) OR
                                (f.cliente_id_firebird IS NOT NULL AND (c.id_firebird = f.cliente_id_firebird OR c.id = f.cliente_id_firebird))
                              ) AND LOWER(c.tenant_id::text) = LOWER(f.tenant_id::text)
-                             WHERE (LOWER(f.tenant_id::text) = LOWER($1::text) OR $1 = '00000000-0000-0000-0000-000000000000')
+                             WHERE (LOWER(f.tenant_id::text) = LOWER($1::text) OR $1::text = '00000000-0000-0000-0000-000000000000')
                                AND ABS(COALESCE(f.valor, 0) - $2) < 0.05
                                AND (
                                  LOWER(COALESCE(c.nome, c.razao_social, f.cliente_nome, '')) ILIKE '%' || $3 || '%'
@@ -780,7 +780,7 @@ class CoraService {
                              pdf_url = COALESCE(pdf_url, $5),
                              asaas_linha_digitavel = COALESCE(asaas_linha_digitavel, $6),
                              asaas_bar_code = COALESCE(asaas_bar_code, $7)
-                         WHERE id = $8`,
+                         WHERE id = $8 AND tenant_id = $9`,
                         [
                             paidAt,
                             effectiveValorPago,
@@ -789,7 +789,8 @@ class CoraService {
                             pdfUrl,
                             digitable,
                             barCode,
-                            matchedTitle.id
+                            matchedTitle.id,
+                            matchedTitle.tenant_id || tenantId
                         ]
                     );
 
@@ -844,13 +845,13 @@ class CoraService {
                     }
                 } else if (status === 'CANCELED') {
                     await db.query(
-                        `UPDATE dash_financeiro SET status_boleto = 'CANCELADO' WHERE id = $1 AND status_pagamento != 'PAGO'`,
-                        [matchedTitle.id]
+                        `UPDATE dash_financeiro SET status_boleto = 'CANCELADO' WHERE id = $1 AND tenant_id = $2 AND status_pagamento != 'PAGO'`,
+                        [matchedTitle.id, matchedTitle.tenant_id || tenantId]
                     );
                 } else if (status === 'OVERDUE') {
                     await db.query(
-                        `UPDATE dash_financeiro SET status_boleto = 'VENCIDO' WHERE id = $1 AND status_pagamento != 'PAGO'`,
-                        [matchedTitle.id]
+                        `UPDATE dash_financeiro SET status_boleto = 'VENCIDO' WHERE id = $1 AND tenant_id = $2 AND status_pagamento != 'PAGO'`,
+                        [matchedTitle.id, matchedTitle.tenant_id || tenantId]
                     );
                 }
             }

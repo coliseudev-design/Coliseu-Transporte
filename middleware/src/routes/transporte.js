@@ -7,7 +7,14 @@ const logger = require('../config/logger');
 const TransporteService = require('../services/transporteService');
 const FocusClient = require('../services/focus/focusClient');
 const veiculoService = require('../services/veiculoService');
-const { requireSuperAdminMaster, isSuperAdminMaster } = require('../middleware/auth');
+const {
+    requireSuperAdminMaster,
+    isSuperAdminMaster,
+    requireAdmin,
+    requireActionPermission,
+    invalidateUserAuthCache,
+} = require('../middleware/auth');
+const EmailService = require('../services/emailService');
 const {
     decryptSecret,
     maskSecret,
@@ -33,10 +40,159 @@ const {
     PROVEDORES_CIOT_SUPORTADOS,
     CNPJ_PADRAO_IPEF,
     normalizarProtocoloCiot,
+    calcularRetencoesTac,
     emitirOuRegistrarCiot,
     encerrarCiotContrato,
+    cancelarCiotContrato,
     estornarFinanceiroCiot,
+    gerarHtmlContratoRpa,
 } = require('../services/ciotProviderService');
+
+/**
+ * Sanitiza respostas de erro HTTP 500 para nunca vazar detalhes internos de SQL/stack ao navegador,
+ * preservando integralmente erros de validação de negócio / SEFAZ / Focus / ANTT (400..499).
+ */
+function sendSafeError(res, err, fallbackMessage = 'Erro interno ao processar a solicitação.') {
+    const status = Number(err?.statusCode) || 500;
+    const rawMsg = String(err?.message || '');
+    const isInternalSqlOrInfra =
+        Boolean(err?.code && /^[0-9A-Z]{5}$/.test(String(err.code))) ||
+        /inconsistent types deduced|syntax error at or near|relation .* does not exist|column .* does not exist|violates .* constraint|ECONNREFUSED|ENOTFOUND/i.test(
+            rawMsg
+        );
+    if (status >= 500 && isInternalSqlOrInfra) {
+        logger.error('[Transporte SafeError] Falha interna sanitizada:', {
+            code: err?.code,
+            message: rawMsg,
+        });
+        return res.status(500).json({ error: fallbackMessage });
+    }
+    return res.status(status).json({ error: rawMsg || fallbackMessage });
+}
+
+/**
+ * Calcula automaticamente os componentes de frete do CT-e a partir de uma Tabela de Frete ativa.
+ */
+function calcularFretePorTabela(tabela, { peso_kg = 0, valor_carga = 0 } = {}) {
+    const round2 = (n) => Math.round((Number(n || 0) + Number.EPSILON) * 100) / 100;
+    const peso = Math.max(0, Number(peso_kg || 0));
+    const valorMercadoria = Math.max(0, Number(valor_carga || 0));
+
+    const taxaFixa = Math.max(0, Number(tabela.taxa_fixa || 0));
+    const valorKg = Math.max(0, Number(tabela.valor_por_kg || 0));
+    const freteMinimo = Math.max(0, Number(tabela.frete_minimo || 0));
+    const percAdValorem = Math.max(0, Number(tabela.percentual_ad_valorem || 0));
+    const percGris = Math.max(0, Number(tabela.percentual_gris || 0));
+    const pedagio100kg = Math.max(0, Number(tabela.pedagio_por_100kg || 0));
+
+    const fretePeso = round2(Math.max(freteMinimo, taxaFixa + peso * valorKg));
+    const adValorem = round2(valorMercadoria * (percAdValorem / 100));
+    const gris = round2(valorMercadoria * (percGris / 100));
+    const fracoes100kg = peso > 0 ? Math.ceil(peso / 100) : 0;
+    const pedagio = round2(fracoes100kg * pedagio100kg);
+
+    const componentes = [];
+    if (fretePeso > 0) componentes.push({ nome: 'FRETE PESO', valor: fretePeso });
+    if (adValorem > 0) componentes.push({ nome: 'AD VALOREM', valor: adValorem });
+    if (gris > 0) componentes.push({ nome: 'GRIS', valor: gris });
+    if (pedagio > 0) componentes.push({ nome: 'PEDAGIO', valor: pedagio });
+
+    const valorTotal = round2(componentes.reduce((s, c) => s + c.valor, 0));
+    return {
+        tabela_id: tabela.id,
+        tabela_nome: tabela.nome,
+        peso_considerado_kg: peso,
+        valor_carga_considerado: valorMercadoria,
+        frete_peso: fretePeso,
+        ad_valorem: adValorem,
+        gris,
+        pedagio,
+        valor_total: valorTotal,
+        componentes_valor: componentes,
+    };
+}
+
+/**
+ * Descobre automaticamente os e-mails do Tomador de Serviço do CT-e
+ * consultando dados explícitos do CT-e, dash_partes e dash_clientes (sempre isolado por tenant_id).
+ */
+async function descobrirEmailsTomadorCte(tenantId, cte, explicitEmails = []) {
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    const coletados = new Set();
+
+    const addEmail = (val) => {
+        if (!val) return;
+        const partes = String(val)
+            .split(/[;,]+/)
+            .map((s) => s.trim().toLowerCase())
+            .filter((s) => emailRegex.test(s));
+        for (const p of partes) coletados.add(p);
+    };
+
+    if (Array.isArray(explicitEmails)) {
+        explicitEmails.forEach(addEmail);
+    } else if (typeof explicitEmails === 'string') {
+        addEmail(explicitEmails);
+    }
+
+    const parseObj = (v) => {
+        if (!v) return {};
+        if (typeof v === 'object') return v;
+        try { return JSON.parse(v); } catch (_) { return {}; }
+    };
+
+    const codTom = String(cte.tomador ?? '0');
+    const rem = parseObj(cte.remetente_dados);
+    const exp = parseObj(cte.expedidor_dados);
+    const rec = parseObj(cte.recebedor_dados);
+    const dest = parseObj(cte.destinatario_dados);
+    const tom = parseObj(cte.tomador_dados);
+
+    const candidatoPrincipal =
+        codTom === '1' ? exp :
+        codTom === '2' ? rec :
+        codTom === '3' ? dest :
+        codTom === '4' ? tom : rem;
+
+    addEmail(candidatoPrincipal?.email);
+    addEmail(tom?.email);
+    if (coletados.size === 0) {
+        addEmail(dest?.email);
+        addEmail(rem?.email);
+    }
+
+    const docTomador = String(
+        cte.tomador_documento ||
+        candidatoPrincipal?.documento ||
+        candidatoPrincipal?.cnpj ||
+        candidatoPrincipal?.cpf ||
+        dest?.documento ||
+        rem?.documento ||
+        ''
+    ).replace(/\D/g, '');
+
+    if (coletados.size === 0 && docTomador.length >= 11) {
+        const parteRes = await db.query(
+            `SELECT email FROM dash_partes WHERE tenant_id = $1 AND documento = $2 AND email IS NOT NULL LIMIT 1`,
+            [tenantId, docTomador]
+        ).catch(() => ({ rows: [] }));
+        addEmail(parteRes.rows[0]?.email);
+
+        if (coletados.size === 0) {
+            const cliRes = await db.query(
+                `SELECT email FROM dash_clientes
+                 WHERE tenant_id = $1
+                   AND regexp_replace(COALESCE(cnpj_cpf, ''), '\\D', '', 'g') = $2
+                   AND email IS NOT NULL
+                 LIMIT 1`,
+                [tenantId, docTomador]
+            ).catch(() => ({ rows: [] }));
+            addEmail(cliRes.rows[0]?.email);
+        }
+    }
+
+    return Array.from(coletados).slice(0, 10);
+}
 
 let _transporteColsReady = false;
 async function ensureTransporteColumns() {
@@ -83,7 +239,12 @@ async function ensureTransporteColumns() {
               ADD COLUMN IF NOT EXISTS ciot_integrador_token TEXT,
               ADD COLUMN IF NOT EXISTS ciot_usuario VARCHAR(120),
               ADD COLUMN IF NOT EXISTS ciot_senha TEXT,
-              ADD COLUMN IF NOT EXISTS ciot_cnpj_ipef VARCHAR(14);
+              ADD COLUMN IF NOT EXISTS ciot_cnpj_ipef VARCHAR(14),
+              ADD COLUMN IF NOT EXISTS seguro_seguradora_nome VARCHAR(120),
+              ADD COLUMN IF NOT EXISTS seguro_seguradora_cnpj VARCHAR(14),
+              ADD COLUMN IF NOT EXISTS seguro_numero_apolice VARCHAR(40),
+              ADD COLUMN IF NOT EXISTS seguro_averbacao_padrao VARCHAR(60),
+              ADD COLUMN IF NOT EXISTS enviar_dacte_automatico BOOLEAN DEFAULT FALSE;
 
             ALTER TABLE dash_cargas
               ADD COLUMN IF NOT EXISTS modelo_documento VARCHAR(2) DEFAULT '55',
@@ -151,7 +312,12 @@ async function ensureTransporteColumns() {
               ADD COLUMN IF NOT EXISTS mdfe_id INTEGER,
               ADD COLUMN IF NOT EXISTS gerar_financeiro BOOLEAN DEFAULT TRUE,
               ADD COLUMN IF NOT EXISTS financeiro_ids JSONB DEFAULT '[]'::jsonb,
-              ADD COLUMN IF NOT EXISTS observacoes TEXT;
+              ADD COLUMN IF NOT EXISTS observacoes TEXT,
+              ADD COLUMN IF NOT EXISTS ciot_protocolo_cancelamento VARCHAR(40),
+              ADD COLUMN IF NOT EXISTS ciot_cancelado_motivo TEXT,
+              ADD COLUMN IF NOT EXISTS ciot_cancelado_em TIMESTAMPTZ,
+              ADD COLUMN IF NOT EXISTS vale_pedagio_fornecedora_cnpj VARCHAR(14),
+              ADD COLUMN IF NOT EXISTS vale_pedagio_comprovante VARCHAR(30);
 
             ALTER TABLE dash_regras_fiscais
               ADD COLUMN IF NOT EXISTS pis_cofins_modo VARCHAR(20) DEFAULT 'NAO_APURADO',
@@ -212,7 +378,8 @@ async function ensureTransporteColumns() {
               ADD COLUMN IF NOT EXISTS aliquota_cofins NUMERIC(7,4),
               ADD COLUMN IF NOT EXISTS valor_cofins NUMERIC(15,2) DEFAULT 0,
               ADD COLUMN IF NOT EXISTS excluir_icms_base_pis_cofins BOOLEAN DEFAULT TRUE,
-              ADD COLUMN IF NOT EXISTS pendencias_fiscais JSONB DEFAULT '[]'::jsonb;
+              ADD COLUMN IF NOT EXISTS pendencias_fiscais JSONB DEFAULT '[]'::jsonb,
+              ADD COLUMN IF NOT EXISTS campos_extras JSONB DEFAULT '{}'::jsonb;
 
             ALTER TABLE dash_mdfes
               ADD COLUMN IF NOT EXISTS tipo_emitente VARCHAR(2) DEFAULT '1',
@@ -251,7 +418,33 @@ async function ensureTransporteColumns() {
               ADD COLUMN IF NOT EXISTS vale_pedagio JSONB DEFAULT '[]'::jsonb,
               ADD COLUMN IF NOT EXISTS ciot_codigo VARCHAR(50),
               ADD COLUMN IF NOT EXISTS ciot_responsavel_documento VARCHAR(14),
-              ADD COLUMN IF NOT EXISTS ciots JSONB DEFAULT '[]'::jsonb;
+              ADD COLUMN IF NOT EXISTS ciots JSONB DEFAULT '[]'::jsonb,
+              ADD COLUMN IF NOT EXISTS campos_extras JSONB DEFAULT '{}'::jsonb;
+
+            ALTER TABLE dash_roteiro_pontos
+              ADD COLUMN IF NOT EXISTS canhoto_base64 TEXT,
+              ADD COLUMN IF NOT EXISTS canhoto_mime VARCHAR(50),
+              ADD COLUMN IF NOT EXISTS latitude_entrega NUMERIC(10,7),
+              ADD COLUMN IF NOT EXISTS longitude_entrega NUMERIC(10,7);
+
+            CREATE TABLE IF NOT EXISTS dash_tabelas_frete (
+              id SERIAL PRIMARY KEY,
+              tenant_id UUID NOT NULL,
+              nome VARCHAR(120) NOT NULL,
+              uf_origem VARCHAR(2),
+              uf_destino VARCHAR(2),
+              peso_min_kg NUMERIC(12,3) DEFAULT 0,
+              peso_max_kg NUMERIC(12,3) DEFAULT 999999,
+              frete_minimo NUMERIC(15,2) DEFAULT 0,
+              taxa_fixa NUMERIC(15,2) DEFAULT 0,
+              valor_por_kg NUMERIC(12,4) DEFAULT 0,
+              percentual_ad_valorem NUMERIC(7,4) DEFAULT 0,
+              percentual_gris NUMERIC(7,4) DEFAULT 0,
+              pedagio_por_100kg NUMERIC(12,2) DEFAULT 0,
+              ativo BOOLEAN NOT NULL DEFAULT TRUE,
+              created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+              updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
         `);
         _transporteColsReady = true;
     } catch (e) {
@@ -265,7 +458,7 @@ router.use(async (_req, _res, next) => {
 });
 
 // Endpoint para testar conexão Focus NFe (Homologação ou Produção)
-router.post('/focus/testar', async (req, res) => {
+router.post('/focus/testar', requireAdmin, async (req, res) => {
     const tenantId = req.tenant.id;
     const { ambiente, token_homologacao, token_producao, token, emitente_id } = req.body || {};
     try {
@@ -304,7 +497,7 @@ router.get('/focus/master-config', requireSuperAdminMaster, async (_req, res) =>
             }
         });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
@@ -649,7 +842,7 @@ router.post('/cargas/consolidar-erp', async (req, res) => {
         });
     } catch (err) {
         logger.error('[Transporte API] Erro ao consolidar cargas do ERP:', err.message);
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
@@ -701,7 +894,7 @@ router.get('/regioes-entrega', async (req, res) => {
         });
     } catch (err) {
         logger.error('[Transporte API] Erro ao listar regiões de entrega:', err.message);
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
@@ -766,7 +959,7 @@ router.post('/regioes-entrega', async (req, res) => {
         return res.status(201).json({ success: true, data: rows[0] });
     } catch (err) {
         logger.error('[Transporte API] Erro ao salvar região de entrega:', err.message);
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
@@ -829,7 +1022,7 @@ router.put('/regioes-entrega/:id', async (req, res) => {
         return res.json({ success: true, data: rows[0] });
     } catch (err) {
         logger.error('[Transporte API] Erro ao atualizar região:', err.message);
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
@@ -841,7 +1034,7 @@ router.delete('/regioes-entrega/:id', async (req, res) => {
         await consolidarCargasErpTenant(tenantId).catch(() => null);
         return res.json({ success: true });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
@@ -878,7 +1071,7 @@ router.get('/cargas/:id/danfe', async (req, res) => {
             danfe_url: danfeUrl
         });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
@@ -898,7 +1091,7 @@ router.post('/cargas/importar-xml', async (req, res) => {
 /**
  * Sincroniza NF-es recebidas/destinadas direto da SEFAZ via MDe Focus NFe (/v2/nfes_recebidas).
  */
-router.post('/mde/sincronizar', async (req, res) => {
+router.post('/mde/sincronizar', requireActionPermission('permitir_emitir_cte', 'permitir_emitir_mdfe'), async (req, res) => {
     const tenantId = req.tenant.id;
     try {
         const result = await TransporteService.sincronizarNfesRecebidasFocus(tenantId, {
@@ -917,7 +1110,7 @@ router.post('/mde/sincronizar', async (req, res) => {
  * Registra Manifestação do Destinatário (ciencia, confirmacao, desconhecimento, nao_realizada)
  * para uma chave NF-e de 44 dígitos na Focus NFe.
  */
-router.post('/mde/:chave/manifestar', async (req, res) => {
+router.post('/mde/:chave/manifestar', requireActionPermission('permitir_emitir_cte', 'permitir_emitir_mdfe'), async (req, res) => {
     const tenantId = req.tenant.id;
     try {
         const result = await TransporteService.manifestarNfeFocus(tenantId, req.params.chave, {
@@ -1070,7 +1263,7 @@ router.get('/documentos', async (req, res) => {
         return res.json({ success: true, data: normalizedRows, total: normalizedRows.length });
     } catch (err) {
         logger.error('[Documentos API] Erro ao listar documentos:', err.message);
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
@@ -1130,11 +1323,11 @@ router.get('/ctes', async (req, res) => {
         const { rows } = await db.query(sql, params);
         return res.json({ success: true, data: rows });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
-router.post('/ctes/gerar-teste-homologacao', async (req, res) => {
+router.post('/ctes/gerar-teste-homologacao', requireActionPermission('permitir_emitir_cte'), async (req, res) => {
     const tenantId = req.tenant.id;
     try {
         await aplicarRegrasPadraoSefazMs(tenantId);
@@ -1142,7 +1335,7 @@ router.post('/ctes/gerar-teste-homologacao', async (req, res) => {
         return res.json(result);
     } catch (err) {
         logger.error('[Transporte API] Erro ao gerar CT-es de teste em homologação:', err.message);
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
@@ -1174,7 +1367,7 @@ router.get('/ctes/:id', async (req, res) => {
         data.cargas_ids = cargasRows.map((r) => r.carga_id).filter(Boolean);
         return res.json({ success: true, data });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
@@ -1230,7 +1423,7 @@ async function resolverEmitentePadraoId(tenantId, emitenteIdInformado) {
     throw new Error('Cadastre os dados da transportadora em Configurações > Fiscal ou Dados da Empresa antes de emitir.');
 }
 
-router.post('/ctes', async (req, res) => {
+router.post('/ctes', requireActionPermission('permitir_emitir_cte'), async (req, res) => {
     const tenantId = req.tenant.id;
     const b = req.body || {};
 
@@ -1322,7 +1515,7 @@ router.post('/ctes', async (req, res) => {
                 documentos_json, quantidades_carga, modal_os_dados,
                 ibs_cbs_cst, ibs_cbs_class_trib, aliquota_ibs_mun, reducao_aliquota_ibs_cbs,
                 ibs_cbs_base_calculo, pis_cofins_modo, pis_cst, aliquota_pis, valor_pis,
-                cofins_cst, aliquota_cofins, valor_cofins, excluir_icms_base_pis_cofins
+                cofins_cst, aliquota_cofins, valor_cofins, excluir_icms_base_pis_cofins, campos_extras
              ) VALUES (
                 $1, $2, $3, 'RASCUNHO', $4, $5, $6,
                 $7, $8, $9, $10, $11, $12, $13,
@@ -1339,7 +1532,7 @@ router.post('/ctes', async (req, res) => {
                 $50::jsonb, $51::jsonb, $52::jsonb, $53::jsonb, $54::jsonb,
                 $55::jsonb, $56::jsonb, $57::jsonb,
                 $58, $59, $60, $61,
-                $62, $63, $64, $65, $66, $67, $68, $69, $70
+                $62, $63, $64, $65, $66, $67, $68, $69, $70, $71::jsonb
              ) RETURNING *`,
             [
                 tenantId,
@@ -1418,6 +1611,7 @@ router.post('/ctes', async (req, res) => {
                     : null,
                 parseFloat(b.valor_cofins || 0),
                 b.excluir_icms_base_pis_cofins !== false,
+                JSON.stringify(b.campos_extras && typeof b.campos_extras === 'object' ? b.campos_extras : {}),
             ]
         );
 
@@ -1438,8 +1632,8 @@ router.post('/ctes', async (req, res) => {
                         [tenantId, novoCte.id, cargaId, c.chave_acesso, c.valor_total, c.peso_bruto]
                     );
                     await db.query(
-                        `UPDATE dash_cargas SET status = 'EM_CTE', cte_id = $1 WHERE id = $2`,
-                        [novoCte.id, cargaId]
+                        `UPDATE dash_cargas SET status = 'EM_CTE', cte_id = $1 WHERE id = $2 AND tenant_id = $3`,
+                        [novoCte.id, cargaId, tenantId]
                     );
                 }
             }
@@ -1448,7 +1642,7 @@ router.post('/ctes', async (req, res) => {
         return res.status(201).json({ success: true, data: novoCte });
     } catch (err) {
         logger.error('[Transporte API] Erro ao criar CT-e:', err.message);
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
@@ -1457,7 +1651,7 @@ router.post('/ctes', async (req, res) => {
  * Gera 1 rascunho de CT-e por Destinatário a partir de uma seleção de NF-es do ERP
  * (respeitando a regra SEFAZ de 1 Remetente + 1 Destinatário por CT-e Normal).
  */
-router.post('/ctes/lote', async (req, res) => {
+router.post('/ctes/lote', requireActionPermission('permitir_emitir_cte'), async (req, res) => {
     const tenantId = req.tenant.id;
     const b = req.body || {};
     const cargasIds = Array.isArray(b.cargas_ids)
@@ -1613,8 +1807,8 @@ router.post('/ctes/lote', async (req, res) => {
                     $7, $8,
                     $9, $10, $11,
                     $12, $13, $14,
-                    $15, $15, $16, $17, '01', $18,
-                    $19::jsonb, '00', $15, $20, $21,
+                    $15::numeric, $15::numeric, $16, $17, '01', $18,
+                    $19::jsonb, '00', $15::numeric, $20, $21,
                     $22, $23,
                     $24::jsonb, $25::jsonb, $26::jsonb, $27::jsonb
                  ) RETURNING *`,
@@ -1678,11 +1872,11 @@ router.post('/ctes/lote', async (req, res) => {
         });
     } catch (err) {
         logger.error('[Transporte API] Erro ao gerar CT-es em lote:', err.message);
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
-router.put('/ctes/:id', async (req, res) => {
+router.put('/ctes/:id', requireActionPermission('permitir_emitir_cte'), async (req, res) => {
     const tenantId = req.tenant.id;
     const cteId = req.params.id;
     const b = req.body || {};
@@ -1772,6 +1966,7 @@ router.put('/ctes/:id', async (req, res) => {
                 aliquota_cofins = COALESCE($68, aliquota_cofins),
                 valor_cofins = COALESCE($69, valor_cofins),
                 excluir_icms_base_pis_cofins = COALESCE($70, excluir_icms_base_pis_cofins),
+                campos_extras = COALESCE($71::jsonb, campos_extras),
                 updated_at = NOW()
              WHERE id = $56 AND tenant_id = $57 AND status <> 'AUTORIZADO'
              RETURNING *`,
@@ -1846,6 +2041,7 @@ router.put('/ctes/:id', async (req, res) => {
                 b.aliquota_cofins !== undefined && b.aliquota_cofins !== '' && b.aliquota_cofins !== null ? parseFloat(b.aliquota_cofins) : null,
                 b.valor_cofins !== undefined && b.valor_cofins !== '' && b.valor_cofins !== null ? parseFloat(b.valor_cofins) : null,
                 b.excluir_icms_base_pis_cofins !== undefined ? Boolean(b.excluir_icms_base_pis_cofins) : null,
+                b.campos_extras && typeof b.campos_extras === 'object' ? JSON.stringify(b.campos_extras) : null,
             ]
         );
 
@@ -1873,19 +2069,42 @@ router.put('/ctes/:id', async (req, res) => {
         return res.json({ success: true, data: rows[0] });
     } catch (err) {
         logger.error('[Transporte API] Erro ao atualizar CT-e:', err.message);
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
-router.post('/ctes/:id/emitir', async (req, res) => {
+router.post('/ctes/:id/emitir', requireActionPermission('permitir_emitir_cte'), async (req, res) => {
     const tenantId = req.tenant.id;
     const cteId = req.params.id;
 
     try {
         const result = await TransporteService.emitirCte(tenantId, cteId);
+        // Auto-disparo de XML + DACTE ao Tomador se configurado no emitente e CT-e autorizado
+        if (result && String(result.status || '').toUpperCase() === 'AUTORIZADO') {
+            (async () => {
+                try {
+                    const { rows: cteRows } = await db.query(
+                        `SELECT c.*, e.enviar_dacte_automatico
+                         FROM dash_ctes c
+                         LEFT JOIN dash_emitentes e ON e.id = c.emitente_id AND e.tenant_id = c.tenant_id
+                         WHERE c.id = $1 AND c.tenant_id = $2 LIMIT 1`,
+                        [cteId, tenantId]
+                    );
+                    const cteDoc = cteRows[0];
+                    if (cteDoc?.enviar_dacte_automatico) {
+                        const emailsTom = await descobrirEmailsTomadorCte(tenantId, cteDoc);
+                        if (emailsTom.length > 0) {
+                            await TransporteService.enviarEmailCte(tenantId, cteId, emailsTom);
+                        }
+                    }
+                } catch (autoErr) {
+                    logger.warn(`[CT-e AutoEmail] Falha não bloqueante no envio automático CT-e #${cteId}: ${autoErr.message}`);
+                }
+            })();
+        }
         return res.json(result);
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
@@ -1900,7 +2119,7 @@ router.post('/ctes/:id/consultar-focus', async (req, res) => {
     }
 });
 
-router.post('/ctes/:id/cancelar', async (req, res) => {
+router.post('/ctes/:id/cancelar', requireActionPermission('permitir_cancelar_documentos'), async (req, res) => {
     const tenantId = req.tenant.id;
     const cteId = req.params.id;
     const { justificativa } = req.body || {};
@@ -1913,7 +2132,7 @@ router.post('/ctes/:id/cancelar', async (req, res) => {
     }
 });
 
-router.post('/ctes/:id/prestacao-desacordo', async (req, res) => {
+router.post('/ctes/:id/prestacao-desacordo', requireActionPermission('permitir_emitir_cte'), async (req, res) => {
     const tenantId = req.tenant.id;
     const cteId = req.params.id;
     const { observacoes } = req.body || {};
@@ -1925,7 +2144,7 @@ router.post('/ctes/:id/prestacao-desacordo', async (req, res) => {
     }
 });
 
-router.post('/ctes/:id/insucesso-entrega', async (req, res) => {
+router.post('/ctes/:id/insucesso-entrega', requireActionPermission('permitir_emitir_cte'), async (req, res) => {
     const tenantId = req.tenant.id;
     const cteId = req.params.id;
     try {
@@ -1936,7 +2155,7 @@ router.post('/ctes/:id/insucesso-entrega', async (req, res) => {
     }
 });
 
-router.post('/ctes/:id/cancelar-insucesso-entrega', async (req, res) => {
+router.post('/ctes/:id/cancelar-insucesso-entrega', requireActionPermission('permitir_emitir_cte'), async (req, res) => {
     const tenantId = req.tenant.id;
     const cteId = req.params.id;
     const { numero_sequencial_evento } = req.body || {};
@@ -1952,7 +2171,7 @@ router.post('/ctes/:id/cancelar-insucesso-entrega', async (req, res) => {
     }
 });
 
-router.post('/ctes/:id/enviar-email', async (req, res) => {
+router.post('/ctes/:id/enviar-email', requireActionPermission('permitir_emitir_cte'), async (req, res) => {
     const tenantId = req.tenant.id;
     const cteId = req.params.id;
     const { emails } = req.body || {};
@@ -1981,11 +2200,11 @@ router.get('/mdfes', async (req, res) => {
         );
         return res.json({ success: true, data: rows });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
-router.post('/mdfes/gerar-teste-homologacao', async (req, res) => {
+router.post('/mdfes/gerar-teste-homologacao', requireActionPermission('permitir_emitir_mdfe'), async (req, res) => {
     const tenantId = req.tenant.id;
     try {
         await aplicarRegrasPadraoSefazMs(tenantId);
@@ -1993,7 +2212,7 @@ router.post('/mdfes/gerar-teste-homologacao', async (req, res) => {
         return res.json(result);
     } catch (err) {
         logger.error('[Transporte API] Erro ao gerar MDF-es de teste em homologação:', err.message);
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
@@ -2018,11 +2237,11 @@ router.get('/mdfes/:id', async (req, res) => {
         data.documentos_vinculados = docs;
         return res.json({ success: true, data });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
-router.post('/mdfes', async (req, res) => {
+router.post('/mdfes', requireActionPermission('permitir_emitir_mdfe'), async (req, res) => {
     const tenantId = req.tenant.id;
     const b = req.body || {};
 
@@ -2219,7 +2438,7 @@ router.post('/mdfes', async (req, res) => {
                 condutores, reboques, contratantes, pagto_frete,
                 seguros, produtos_predominantes, lacres, pessoas_autorizadas,
                 informacao_adicional, ciot_codigo, ciot_responsavel_documento, ciots, vale_pedagio,
-                qtd_cte, qtd_nfe, valor_carga, peso_bruto
+                qtd_cte, qtd_nfe, valor_carga, peso_bruto, campos_extras
              ) VALUES (
                 $1, $2, $3, 'RASCUNHO', $4, $5,
                 $6, $7, $8, $9,
@@ -2232,7 +2451,7 @@ router.post('/mdfes', async (req, res) => {
                 $24::jsonb, $25::jsonb, $26::jsonb, $27::jsonb,
                 $28::jsonb, $29::jsonb, $30::jsonb, $31::jsonb,
                 $32, $33, $34, $35::jsonb, $36::jsonb,
-                $37, $38, $39, $40
+                $37, $38, $39, $40, $41::jsonb
              ) RETURNING *`,
             [
                 tenantId,
@@ -2270,11 +2489,12 @@ router.post('/mdfes', async (req, res) => {
                 b.ciot_codigo ? String(b.ciot_codigo).replace(/\D/g, '').slice(0, 12) : null,
                 b.ciot_responsavel_documento ? String(b.ciot_responsavel_documento).replace(/\D/g, '').slice(0, 14) : null,
                 JSON.stringify(Array.isArray(b.ciots) ? b.ciots : []),
-                JSON.stringify(b.vale_pedagio || {}),
+                JSON.stringify(Array.isArray(b.vale_pedagio) ? b.vale_pedagio : []),
                 ctesIds.length,
                 cargasIds.length + chavesNfeManuais.length,
                 valorCargaSalvar,
                 pesoBrutoSalvar,
+                JSON.stringify(b.campos_extras && typeof b.campos_extras === 'object' ? b.campos_extras : {}),
             ]
         );
 
@@ -2355,11 +2575,11 @@ router.post('/mdfes', async (req, res) => {
         return res.status(201).json({ success: true, data: novoMdfe });
     } catch (err) {
         logger.error('[Transporte API] Erro ao criar MDF-e:', err.message);
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
-router.post('/mdfes/:id/emitir', async (req, res) => {
+router.post('/mdfes/:id/emitir', requireActionPermission('permitir_emitir_mdfe'), async (req, res) => {
     const tenantId = req.tenant.id;
     const mdfeId = req.params.id;
 
@@ -2367,7 +2587,7 @@ router.post('/mdfes/:id/emitir', async (req, res) => {
         const result = await TransporteService.emitirMdfe(tenantId, mdfeId);
         return res.json(result);
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
@@ -2382,18 +2602,18 @@ router.post('/mdfes/:id/consultar-focus', async (req, res) => {
     }
 });
 
-router.post('/mdfes/:id/encerrar', async (req, res) => {
+router.post('/mdfes/:id/encerrar', requireActionPermission('permitir_emitir_mdfe'), async (req, res) => {
     const tenantId = req.tenant.id;
     const mdfeId = req.params.id;
     try {
         const result = await TransporteService.encerrarMdfe(tenantId, mdfeId, req.body || {});
         return res.json(result);
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
-router.post('/mdfes/:id/cancelar', async (req, res) => {
+router.post('/mdfes/:id/cancelar', requireActionPermission('permitir_cancelar_documentos'), async (req, res) => {
     const tenantId = req.tenant.id;
     const mdfeId = req.params.id;
     const { justificativa } = req.body || {};
@@ -2415,7 +2635,7 @@ router.get('/veiculos', async (req, res) => {
         const { rows } = await db.query(`SELECT * FROM dash_veiculos WHERE tenant_id = $1 AND ativo = true ORDER BY placa`, [tenantId]);
         return res.json({ success: true, data: rows });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
@@ -2520,7 +2740,7 @@ router.post('/veiculos', async (req, res) => {
         );
         return res.status(201).json({ success: true, data: rows[0] });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
@@ -2530,7 +2750,7 @@ router.delete('/veiculos/:id', async (req, res) => {
         await db.query(`UPDATE dash_veiculos SET ativo = false, updated_at = NOW() WHERE id = $1 AND tenant_id = $2`, [req.params.id, tenantId]);
         return res.json({ success: true });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
@@ -2542,7 +2762,7 @@ router.get('/veiculos/placa/:placa', async (req, res) => {
         const resultado = await veiculoService.consultarPlaca(req.params.placa);
         return res.json({ success: true, ...resultado });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
@@ -2552,7 +2772,7 @@ router.get('/motoristas', async (req, res) => {
         const { rows } = await db.query(`SELECT * FROM dash_motoristas WHERE tenant_id = $1 AND ativo = true ORDER BY nome`, [tenantId]);
         return res.json({ success: true, data: rows });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
@@ -2613,7 +2833,7 @@ router.post('/motoristas', async (req, res) => {
         );
         return res.status(201).json({ success: true, data: rows[0] });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
@@ -2623,7 +2843,7 @@ router.delete('/motoristas/:id', async (req, res) => {
         await db.query(`UPDATE dash_motoristas SET ativo = false, updated_at = NOW() WHERE id = $1 AND tenant_id = $2`, [req.params.id, tenantId]);
         return res.json({ success: true });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
@@ -2789,7 +3009,7 @@ router.get('/emitentes', async (req, res) => {
             },
         });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
@@ -2867,7 +3087,7 @@ router.get('/diagnostico', async (req, res) => {
 
         return res.json({ success: true, data: diagnostico });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
@@ -2934,7 +3154,7 @@ router.get('/municipios', async (req, res) => {
     }
 });
 
-router.post('/emitentes', async (req, res) => {
+router.post('/emitentes', requireAdmin, async (req, res) => {
     const tenantId = req.tenant.id;
     const b = req.body || {};
     const cleanCnpj = String(b.cnpj || '').replace(/\D/g, '');
@@ -3022,6 +3242,26 @@ router.post('/emitentes', async (req, res) => {
             existingEmit.ciot_integrador_token
         );
         const ciotSenhaSaved = resolveSecretForSave(b.ciot_senha, existingEmit.ciot_senha);
+        const seguroSeguradoraNome =
+            b.seguro_seguradora_nome !== undefined
+                ? String(b.seguro_seguradora_nome || '').trim().slice(0, 120) || null
+                : existingEmit.seguro_seguradora_nome || null;
+        const seguroSeguradoraCnpj =
+            b.seguro_seguradora_cnpj !== undefined
+                ? String(b.seguro_seguradora_cnpj || '').replace(/\D/g, '').slice(0, 14) || null
+                : existingEmit.seguro_seguradora_cnpj || null;
+        const seguroNumeroApolice =
+            b.seguro_numero_apolice !== undefined
+                ? String(b.seguro_numero_apolice || '').trim().slice(0, 40) || null
+                : existingEmit.seguro_numero_apolice || null;
+        const seguroAverbacaoPadrao =
+            b.seguro_averbacao_padrao !== undefined
+                ? String(b.seguro_averbacao_padrao || '').trim().slice(0, 60) || null
+                : existingEmit.seguro_averbacao_padrao || null;
+        const enviarDacteAutomatico =
+            b.enviar_dacte_automatico !== undefined
+                ? Boolean(b.enviar_dacte_automatico)
+                : Boolean(existingEmit.enviar_dacte_automatico);
 
         let saved = null;
 
@@ -3063,6 +3303,11 @@ router.post('/emitentes', async (req, res) => {
                     ciot_cnpj_ipef = $32,
                     ciot_integrador_token = COALESCE(NULLIF($33, ''), ciot_integrador_token),
                     ciot_senha = COALESCE(NULLIF($34, ''), ciot_senha),
+                    seguro_seguradora_nome = $37,
+                    seguro_seguradora_cnpj = $38,
+                    seguro_numero_apolice = $39,
+                    seguro_averbacao_padrao = $40,
+                    enviar_dacte_automatico = $41,
                     updated_at = NOW()
                  WHERE id = $35 AND tenant_id = $36
                  RETURNING *`,
@@ -3103,6 +3348,11 @@ router.post('/emitentes', async (req, res) => {
                     ciotSenhaSaved,
                     targetById.id,
                     tenantId,
+                    seguroSeguradoraNome,
+                    seguroSeguradoraCnpj,
+                    seguroNumeroApolice,
+                    seguroAverbacaoPadrao,
+                    enviarDacteAutomatico,
                 ]
             );
             saved = rows[0];
@@ -3116,7 +3366,8 @@ router.post('/emitentes', async (req, res) => {
                     focus_token, focus_token_homologacao, focus_token_producao, focus_ambiente,
                     serie_cte, serie_mdfe, cfop_padrao_cte, natureza_padrao_cte, aliquota_icms_padrao,
                     perfil_operacional, mdfe_tipo_emitente_padrao,
-                    ciot_provedor, ciot_ambiente, ciot_usuario, ciot_cnpj_ipef, ciot_integrador_token, ciot_senha
+                    ciot_provedor, ciot_ambiente, ciot_usuario, ciot_cnpj_ipef, ciot_integrador_token, ciot_senha,
+                    seguro_seguradora_nome, seguro_seguradora_cnpj, seguro_numero_apolice, seguro_averbacao_padrao, enviar_dacte_automatico
                  ) VALUES (
                     $1, $2, $3, $4, $5, $6,
                     $7, $8,
@@ -3125,7 +3376,8 @@ router.post('/emitentes', async (req, res) => {
                     $19, $20, $21, $22,
                     $23, $24, $25, $26, $27,
                     $28, $29,
-                    $30, $31, $32, $33, $34, $35
+                    $30, $31, $32, $33, $34, $35,
+                    $36, $37, $38, $39, $40
                  )
                  ON CONFLICT (tenant_id, cnpj) DO UPDATE SET
                     razao_social = EXCLUDED.razao_social,
@@ -3161,6 +3413,11 @@ router.post('/emitentes', async (req, res) => {
                     ciot_cnpj_ipef = COALESCE(EXCLUDED.ciot_cnpj_ipef, dash_emitentes.ciot_cnpj_ipef),
                     ciot_integrador_token = COALESCE(NULLIF(EXCLUDED.ciot_integrador_token, ''), dash_emitentes.ciot_integrador_token),
                     ciot_senha = COALESCE(NULLIF(EXCLUDED.ciot_senha, ''), dash_emitentes.ciot_senha),
+                    seguro_seguradora_nome = COALESCE(EXCLUDED.seguro_seguradora_nome, dash_emitentes.seguro_seguradora_nome),
+                    seguro_seguradora_cnpj = COALESCE(EXCLUDED.seguro_seguradora_cnpj, dash_emitentes.seguro_seguradora_cnpj),
+                    seguro_numero_apolice = COALESCE(EXCLUDED.seguro_numero_apolice, dash_emitentes.seguro_numero_apolice),
+                    seguro_averbacao_padrao = COALESCE(EXCLUDED.seguro_averbacao_padrao, dash_emitentes.seguro_averbacao_padrao),
+                    enviar_dacte_automatico = EXCLUDED.enviar_dacte_automatico,
                     updated_at = NOW()
                  RETURNING *`,
                 [
@@ -3199,6 +3456,11 @@ router.post('/emitentes', async (req, res) => {
                     ciotCnpjIpef,
                     ciotTokenSaved,
                     ciotSenhaSaved,
+                    seguroSeguradoraNome,
+                    seguroSeguradoraCnpj,
+                    seguroNumeroApolice,
+                    seguroAverbacaoPadrao,
+                    enviarDacteAutomatico,
                 ]
             );
             saved = rows[0];
@@ -3338,7 +3600,7 @@ router.post('/emitentes', async (req, res) => {
 
         return res.json({ success: true, data: maskedSaved });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
@@ -3346,7 +3608,7 @@ router.post('/emitentes', async (req, res) => {
  * Envia / atualiza a logomarca da empresa e sincroniza automaticamente com a Focus NFe (/v2/empresas -> arquivo_logo_base64)
  * para impressão oficial no cabeçalho do DACTE (CT-e), DAMDFE (MDF-e) e DANFE (NF-e).
  */
-router.post('/emitentes/:id/logo', async (req, res) => {
+router.post('/emitentes/:id/logo', requireAdmin, async (req, res) => {
     const tenantId = req.tenant.id;
     const emitenteId = parseInt(req.params.id, 10);
     if (!emitenteId) {
@@ -3392,7 +3654,7 @@ router.post('/emitentes/:id/logo', async (req, res) => {
 /**
  * Remove a logomarca da empresa no banco e na Focus NFe (/v2/empresas -> delete_logo: true).
  */
-router.delete('/emitentes/:id/logo', async (req, res) => {
+router.delete('/emitentes/:id/logo', requireAdmin, async (req, res) => {
     const tenantId = req.tenant.id;
     const emitenteId = parseInt(req.params.id, 10);
     if (!emitenteId) {
@@ -3443,7 +3705,7 @@ router.delete('/emitentes/:id/logo', async (req, res) => {
  * envia o Certificado Digital A1, captura os tokens (Homologação e Produção) cifrados em AES-256-GCM
  * e registra os Webhooks (/v2/hooks).
  */
-router.post('/emitentes/provisionar-focus', async (req, res) => {
+router.post('/emitentes/provisionar-focus', requireAdmin, async (req, res) => {
     const tenantId = req.tenant.id;
     const { emitente_id, registrar_webhooks = true, incluir_certificado = true } = req.body || {};
     try {
@@ -3460,7 +3722,7 @@ router.post('/emitentes/provisionar-focus', async (req, res) => {
 /**
  * Registra / revalida os Webhooks de CT-e e MDF-e (/v2/hooks) da transportadora na Focus NFe.
  */
-router.post('/emitentes/:id/webhooks-focus', async (req, res) => {
+router.post('/emitentes/:id/webhooks-focus', requireAdmin, async (req, res) => {
     const tenantId = req.tenant.id;
     try {
         const result = await TransporteService.registrarWebhooksFocus(tenantId, parseInt(req.params.id, 10));
@@ -3473,7 +3735,7 @@ router.post('/emitentes/:id/webhooks-focus', async (req, res) => {
 /**
  * Alternância rápida 1-clique entre Homologação e Produção para o emitente fiscal.
  */
-router.patch('/emitentes/:id/ambiente', async (req, res) => {
+router.patch('/emitentes/:id/ambiente', requireAdmin, async (req, res) => {
     const tenantId = req.tenant.id;
     const emitenteId = parseInt(req.params.id, 10);
     const novoAmbiente = String(req.body?.ambiente || '').toLowerCase() === 'producao'
@@ -3517,7 +3779,7 @@ router.patch('/emitentes/:id/ambiente', async (req, res) => {
                 : 'Ambiente alterado para Homologação (Testes SEFAZ sem valor fiscal).',
         });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
@@ -3539,7 +3801,7 @@ router.get('/partes', async (req, res) => {
         const { rows } = await db.query(sql, params);
         return res.json({ success: true, data: rows });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
@@ -3588,7 +3850,7 @@ router.post('/partes', async (req, res) => {
         );
         return res.status(201).json({ success: true, data: rows[0] });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
@@ -3624,6 +3886,17 @@ router.post('/ciot/calcular-piso', (req, res) => {
         valorFrete: b.valor_frete ?? b.valorFrete ?? 0,
         pisoIsento: Boolean(b.piso_isento ?? b.pisoIsento),
         pisoIsencaoMotivo: b.piso_isencao_motivo || b.pisoIsencaoMotivo || '',
+    });
+    return res.json({ success: true, data: calc });
+});
+
+router.post('/ciot/calcular-retencoes-tac', (req, res) => {
+    const b = req.body || {};
+    const calc = calcularRetencoesTac({
+        valorFrete: b.valor_frete ?? b.valorFrete ?? 0,
+        categoriaTransportador: b.transportador_categoria || b.categoriaTransportador || 'TAC',
+        documentoTransportador: b.transportador_cpf_cnpj || b.documentoTransportador || '',
+        dependentesIrrf: b.dependentes_irrf ?? b.dependentesIrrf ?? 0,
     });
     return res.json({ success: true, data: calc });
 });
@@ -3709,11 +3982,11 @@ router.get('/contratos', async (req, res) => {
 
         return res.json({ success: true, data: enriched, resumo });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
-router.post('/contratos', async (req, res) => {
+router.post('/contratos', requireActionPermission('permitir_gerenciar_ciot'), async (req, res) => {
     const tenantId = req.tenant.id;
     const b = req.body || {};
 
@@ -3844,6 +4117,35 @@ router.post('/contratos', async (req, res) => {
                   .filter((ch) => ch.length === 44)
             : [];
 
+        const retTacAuto =
+            b.calcular_retencoes_tac === true
+                ? calcularRetencoesTac({
+                      valorFrete: parseFloat(b.valor_frete || 0) || 0,
+                      tipoTransporte: String(b.tipo_transporte || '2'),
+                      documentoTransportador: transportadorDoc,
+                      dependentes: b.dependentes || 0,
+                  })
+                : null;
+
+        const valInssFinal =
+            b.valor_inss !== undefined && b.valor_inss !== '' && Number(b.valor_inss) > 0
+                ? parseFloat(b.valor_inss)
+                : retTacAuto
+                ? retTacAuto.valor_inss
+                : parseFloat(b.valor_inss || 0) || 0;
+        const valIrrfFinal =
+            b.valor_irrf !== undefined && b.valor_irrf !== '' && Number(b.valor_irrf) > 0
+                ? parseFloat(b.valor_irrf)
+                : retTacAuto
+                ? retTacAuto.valor_irrf
+                : parseFloat(b.valor_irrf || 0) || 0;
+        const valSestFinal =
+            b.valor_sest_senat !== undefined && b.valor_sest_senat !== '' && Number(b.valor_sest_senat) > 0
+                ? parseFloat(b.valor_sest_senat)
+                : retTacAuto
+                ? retTacAuto.valor_sest_senat
+                : parseFloat(b.valor_sest_senat || 0) || 0;
+
         const { rows } = await db.query(
             `INSERT INTO dash_contratos_transporte (
                 tenant_id, emitente_id,
@@ -3862,7 +4164,8 @@ router.post('/contratos', async (req, res) => {
                 forma_quitacao, chave_pix, banco_codigo, banco_agencia, banco_conta, cnpj_ipef,
                 data_saida, data_prevista_entrega,
                 piso_minimo_antt, piso_minimo_aprovado, piso_isento, piso_isencao_motivo,
-                ciot_provedor, gerar_financeiro, observacoes
+                ciot_provedor, gerar_financeiro, observacoes,
+                vale_pedagio_fornecedora_cnpj, vale_pedagio_comprovante
              ) VALUES (
                 $1,$2,
                 $3,$4,
@@ -3880,7 +4183,7 @@ router.post('/contratos', async (req, res) => {
                 $38,$39,$40,$41,$42,$43,
                 $44,$45,
                 $46,$47,$48,$49,
-                $50,$51,$52
+                $50,$51,$52,$53,$54
              )
              RETURNING *`,
             [
@@ -3921,9 +4224,9 @@ router.post('/contratos', async (req, res) => {
                 parseFloat(b.valor_adiantamento || 0) || 0,
                 parseFloat(b.valor_pedagio || 0) || 0,
                 parseFloat(b.valor_combustivel || 0) || 0,
-                parseFloat(b.valor_inss || 0) || 0,
-                parseFloat(b.valor_irrf || 0) || 0,
-                parseFloat(b.valor_sest_senat || 0) || 0,
+                valInssFinal,
+                valIrrfFinal,
+                valSestFinal,
                 parseFloat(b.valor_outros_descontos || 0) || 0,
                 b.forma_quitacao || 'PIX',
                 b.chave_pix ? String(b.chave_pix).trim().slice(0, 120) : null,
@@ -3940,6 +4243,12 @@ router.post('/contratos', async (req, res) => {
                 provedorEscolhido,
                 b.gerar_financeiro !== false,
                 b.observacoes ? String(b.observacoes).trim() : null,
+                b.vale_pedagio_fornecedora_cnpj
+                    ? String(b.vale_pedagio_fornecedora_cnpj).replace(/\D/g, '').slice(0, 14)
+                    : null,
+                b.vale_pedagio_comprovante
+                    ? String(b.vale_pedagio_comprovante).replace(/\D/g, '').slice(0, 30)
+                    : null,
             ]
         );
 
@@ -3987,7 +4296,7 @@ router.post('/contratos', async (req, res) => {
 /**
  * Emite o CIOT (Simulador Homologação ANTT ou Conector IPEF) ou prepara o Payload estruturado.
  */
-router.post('/contratos/:id/gerar-ciot', async (req, res) => {
+router.post('/contratos/:id/gerar-ciot', requireActionPermission('permitir_gerenciar_ciot'), async (req, res) => {
     const tenantId = req.tenant.id;
     const contratoId = req.params.id;
     const b = req.body || {};
@@ -4028,7 +4337,7 @@ router.post('/contratos/:id/gerar-ciot', async (req, res) => {
 /**
  * Registra o código do CIOT retornado pela Instituição de Pagamento / ANTT (12 dígitos ou 12+4 dígitos).
  */
-router.patch('/contratos/:id/ciot', async (req, res) => {
+router.patch('/contratos/:id/ciot', requireActionPermission('permitir_gerenciar_ciot'), async (req, res) => {
     const tenantId = req.tenant.id;
     const contratoId = req.params.id;
     const { ciot_codigo, ciot_verificador } = req.body || {};
@@ -4070,7 +4379,7 @@ router.patch('/contratos/:id/ciot', async (req, res) => {
 /**
  * Encerra a operação de CIOT (libera saldo de quitação / encerra viagem na ANTT/IPEF).
  */
-router.post('/contratos/:id/ciot/encerrar', async (req, res) => {
+router.post('/contratos/:id/ciot/encerrar', requireActionPermission('permitir_gerenciar_ciot'), async (req, res) => {
     const tenantId = req.tenant.id;
     const contratoId = req.params.id;
     const { protocolo_encerramento } = req.body || {};
@@ -4088,45 +4397,137 @@ router.post('/contratos/:id/ciot/encerrar', async (req, res) => {
 });
 
 /**
- * Cancela um CIOT já registrado (operação não efetivada) e estorna títulos pendentes no Financeiro.
+ * Cancela um CIOT já registrado (transmitindo à IPEF quando em Produção) e estorna títulos pendentes no Financeiro.
  */
-router.post('/contratos/:id/ciot/cancelar', async (req, res) => {
+router.post('/contratos/:id/ciot/cancelar', requireActionPermission('permitir_gerenciar_ciot'), async (req, res) => {
     const tenantId = req.tenant.id;
     const contratoId = req.params.id;
-    const { motivo } = req.body || {};
-
-    if (!motivo || String(motivo).trim().length < 10) {
-        return res.status(400).json({ error: 'Informe o motivo do cancelamento (mínimo 10 caracteres).' });
-    }
+    const { motivo, protocolo_cancelamento } = req.body || {};
 
     try {
-        const { rows } = await db.query(
-            `UPDATE dash_contratos_transporte
-             SET ciot_status = 'CANCELADO', ciot_erro = $1, updated_at = NOW()
-             WHERE id = $2 AND tenant_id = $3
-               AND (ciot_status IS NULL OR ciot_status <> 'CANCELADO')
-             RETURNING *`,
-            [String(motivo).trim(), contratoId, tenantId]
-        );
-        if (rows.length === 0) {
-            return res.status(404).json({ error: 'Contrato não encontrado ou CIOT já cancelado.' });
-        }
-
-        const estornados = await estornarFinanceiroCiot(
-            db,
+        const cancelRes = await cancelarCiotContrato({
             tenantId,
-            rows[0],
-            String(motivo).trim(),
-            req.user?.nome || req.user?.email || 'Operador'
-        );
-
+            contratoId,
+            motivo,
+            protocoloCancelamento: protocolo_cancelamento || null,
+            usuario: req.user?.nome || req.user?.email || 'Operador',
+        });
         return res.json({
             success: true,
-            data: rows[0],
-            titulos_estornados: estornados,
+            data: cancelRes.contrato,
+            protocolo_cancelamento: cancelRes.protocolo_cancelamento,
+            titulos_estornados: cancelRes.titulos_estornados,
         });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
+    }
+});
+
+/**
+ * Baixa / Quita uma parcela financeira (Adiantamento ou Saldo de Frete) vinculada ao CIOT.
+ */
+router.post('/contratos/:id/parcelas/:parcelaId/baixar', requireActionPermission('permitir_gerenciar_ciot'), async (req, res) => {
+    const tenantId = req.tenant.id;
+    const contratoId = parseInt(req.params.id, 10);
+    const parcelaId = parseInt(req.params.parcelaId, 10);
+    const { valor_pago, data_pagamento, forma_pagamento, comprovante_codigo, observacao } = req.body || {};
+
+    try {
+        const cRes = await db.query(
+            `SELECT id, financeiro_ids, ciot_codigo, transportador_nome
+             FROM dash_contratos_transporte
+             WHERE id = $1 AND tenant_id = $2
+             LIMIT 1`,
+            [contratoId, tenantId]
+        );
+        if (cRes.rows.length === 0) {
+            return res.status(404).json({ error: 'Operação de CIOT não encontrada.' });
+        }
+        const idsPermitidos = Array.isArray(cRes.rows[0].financeiro_ids)
+            ? cRes.rows[0].financeiro_ids.map(Number)
+            : [];
+        if (!idsPermitidos.includes(parcelaId)) {
+            return res.status(404).json({ error: 'Parcela financeira não pertence a este CIOT.' });
+        }
+
+        const valorPagoNum =
+            valor_pago !== undefined && valor_pago !== null && valor_pago !== '' && Number(valor_pago) > 0
+                ? parseFloat(valor_pago)
+                : null;
+        const dataPagIso =
+            data_pagamento && /^\d{4}-\d{2}-\d{2}/.test(String(data_pagamento))
+                ? String(data_pagamento).slice(0, 10)
+                : new Date().toISOString().slice(0, 10);
+        const especieLimpa = forma_pagamento ? String(forma_pagamento).trim().slice(0, 40) : null;
+
+        const updFin = await db.query(
+            `UPDATE dash_financeiro
+             SET status_pagamento = 'PAGO',
+                 valor_pago = COALESCE($1::numeric, valor),
+                 data_pagamento = $2::date,
+                 especie_nome = COALESCE($3, especie_nome)
+             WHERE id = $4 AND tenant_id = $5
+             RETURNING *`,
+            [valorPagoNum, dataPagIso, especieLimpa, parcelaId, tenantId]
+        );
+        if (updFin.rows.length === 0) {
+            return res.status(404).json({ error: 'Título financeiro não encontrado.' });
+        }
+
+        const usuarioNome = req.user?.nome || req.user?.email || 'Operador';
+        const descLog = [
+            `Baixa de parcela CIOT ${cRes.rows[0].ciot_codigo || `#${contratoId}`}`,
+            comprovante_codigo ? `Comprovante/PIX: ${String(comprovante_codigo).trim()}` : null,
+            observacao ? String(observacao).trim() : null,
+        ]
+            .filter(Boolean)
+            .join(' | ');
+
+        await db
+            .query(
+                `INSERT INTO dash_financeiro_logs (tenant_id, titulo_id, financeiro_id, tipo_evento, usuario, descricao)
+                 VALUES ($1::UUID, $2, $3, 'BAIXA_PARCELA_CIOT', $4, $5)`,
+                [String(tenantId), parcelaId, parcelaId, usuarioNome, descLog]
+            )
+            .catch(() => null);
+
+        return res.json({ success: true, data: updFin.rows[0] });
+    } catch (err) {
+        return sendSafeError(res, err);
+    }
+});
+
+/**
+ * Gera o Contrato de Prestação de Transporte & RPA (Recibo de Pagamento a Autônomo) pronto para impressão A4/PDF.
+ */
+router.get('/contratos/:id/rpa', async (req, res) => {
+    const tenantId = req.tenant.id;
+    const contratoId = parseInt(req.params.id, 10);
+    try {
+        const cRes = await db.query(
+            `SELECT * FROM dash_contratos_transporte WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
+            [contratoId, tenantId]
+        );
+        if (cRes.rows.length === 0) {
+            return res.status(404).json({ error: 'Operação de CIOT não encontrada.' });
+        }
+        const contrato = cRes.rows[0];
+        const emRes = await db.query(
+            `SELECT razao_social, nome_fantasia, cnpj, municipio, uf
+             FROM dash_emitentes
+             WHERE tenant_id = $1
+             ORDER BY ativo DESC NULLS LAST, id ASC
+             LIMIT 1`,
+            [tenantId]
+        );
+        const html = gerarHtmlContratoRpa(contrato, emRes.rows[0] || {});
+        if (String(req.query.format || '').toLowerCase() === 'html') {
+            res.setHeader('Content-Type', 'text/html; charset=utf-8');
+            return res.send(html);
+        }
+        return res.json({ success: true, html, data: contrato });
+    } catch (err) {
+        return sendSafeError(res, err);
     }
 });
 
@@ -4166,7 +4567,7 @@ router.get('/contratos/:id/financeiro', async (req, res) => {
         );
         return res.json({ success: true, data: finRes.rows });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
@@ -4201,6 +4602,56 @@ router.get('/relatorios', async (req, res) => {
                 [tenantId]
             );
             return res.json({ success: true, data: rows });
+        }
+
+        if (tipo === 'ciot') {
+            const { rows } = await db.query(
+                `SELECT id, numero_contrato, ciot_codigo, ciot_status, ciot_provedor,
+                        contratante_nome, contratante_cpf_cnpj,
+                        transportador_nome, transportador_cpf_cnpj, transportador_rntrc, transportador_categoria,
+                        veiculo_placa, uf_inicio, uf_fim, municipio_inicio, municipio_fim, distancia_km,
+                        valor_frete, piso_antt_calculado, valor_adiantamento, valor_pedagio,
+                        valor_inss, valor_sest_senat, valor_irrf, valor_liquido,
+                        vale_pedagio_fornecedora_cnpj, vale_pedagio_comprovante,
+                        ciot_emitido_em, ciot_encerrado_em, ciot_cancelado_em, created_at
+                 FROM dash_contratos_transporte
+                 WHERE tenant_id = $1
+                 ORDER BY id DESC LIMIT 1000`,
+                [tenantId]
+            );
+            const resumo = rows.reduce(
+                (acc, r) => {
+                    const ativo = String(r.ciot_status || '').toUpperCase() !== 'CANCELADO';
+                    acc.total_operacoes += 1;
+                    if (r.ciot_status === 'TRANSMITIDO') acc.emitidos += 1;
+                    if (r.ciot_status === 'ENCERRADO') acc.encerrados += 1;
+                    if (r.ciot_status === 'CANCELADO') acc.cancelados += 1;
+                    if (ativo) {
+                        acc.frete_bruto += parseFloat(r.valor_frete || 0);
+                        acc.adiantamento += parseFloat(r.valor_adiantamento || 0);
+                        acc.pedagio += parseFloat(r.valor_pedagio || 0);
+                        acc.inss += parseFloat(r.valor_inss || 0);
+                        acc.sest_senat += parseFloat(r.valor_sest_senat || 0);
+                        acc.irrf += parseFloat(r.valor_irrf || 0);
+                        acc.liquido += parseFloat(r.valor_liquido || 0);
+                    }
+                    return acc;
+                },
+                {
+                    total_operacoes: 0,
+                    emitidos: 0,
+                    encerrados: 0,
+                    cancelados: 0,
+                    frete_bruto: 0,
+                    adiantamento: 0,
+                    pedagio: 0,
+                    inss: 0,
+                    sest_senat: 0,
+                    irrf: 0,
+                    liquido: 0,
+                }
+            );
+            return res.json({ success: true, data: rows, resumo });
         }
 
         // Resumo consolidado
@@ -4258,7 +4709,7 @@ router.get('/relatorios', async (req, res) => {
             }
         });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
@@ -4292,8 +4743,8 @@ async function aplicarRegrasPadraoSefazMs(tenantId, { incluirCorredores = false 
                  vigente_de = COALESCE(vigente_de, DATE '2026-01-01'),
                  ativo = TRUE,
                  updated_at = NOW()
-             WHERE id = $1`,
-            [msInterna[0].id]
+             WHERE id = $1 AND tenant_id = $2`,
+            [msInterna[0].id, tenantId]
         );
     } else {
         await db.query(
@@ -4339,8 +4790,8 @@ async function aplicarRegrasPadraoSefazMs(tenantId, { incluirCorredores = false 
                  vigente_de = COALESCE(vigente_de, DATE '2026-01-01'),
                  ativo = TRUE,
                  updated_at = NOW()
-             WHERE id = $1`,
-            [msOrigem[0].id]
+             WHERE id = $1 AND tenant_id = $2`,
+            [msOrigem[0].id, tenantId]
         );
     } else {
         await db.query(
@@ -4449,11 +4900,11 @@ router.get('/regras', async (req, res) => {
         }
         return res.json({ success: true, data: rows });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
-router.post('/regras/padrao-ms', async (req, res) => {
+router.post('/regras/padrao-ms', requireActionPermission('permitir_emitir_cte'), async (req, res) => {
     const tenantId = req.tenant.id;
     const incluirCorredores = req.body?.incluir_corredores !== false;
     try {
@@ -4470,11 +4921,11 @@ router.post('/regras/padrao-ms', async (req, res) => {
             data: rows
         });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
-router.post('/regras', async (req, res) => {
+router.post('/regras', requireActionPermission('permitir_emitir_cte'), async (req, res) => {
     const tenantId = req.tenant.id;
     const {
         escopo = 'GLOBAL', uf_origem = null, uf_destino = null, tipo_servico = null,
@@ -4543,7 +4994,7 @@ router.post('/regras', async (req, res) => {
         );
         return res.status(201).json({ success: true, data: rows[0] });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
@@ -4595,20 +5046,205 @@ const atualizarRegraHandler = async (req, res) => {
         if (rows.length === 0) return res.status(404).json({ error: 'Regra não encontrada.' });
         return res.json({ success: true, data: rows[0] });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 };
 
-router.patch('/regras/:id', atualizarRegraHandler);
-router.put('/regras/:id', atualizarRegraHandler);
+router.patch('/regras/:id', requireActionPermission('permitir_emitir_cte'), atualizarRegraHandler);
+router.put('/regras/:id', requireActionPermission('permitir_emitir_cte'), atualizarRegraHandler);
 
-router.delete('/regras/:id', async (req, res) => {
+router.delete('/regras/:id', requireActionPermission('permitir_emitir_cte'), async (req, res) => {
     const tenantId = req.tenant.id;
     try {
         await db.query(`DELETE FROM dash_regras_fiscais WHERE id = $1 AND tenant_id = $2`, [req.params.id, tenantId]);
         return res.json({ success: true });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
+    }
+});
+
+// ─────────────────────────────────────────────────────────────
+// 9B. TABELAS DE FRETE COMERCIAIS (Frete Peso, Ad Valorem, GRIS, Pedágio)
+// ─────────────────────────────────────────────────────────────
+
+router.get('/tabelas-frete', async (req, res) => {
+    const tenantId = req.tenant.id;
+    try {
+        const { rows } = await db.query(
+            `SELECT * FROM dash_tabelas_frete
+             WHERE tenant_id = $1
+             ORDER BY ativo DESC, id DESC`,
+            [tenantId]
+        );
+        return res.json({ success: true, data: rows });
+    } catch (err) {
+        return sendSafeError(res, err);
+    }
+});
+
+router.post('/tabelas-frete', requireActionPermission('permitir_emitir_cte'), async (req, res) => {
+    const tenantId = req.tenant.id;
+    const b = req.body || {};
+    if (!b.nome || !String(b.nome).trim()) {
+        return res.status(400).json({ error: 'Informe o nome da Tabela de Frete.' });
+    }
+    try {
+        const { rows } = await db.query(
+            `INSERT INTO dash_tabelas_frete (
+                tenant_id, nome, uf_origem, uf_destino, regiao_nome, cliente_documento,
+                taxa_fixa, valor_por_kg, frete_minimo, percentual_ad_valorem,
+                percentual_gris, pedagio_por_100kg, ativo
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+             RETURNING *`,
+            [
+                tenantId,
+                String(b.nome).trim(),
+                b.uf_origem ? String(b.uf_origem).trim().toUpperCase().slice(0, 2) : null,
+                b.uf_destino ? String(b.uf_destino).trim().toUpperCase().slice(0, 2) : null,
+                b.regiao_nome ? String(b.regiao_nome).trim() : null,
+                b.cliente_documento ? String(b.cliente_documento).replace(/\D/g, '') : null,
+                parseFloat(b.taxa_fixa || 0) || 0,
+                parseFloat(b.valor_por_kg || 0) || 0,
+                parseFloat(b.frete_minimo || 0) || 0,
+                parseFloat(b.percentual_ad_valorem || 0) || 0,
+                parseFloat(b.percentual_gris || 0) || 0,
+                parseFloat(b.pedagio_por_100kg || 0) || 0,
+                b.ativo !== undefined ? Boolean(b.ativo) : true,
+            ]
+        );
+        return res.status(201).json({ success: true, data: rows[0] });
+    } catch (err) {
+        return sendSafeError(res, err);
+    }
+});
+
+router.put('/tabelas-frete/:id', requireActionPermission('permitir_emitir_cte'), async (req, res) => {
+    const tenantId = req.tenant.id;
+    const tabelaId = parseInt(req.params.id, 10);
+    const b = req.body || {};
+    try {
+        const { rows } = await db.query(
+            `UPDATE dash_tabelas_frete SET
+                nome = COALESCE($1, nome),
+                uf_origem = $2,
+                uf_destino = $3,
+                regiao_nome = $4,
+                cliente_documento = $5,
+                taxa_fixa = COALESCE($6, taxa_fixa),
+                valor_por_kg = COALESCE($7, valor_por_kg),
+                frete_minimo = COALESCE($8, frete_minimo),
+                percentual_ad_valorem = COALESCE($9, percentual_ad_valorem),
+                percentual_gris = COALESCE($10, percentual_gris),
+                pedagio_por_100kg = COALESCE($11, pedagio_por_100kg),
+                ativo = COALESCE($12, ativo),
+                updated_at = NOW()
+             WHERE id = $13 AND tenant_id = $14
+             RETURNING *`,
+            [
+                b.nome ? String(b.nome).trim() : null,
+                b.uf_origem ? String(b.uf_origem).trim().toUpperCase().slice(0, 2) : null,
+                b.uf_destino ? String(b.uf_destino).trim().toUpperCase().slice(0, 2) : null,
+                b.regiao_nome ? String(b.regiao_nome).trim() : null,
+                b.cliente_documento ? String(b.cliente_documento).replace(/\D/g, '') : null,
+                b.taxa_fixa !== undefined ? parseFloat(b.taxa_fixa || 0) : null,
+                b.valor_por_kg !== undefined ? parseFloat(b.valor_por_kg || 0) : null,
+                b.frete_minimo !== undefined ? parseFloat(b.frete_minimo || 0) : null,
+                b.percentual_ad_valorem !== undefined ? parseFloat(b.percentual_ad_valorem || 0) : null,
+                b.percentual_gris !== undefined ? parseFloat(b.percentual_gris || 0) : null,
+                b.pedagio_por_100kg !== undefined ? parseFloat(b.pedagio_por_100kg || 0) : null,
+                b.ativo !== undefined ? Boolean(b.ativo) : null,
+                tabelaId,
+                tenantId,
+            ]
+        );
+        if (rows.length === 0) return res.status(404).json({ error: 'Tabela de frete não encontrada.' });
+        return res.json({ success: true, data: rows[0] });
+    } catch (err) {
+        return sendSafeError(res, err);
+    }
+});
+
+router.delete('/tabelas-frete/:id', requireActionPermission('permitir_emitir_cte'), async (req, res) => {
+    const tenantId = req.tenant.id;
+    try {
+        await db.query(`DELETE FROM dash_tabelas_frete WHERE id = $1 AND tenant_id = $2`, [req.params.id, tenantId]);
+        return res.json({ success: true });
+    } catch (err) {
+        return sendSafeError(res, err);
+    }
+});
+
+router.post('/tabelas-frete/calcular', async (req, res) => {
+    const tenantId = req.tenant.id;
+    const b = req.body || {};
+    const ufOrigem = String(b.uf_origem || '').trim().toUpperCase();
+    const ufDestino = String(b.uf_destino || '').trim().toUpperCase();
+    const regiaoNome = String(b.regiao_nome || '').trim().toUpperCase();
+    const docCliente = String(b.cliente_documento || '').replace(/\D/g, '');
+    const tabelaIdExplicita = b.tabela_id ? parseInt(b.tabela_id, 10) : null;
+
+    try {
+        let tabela = null;
+        if (tabelaIdExplicita) {
+            const { rows } = await db.query(
+                `SELECT * FROM dash_tabelas_frete WHERE id = $1 AND tenant_id = $2 AND ativo = TRUE LIMIT 1`,
+                [tabelaIdExplicita, tenantId]
+            );
+            tabela = rows[0] || null;
+        } else {
+            const { rows } = await db.query(
+                `SELECT * FROM dash_tabelas_frete WHERE tenant_id = $1 AND ativo = TRUE ORDER BY id DESC`,
+                [tenantId]
+            );
+            // Prioridade: 1) Cliente específico, 2) UF Origem + UF Destino + Região, 3) UF Origem + UF Destino, 4) UF Origem, 5) Geral
+            const score = (t) => {
+                let s = 1;
+                const tCli = String(t.cliente_documento || '').replace(/\D/g, '');
+                if (tCli) {
+                    if (docCliente && tCli === docCliente) s += 100;
+                    else return -1;
+                }
+                const tUfO = String(t.uf_origem || '').trim().toUpperCase();
+                if (tUfO) {
+                    if (ufOrigem && tUfO === ufOrigem) s += 20;
+                    else return -1;
+                }
+                const tUfD = String(t.uf_destino || '').trim().toUpperCase();
+                if (tUfD) {
+                    if (ufDestino && tUfD === ufDestino) s += 30;
+                    else return -1;
+                }
+                const tReg = String(t.regiao_nome || '').trim().toUpperCase();
+                if (tReg) {
+                    if (regiaoNome && tReg === regiaoNome) s += 15;
+                    else return -1;
+                }
+                return s;
+            };
+
+            let bestScore = -1;
+            for (const row of rows) {
+                const sc = score(row);
+                if (sc > bestScore) {
+                    bestScore = sc;
+                    tabela = row;
+                }
+            }
+        }
+
+        if (!tabela) {
+            return res.status(404).json({
+                error: 'Nenhuma Tabela de Frete ativa compatível encontrada para este percurso/cliente. Cadastre uma tabela em Regras Fiscais > Tabelas de Frete.',
+            });
+        }
+
+        const resultado = calcularFretePorTabela(tabela, {
+            peso_kg: b.peso_kg ?? b.peso_bruto ?? 0,
+            valor_carga: b.valor_carga ?? 0,
+        });
+        return res.json({ success: true, data: resultado });
+    } catch (err) {
+        return sendSafeError(res, err);
     }
 });
 
@@ -4630,11 +5266,11 @@ router.get('/campos', async (req, res) => {
         const { rows } = await db.query(sql, params);
         return res.json({ success: true, data: rows });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
-router.post('/campos', async (req, res) => {
+router.post('/campos', requireAdmin, async (req, res) => {
     const tenantId = req.tenant.id;
     const {
         documento = 'CTE', chave_campo, rotulo, tipo = 'texto',
@@ -4675,11 +5311,11 @@ router.post('/campos', async (req, res) => {
         );
         return res.status(201).json({ success: true, data: rows[0] });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
-router.patch('/campos/:id', async (req, res) => {
+router.patch('/campos/:id', requireAdmin, async (req, res) => {
     const tenantId = req.tenant.id;
     const campoId = req.params.id;
     const body = req.body || {};
@@ -4716,17 +5352,17 @@ router.patch('/campos/:id', async (req, res) => {
         if (rows.length === 0) return res.status(404).json({ error: 'Campo não encontrado.' });
         return res.json({ success: true, data: rows[0] });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
-router.delete('/campos/:id', async (req, res) => {
+router.delete('/campos/:id', requireAdmin, async (req, res) => {
     const tenantId = req.tenant.id;
     try {
         await db.query(`DELETE FROM dash_campos_dinamicos WHERE id = $1 AND tenant_id = $2`, [req.params.id, tenantId]);
         return res.json({ success: true });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
@@ -4868,8 +5504,8 @@ router.get('/roteiro/:mdfe_id', async (req, res) => {
             }
 
             await db.query(
-                `UPDATE dash_roteiros_entrega SET total_paradas = $1, updated_at = NOW() WHERE id = $2`,
-                [ordem - 1, roteiro.id]
+                `UPDATE dash_roteiros_entrega SET total_paradas = $1, updated_at = NOW() WHERE id = $2 AND tenant_id = $3`,
+                [ordem - 1, roteiro.id, tenantId]
             );
             roteiro.total_paradas = ordem - 1;
         }
@@ -4919,7 +5555,7 @@ router.get('/roteiro/:mdfe_id', async (req, res) => {
         });
     } catch (err) {
         logger.error('[Roteiro] Erro ao carregar roteiro:', err.message);
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
@@ -4929,23 +5565,71 @@ router.get('/roteiro/:mdfe_id', async (req, res) => {
 router.patch('/roteiro/pontos/:id', async (req, res) => {
     const tenantId = req.tenant.id;
     const pontoId = parseInt(req.params.id, 10);
-    const { status_entrega, recebedor_nome, recebedor_documento, observacao } = req.body || {};
+    const {
+        status_entrega,
+        recebedor_nome,
+        recebedor_documento,
+        observacao,
+        canhoto_base64,
+        canhoto_mime,
+        latitude_entrega,
+        longitude_entrega,
+    } = req.body || {};
+
+    const statusNorm = status_entrega ? String(status_entrega).trim().toUpperCase() : null;
+    const marcarEntregue = statusNorm === 'ENTREGUE';
+
+    if (canhoto_base64 && String(canhoto_base64).length > 2_200_000) {
+        return res.status(400).json({
+            error: 'Imagem do canhoto excede o tamanho máximo permitido (1.5 MB).',
+        });
+    }
+    const safeMime =
+        canhoto_mime && /^image\/(jpeg|jpg|png|webp)$/i.test(String(canhoto_mime).trim())
+            ? String(canhoto_mime).trim().toLowerCase()
+            : canhoto_base64
+            ? 'image/jpeg'
+            : null;
+    const latNum =
+        latitude_entrega !== undefined && latitude_entrega !== null && latitude_entrega !== ''
+            ? parseFloat(latitude_entrega)
+            : null;
+    const lngNum =
+        longitude_entrega !== undefined && longitude_entrega !== null && longitude_entrega !== ''
+            ? parseFloat(longitude_entrega)
+            : null;
 
     try {
         const { rows } = await db.query(
             `UPDATE dash_roteiro_pontos SET
-                status_entrega = COALESCE($1, status_entrega),
-                entregue_em = CASE WHEN $1 = 'ENTREGUE' THEN NOW() ELSE entregue_em END,
-                recebedor_nome = COALESCE($2, recebedor_nome),
-                recebedor_documento = COALESCE($3, recebedor_documento),
-                observacao = COALESCE($4, observacao)
-             WHERE id = $5 AND tenant_id = $6 RETURNING *`,
-            [status_entrega, recebedor_nome, recebedor_documento, observacao, pontoId, tenantId]
+                status_entrega = COALESCE($1::varchar, status_entrega),
+                entregue_em = CASE WHEN $2::boolean THEN NOW() ELSE entregue_em END,
+                recebedor_nome = COALESCE($3, recebedor_nome),
+                recebedor_documento = COALESCE($4, recebedor_documento),
+                observacao = COALESCE($5, observacao),
+                canhoto_base64 = COALESCE($6, canhoto_base64),
+                canhoto_mime = COALESCE($7, canhoto_mime),
+                latitude_entrega = COALESCE($8::numeric, latitude_entrega),
+                longitude_entrega = COALESCE($9::numeric, longitude_entrega)
+             WHERE id = $10 AND tenant_id = $11 RETURNING *`,
+            [
+                statusNorm,
+                marcarEntregue,
+                recebedor_nome ?? null,
+                recebedor_documento ?? null,
+                observacao ?? null,
+                canhoto_base64 || null,
+                safeMime,
+                Number.isFinite(latNum) ? latNum : null,
+                Number.isFinite(lngNum) ? lngNum : null,
+                pontoId,
+                tenantId,
+            ]
         );
         if (rows.length === 0) return res.status(404).json({ error: 'Ponto de entrega não encontrado.' });
         return res.json({ success: true, data: rows[0] });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
@@ -4964,7 +5648,7 @@ router.post('/roteiro/:mdfe_id/iniciar', async (req, res) => {
         if (rows.length === 0) return res.status(404).json({ error: 'Roteiro não encontrado.' });
         return res.json({ success: true, data: rows[0] });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
@@ -4983,7 +5667,7 @@ router.post('/roteiro/:mdfe_id/concluir', async (req, res) => {
         if (rows.length === 0) return res.status(404).json({ error: 'Roteiro não encontrado.' });
         return res.json({ success: true, data: rows[0] });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
@@ -5015,11 +5699,11 @@ router.get('/certificados', async (req, res) => {
         );
         return res.json({ success: true, data: rows });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
-router.post('/certificados', async (req, res) => {
+router.post('/certificados', requireActionPermission('permitir_gerenciar_certificados'), async (req, res) => {
     const tenantId = req.tenant.id;
     const { emitente_id, nome_arquivo, senha, arquivo_base64, valido_ate, sincronizar_focus = true } = req.body || {};
 
@@ -5091,11 +5775,11 @@ router.post('/certificados', async (req, res) => {
 
         return res.status(201).json({ success: true, data: rows[0], focus_sync: focusSync });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
-router.post('/certificados/:id/sincronizar-focus', async (req, res) => {
+router.post('/certificados/:id/sincronizar-focus', requireActionPermission('permitir_gerenciar_certificados'), async (req, res) => {
     const tenantId = req.tenant.id;
     try {
         const { rows } = await db.query(
@@ -5116,13 +5800,13 @@ router.post('/certificados/:id/sincronizar-focus', async (req, res) => {
     }
 });
 
-router.delete('/certificados/:id', async (req, res) => {
+router.delete('/certificados/:id', requireActionPermission('permitir_gerenciar_certificados'), async (req, res) => {
     const tenantId = req.tenant.id;
     try {
         await db.query(`DELETE FROM dash_certificados WHERE id = $1 AND tenant_id = $2`, [req.params.id, tenantId]);
         return res.json({ success: true });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
@@ -5192,22 +5876,54 @@ router.get('/permissoes-transporte', async (req, res) => {
 /**
  * Salva as permissões de transporte de um grupo de acesso.
  */
-router.put('/grupos-acesso/:id/permissoes-transporte', async (req, res) => {
+router.put('/grupos-acesso/:id/permissoes-transporte', requireAdmin, async (req, res) => {
     const tenantId = req.tenant.id;
     const grupoId = parseInt(req.params.id, 10);
-    const { permissoes_transporte } = req.body || {};
+    const pt = req.body?.permissoes_transporte || {};
 
     try {
+        // Sincroniza também as chaves granulares em permissoes_acoes para manter modelo único de RBAC
+        const curRes = await db.query(
+            `SELECT id, nome, permissoes_acoes FROM dash_grupos_acesso WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
+            [grupoId, tenantId]
+        );
+        if (curRes.rows.length === 0) {
+            return res.status(404).json({ error: 'Grupo de acesso não encontrado.' });
+        }
+        const acoesAtuais =
+            curRes.rows[0].permissoes_acoes && typeof curRes.rows[0].permissoes_acoes === 'object'
+                ? { ...curRes.rows[0].permissoes_acoes }
+                : {};
+
+        if (pt['cte.emitir'] !== undefined || pt['cte.gerar'] !== undefined) {
+            acoesAtuais.permitir_emitir_cte = Boolean(pt['cte.emitir'] ?? pt['cte.gerar']);
+        }
+        if (pt['mdfe.emitir'] !== undefined || pt['mdfe.gerar'] !== undefined) {
+            acoesAtuais.permitir_emitir_mdfe = Boolean(pt['mdfe.emitir'] ?? pt['mdfe.gerar']);
+        }
+        if (pt['cte.cancelar'] !== undefined || pt['mdfe.cancelar'] !== undefined) {
+            acoesAtuais.permitir_cancelar_documentos = Boolean(pt['cte.cancelar'] || pt['mdfe.cancelar']);
+        }
+        if (pt['ciot.emitir'] !== undefined || pt['ciot.gerar'] !== undefined) {
+            acoesAtuais.permitir_gerenciar_ciot = Boolean(pt['ciot.emitir'] ?? pt['ciot.gerar']);
+        }
+        if (pt['certificado.gerenciar'] !== undefined) {
+            acoesAtuais.permitir_gerenciar_certificados = Boolean(pt['certificado.gerenciar']);
+        }
+
         const { rows } = await db.query(
             `UPDATE dash_grupos_acesso
-             SET permissoes_transporte = $1::jsonb, updated_at = NOW()
-             WHERE id = $2 AND tenant_id = $3 RETURNING id, nome, permissoes_transporte`,
-            [JSON.stringify(permissoes_transporte || {}), grupoId, tenantId]
+             SET permissoes_transporte = $1::jsonb,
+                 permissoes_acoes = $2::jsonb,
+                 updated_at = NOW()
+             WHERE id = $3 AND tenant_id = $4
+             RETURNING id, nome, permissoes_transporte, permissoes_acoes`,
+            [JSON.stringify(pt), JSON.stringify(acoesAtuais), grupoId, tenantId]
         );
-        if (rows.length === 0) return res.status(404).json({ error: 'Grupo de acesso não encontrado.' });
+        invalidateUserAuthCache(null, tenantId);
         return res.json({ success: true, data: rows[0] });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
@@ -5225,14 +5941,14 @@ router.post('/ctes/:id/validar', async (req, res) => {
         const resultado = await TransporteService.validarCte(tenantId, parseInt(req.params.id, 10));
         return res.json({ success: true, ...resultado });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
 /**
  * Carta de Correção Eletrônica (CC-e) do CT-e autorizado.
  */
-router.post('/ctes/:id/carta-correcao', async (req, res) => {
+router.post('/ctes/:id/carta-correcao', requireActionPermission('permitir_emitir_cte'), async (req, res) => {
     const tenantId = req.tenant.id;
     const { correcao } = req.body || {};
     try {
@@ -5246,7 +5962,7 @@ router.post('/ctes/:id/carta-correcao', async (req, res) => {
 /**
  * Inclui condutor em MDF-e em trânsito.
  */
-router.post('/mdfes/:id/incluir-condutor', async (req, res) => {
+router.post('/mdfes/:id/incluir-condutor', requireActionPermission('permitir_emitir_mdfe'), async (req, res) => {
     const tenantId = req.tenant.id;
     const { nome, cpf } = req.body || {};
     try {
@@ -5260,7 +5976,7 @@ router.post('/mdfes/:id/incluir-condutor', async (req, res) => {
 /**
  * Inclui CT-e/NF-e em MDF-e já autorizado.
  */
-router.post('/mdfes/:id/incluir-dfe', async (req, res) => {
+router.post('/mdfes/:id/incluir-dfe', requireActionPermission('permitir_emitir_mdfe'), async (req, res) => {
     const tenantId = req.tenant.id;
     const { protocolo, codigo_municipio_carregamento, documentos } = req.body || {};
     try {
@@ -5284,7 +6000,7 @@ router.post('/reconciliar', async (req, res) => {
         const result = await TransporteService.reconciliarProcessando(tenantId);
         return res.json({ success: true, ...result });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
     }
 });
 
@@ -5455,7 +6171,131 @@ router.get('/timeline/:tipo/:id', async (req, res) => {
             }
         });
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return sendSafeError(res, err);
+    }
+});
+
+/**
+ * Disparo inteligente de XML + DACTE ao Tomador de Serviço do CT-e
+ * (descobre automaticamente o e-mail do Tomador em tomador_dados / dash_partes / dash_clientes).
+ */
+router.post('/ctes/:id/enviar-tomador', requireActionPermission('permitir_emitir_cte'), async (req, res) => {
+    const tenantId = req.tenant.id;
+    const cteId = parseInt(req.params.id, 10);
+
+    try {
+        const { rows } = await db.query(
+            `SELECT * FROM dash_ctes WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
+            [cteId, tenantId]
+        );
+        if (rows.length === 0) {
+            return res.status(404).json({ error: 'CT-e não encontrado.' });
+        }
+        const cte = rows[0];
+        if (String(cte.status || '').toUpperCase() !== 'AUTORIZADO') {
+            return res.status(400).json({
+                error: 'Somente CT-es AUTORIZADOS pela SEFAZ podem ter XML e DACTE enviados ao Tomador.',
+            });
+        }
+
+        const emails = await descobrirEmailsTomadorCte(tenantId, cte, req.body?.emails);
+        if (emails.length === 0) {
+            return res.status(400).json({
+                error: 'Não foi encontrado e-mail cadastrado para o Tomador deste CT-e. Informe o e-mail manualmente ou atualize o cadastro do cliente/parte.',
+                requires_email: true,
+            });
+        }
+
+        const result = await TransporteService.enviarEmailCte(tenantId, cteId, emails);
+        return res.json({
+            success: true,
+            emails,
+            focus: result?.focus || null,
+            message: `XML e DACTE enviados com sucesso para: ${emails.join(', ')}`,
+        });
+    } catch (err) {
+        return sendSafeError(res, err);
+    }
+});
+
+/**
+ * Painel de Alertas Preventivos SEFAZ & Frota (Fase 3.5):
+ *  - MDF-es AUTORIZADO abertos há >= 24h (risco de Rejeição 686 SEFAZ em novas viagens da placa)
+ *  - Certificados Digitais A1 vencidos ou vencendo em <= 30 dias
+ *  - Motoristas ativos com CNH vencida ou vencendo em <= 30 dias
+ *  - Veículos de terceiros (TERCEIRO/TAC/ETC) ativos sem RNTRC válido de 8+ dígitos
+ */
+router.get('/alertas-preventivos', async (req, res) => {
+    const tenantId = req.tenant.id;
+    try {
+        const [mdfesAbertosRes, certsVencRes, cnhsVencRes, rntrcPendRes] = await Promise.all([
+            db.query(
+                `SELECT id, numero, serie, veiculo_placa, motorista_nome, uf_inicio, uf_fim,
+                        COALESCE(data_emissao, created_at) AS emitido_em,
+                        ROUND(EXTRACT(EPOCH FROM (NOW() - COALESCE(data_emissao, created_at))) / 3600.0, 1)::numeric AS horas_aberto
+                 FROM dash_mdfes
+                 WHERE tenant_id = $1
+                   AND status = 'AUTORIZADO'
+                   AND COALESCE(data_emissao, created_at) <= NOW() - INTERVAL '24 hours'
+                 ORDER BY COALESCE(data_emissao, created_at) ASC
+                 LIMIT 25`,
+                [tenantId]
+            ).catch(() => ({ rows: [] })),
+            db.query(
+                `SELECT c.id, c.nome_arquivo, c.valido_ate, e.razao_social AS emitente_nome, e.cnpj,
+                        CEIL(EXTRACT(EPOCH FROM (c.valido_ate - NOW())) / 86400.0)::int AS dias_restantes
+                 FROM dash_certificados c
+                 LEFT JOIN dash_emitentes e ON e.id = c.emitente_id AND e.tenant_id = c.tenant_id
+                 WHERE c.tenant_id = $1
+                   AND c.valido_ate IS NOT NULL
+                   AND c.valido_ate <= NOW() + INTERVAL '30 days'
+                 ORDER BY c.valido_ate ASC
+                 LIMIT 10`,
+                [tenantId]
+            ).catch(() => ({ rows: [] })),
+            db.query(
+                `SELECT id, nome, cpf, validade_cnh,
+                        CEIL(EXTRACT(EPOCH FROM (validade_cnh::timestamptz - NOW())) / 86400.0)::int AS dias_restantes
+                 FROM dash_motoristas
+                 WHERE tenant_id = $1
+                   AND COALESCE(ativo, TRUE) = TRUE
+                   AND validade_cnh IS NOT NULL
+                   AND validade_cnh <= CURRENT_DATE + INTERVAL '30 days'
+                 ORDER BY validade_cnh ASC
+                 LIMIT 25`,
+                [tenantId]
+            ).catch(() => ({ rows: [] })),
+            db.query(
+                `SELECT id, placa, descricao, tipo_proprietario, proprietario_nome, rntrc
+                 FROM dash_veiculos
+                 WHERE tenant_id = $1
+                   AND COALESCE(ativo, TRUE) = TRUE
+                   AND UPPER(COALESCE(tipo_proprietario, '')) IN ('TERCEIRO', 'TAC', 'ETC', 'AGREGADO')
+                   AND LENGTH(regexp_replace(COALESCE(rntrc, ''), '\\D', '', 'g')) < 8
+                 ORDER BY id DESC
+                 LIMIT 25`,
+                [tenantId]
+            ).catch(() => ({ rows: [] })),
+        ]);
+
+        const totalAlertas =
+            mdfesAbertosRes.rows.length +
+            certsVencRes.rows.length +
+            cnhsVencRes.rows.length +
+            rntrcPendRes.rows.length;
+
+        return res.json({
+            success: true,
+            data: {
+                total_alertas: totalAlertas,
+                mdfes_abertos_24h: mdfesAbertosRes.rows,
+                certificados_vencendo: certsVencRes.rows,
+                cnhs_vencendo: cnhsVencRes.rows,
+                veiculos_terceiros_sem_rntrc: rntrcPendRes.rows,
+            },
+        });
+    } catch (err) {
+        return sendSafeError(res, err);
     }
 });
 

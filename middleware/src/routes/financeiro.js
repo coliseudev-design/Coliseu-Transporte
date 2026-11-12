@@ -762,11 +762,11 @@ router.post('/titulos', async (req, res, next) => {
         if (resolvedClienteId || resolvedClienteIdFirebird || (resolvedClienteNome && resolvedClienteNome.trim() !== '')) {
             const cliCheck = await client.query(
                 `SELECT id, id_firebird, nome, documento FROM dash_clientes 
-                 WHERE (LOWER(tenant_id::text) = LOWER($1::text) OR $1 = '00000000-0000-0000-0000-000000000000')
+                 WHERE (LOWER(tenant_id::text) = LOWER($1::text) OR $1::text = '00000000-0000-0000-0000-000000000000')
                    AND (
-                     ($2::int IS NOT NULL AND id = $2)
-                     OR ($3::int IS NOT NULL AND id_firebird = $3)
-                     OR ($4::text IS NOT NULL AND LOWER(TRIM(nome)) = LOWER(TRIM($4)))
+                     ($2::int IS NOT NULL AND id = $2::int)
+                     OR ($3::int IS NOT NULL AND id_firebird = $3::int)
+                     OR ($4::text IS NOT NULL AND LOWER(TRIM(nome)) = LOWER(TRIM($4::text)))
                    )
                  LIMIT 1`,
                 [String(tenantId), resolvedClienteId, resolvedClienteIdFirebird, resolvedClienteNome]
@@ -2316,7 +2316,7 @@ router.get('/boletos-emitidos', async (req, res, next) => {
                     COALESCE(NULLIF(c.nome, ''), NULLIF(c.razao_social, ''), NULLIF(f.cliente_nome, ''), NULLIF(f.descricao, ''), 'Cliente Coliseu Transporte') AS cliente_full
              FROM dash_financeiro f
              LEFT JOIN dash_clientes c ON (c.id_firebird = f.cliente_id_firebird OR c.id = f.cliente_id) AND LOWER(c.tenant_id::text) = LOWER(f.tenant_id::text)
-             WHERE ($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(f.tenant_id::text) = LOWER($1::text))
+             WHERE ($1::text = '00000000-0000-0000-0000-000000000000' OR LOWER(f.tenant_id::text) = LOWER($1::text))
                AND (f.tipo IS NULL OR UPPER(TRIM(f.tipo)) NOT IN ('PAGAR', 'DESPESA', 'P'))
                AND COALESCE(f.valor, 0) > 0`,
             [String(tenantId)]
@@ -2403,7 +2403,7 @@ router.get('/boletos-emitidos', async (req, res, next) => {
 
         const { rows: allLocalCustomers } = await db.query(
             `SELECT id, id_firebird, asaas_customer_id, nome, razao_social, nome_fantasia, documento, email, telefone FROM dash_clientes 
-             WHERE ($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text))`,
+             WHERE ($1::text = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text))`,
             [String(tenantId)]
         ).catch(() => ({ rows: [] }));
 
@@ -2950,7 +2950,7 @@ router.post('/boletos-emitidos/cancelar', async (req, res, next) => {
         let targetTenantId = tenantId;
         if (targetTituloId) {
             const tRes = await db.query(
-                `SELECT id, tenant_id, asaas_payment_id, nosso_numero FROM dash_financeiro WHERE (CAST(id AS TEXT) = $1 OR CAST(id_firebird AS TEXT) = $1) AND ($2 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($2::text)) LIMIT 1`,
+                `SELECT id, tenant_id, asaas_payment_id, nosso_numero FROM dash_financeiro WHERE (CAST(id AS TEXT) = $1 OR CAST(id_firebird AS TEXT) = $1) AND ($2::text = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($2::text)) LIMIT 1`,
                 [String(targetTituloId), String(tenantId)]
             );
             if (tRes.rows.length > 0) {
@@ -2969,12 +2969,12 @@ router.post('/boletos-emitidos/cancelar', async (req, res, next) => {
                  SET status_pagamento = 'CANCELADO',
                      data_cancelamento = COALESCE(data_cancelamento, NOW()),
                      usuario_cancelamento = $1
-                 WHERE id = $2 AND ($3 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($3::text))`,
+                 WHERE id = $2 AND ($3::text = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($3::text))`,
                 [usuario, targetTituloId, String(tenantId)]
             ).catch(async () => {
                 // Fallback se colunas de usuário falharem
                 await db.query(
-                    `UPDATE dash_financeiro SET status_pagamento = 'CANCELADO' WHERE id = $1 AND ($2 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($2::text))`,
+                    `UPDATE dash_financeiro SET status_pagamento = 'CANCELADO' WHERE id = $1 AND ($2::text = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($2::text))`,
                     [targetTituloId, String(tenantId)]
                 );
             });
@@ -3023,7 +3023,7 @@ router.post('/boletos-emitidos/reenviar-quitacoes', async (req, res, next) => {
                     'PENDENTE' AS status,
                     0 AS tentativas
                 FROM dash_financeiro f
-                WHERE (LOWER(f.tenant_id::text) = LOWER($1::text) OR $1 = '00000000-0000-0000-0000-000000000000')
+                WHERE (LOWER(f.tenant_id::text) = LOWER($1::text) OR $1::text = '00000000-0000-0000-0000-000000000000')
                   AND (f.id_firebird IS NOT NULL OR f.id IS NOT NULL)
                   AND (
                     UPPER(COALESCE(f.status_pagamento, '')) IN ('PAGO', 'QUITADO', 'RECEBIDO', 'RECEIVED', 'CONFIRMED', 'RECEIVED_IN_CASH', 'BAIXADO', 'LIQUIDADO')
@@ -3041,7 +3041,7 @@ router.post('/boletos-emitidos/reenviar-quitacoes', async (req, res, next) => {
             logger.warn('[ReenviarQuitacoes] Upsert ON CONFLICT falhou, executando re-enfileiramento por substituição:', confErr.message);
             await db.query(`
                 DELETE FROM pending_payments 
-                WHERE (LOWER(tenant_id::text) = LOWER($1::text) OR $1 = '00000000-0000-0000-0000-000000000000')
+                WHERE (LOWER(tenant_id::text) = LOWER($1::text) OR $1::text = '00000000-0000-0000-0000-000000000000')
                   AND status IN ('PENDENTE', 'ERRO', 'PROCESSANDO');
             `, [String(tenantId)]).catch(() => {});
 
@@ -3059,7 +3059,7 @@ router.post('/boletos-emitidos/reenviar-quitacoes', async (req, res, next) => {
                     'PENDENTE' AS status,
                     0 AS tentativas
                 FROM dash_financeiro f
-                WHERE (LOWER(f.tenant_id::text) = LOWER($1::text) OR $1 = '00000000-0000-0000-0000-000000000000')
+                WHERE (LOWER(f.tenant_id::text) = LOWER($1::text) OR $1::text = '00000000-0000-0000-0000-000000000000')
                   AND (f.id_firebird IS NOT NULL OR f.id IS NOT NULL)
                   AND (
                     UPPER(COALESCE(f.status_pagamento, '')) IN ('PAGO', 'QUITADO', 'RECEBIDO', 'RECEIVED', 'CONFIRMED', 'RECEIVED_IN_CASH', 'BAIXADO', 'LIQUIDADO')
@@ -3111,7 +3111,7 @@ router.post('/boletos-emitidos/gerar-lote-item', async (req, res, next) => {
                  (f.cliente_id IS NOT NULL AND c.id = f.cliente_id)
              ) AND LOWER(c.tenant_id::text) = LOWER(f.tenant_id::text)
              WHERE (f.id = $1 OR f.id_firebird = $1) 
-               AND ($2 = '00000000-0000-0000-0000-000000000000' OR LOWER(f.tenant_id::text) = LOWER($2::text))`,
+               AND ($2::text = '00000000-0000-0000-0000-000000000000' OR LOWER(f.tenant_id::text) = LOWER($2::text))`,
             [parseInt(titulo_id, 10), String(tenantId)]
         );
 
@@ -3227,7 +3227,7 @@ router.post('/boletos-emitidos/gerar-lote-item', async (req, res, next) => {
                      data_vinculo = NOW(),
                      usuario_vinculo = $6
                  WHERE (id = $7 OR id_firebird = $7)
-                   AND ($8 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($8::text) OR tenant_id = $8::uuid)`,
+                   AND ($8::text = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($8::text))`,
                 [
                     paymentId,
                     bankSlipUrl,
@@ -3281,7 +3281,7 @@ router.post('/boletos-emitidos/gerar-lote-item', async (req, res, next) => {
                      data_vinculo = NOW(),
                      usuario_vinculo = $7
                  WHERE (id = $8 OR id_firebird = $8)
-                   AND ($9 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($9::text) OR tenant_id = $9::uuid)`,
+                   AND ($9::text = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($9::text))`,
                 [
                     paymentId,
                     customerId,
@@ -3773,7 +3773,7 @@ router.get('/titulos/:id/logs', async (req, res, next) => {
         const tituloId = req.params.id;
 
         const titleRes = await db.query(
-            `SELECT id, id_firebird, tenant_id, nosso_numero FROM dash_financeiro WHERE (CAST(id AS TEXT) = $2 OR CAST(id_firebird AS TEXT) = $2) AND ($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text)) LIMIT 1`,
+            `SELECT id, id_firebird, tenant_id, nosso_numero FROM dash_financeiro WHERE (CAST(id AS TEXT) = $2 OR CAST(id_firebird AS TEXT) = $2) AND ($1::text = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text)) LIMIT 1`,
             [String(tenantId), String(tituloId)]
         );
 
@@ -3784,7 +3784,7 @@ router.get('/titulos/:id/logs', async (req, res, next) => {
 
         const { rows } = await db.query(
             `SELECT * FROM dash_financeiro_logs 
-             WHERE ($1 = '00000000-0000-0000-0000-000000000000' 
+             WHERE ($1::text = '00000000-0000-0000-0000-000000000000' 
                     OR LOWER(tenant_id::text) = LOWER($1::text) 
                     OR LOWER(tenant_id::text) = LOWER($4::text)) 
                AND (
@@ -3825,7 +3825,7 @@ router.get('/titulos/:id/detalhes-log', async (req, res, next) => {
                  OR (f.cliente_id_firebird IS NOT NULL AND f.cliente_id_firebird > 0 AND c.id_firebird = f.cliente_id_firebird)
                )
              WHERE CAST(f.id AS TEXT) = $2
-               AND ($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(f.tenant_id::text) = LOWER($1::text))
+               AND ($1::text = '00000000-0000-0000-0000-000000000000' OR LOWER(f.tenant_id::text) = LOWER($1::text))
              LIMIT 1`,
             [String(tenantId), String(tituloId)]
         );
@@ -3847,7 +3847,7 @@ router.get('/titulos/:id/detalhes-log', async (req, res, next) => {
                      OR (f.cliente_id_firebird IS NOT NULL AND f.cliente_id_firebird > 0 AND c.id_firebird = f.cliente_id_firebird)
                    )
                  WHERE CAST(f.id_firebird AS TEXT) = $2
-                   AND ($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(f.tenant_id::text) = LOWER($1::text))
+                   AND ($1::text = '00000000-0000-0000-0000-000000000000' OR LOWER(f.tenant_id::text) = LOWER($1::text))
                  LIMIT 1`,
                 [String(tenantId), String(tituloId)]
             );
@@ -3867,7 +3867,7 @@ router.get('/titulos/:id/detalhes-log', async (req, res, next) => {
                     tipo_evento, data_evento, usuario, nosso_numero, numero_documento, descricao, detalhes
                 FROM dash_financeiro_logs
                 WHERE (
-                    $1 = '00000000-0000-0000-0000-000000000000' 
+                    $1::text = '00000000-0000-0000-0000-000000000000' 
                     OR tenant_id IS NULL 
                     OR LOWER(tenant_id::text) = LOWER($1::text) 
                     OR LOWER(tenant_id::text) = LOWER($4::text)
@@ -3889,7 +3889,7 @@ router.get('/titulos/:id/detalhes-log', async (req, res, next) => {
                     NULL::jsonb AS detalhes
                 FROM dash_automacoes_logs
                 WHERE (
-                    $1 = '00000000-0000-0000-0000-000000000000' 
+                    $1::text = '00000000-0000-0000-0000-000000000000' 
                     OR tenant_id IS NULL 
                     OR LOWER(tenant_id::text) = LOWER($1::text) 
                     OR LOWER(tenant_id::text) = LOWER($4::text)
@@ -3972,7 +3972,7 @@ router.post('/titulos/:id/desvincular-boleto', async (req, res, next) => {
         const titleRes = await db.query(
             `SELECT * FROM dash_financeiro 
              WHERE (CAST(id AS TEXT) = $2 OR CAST(id_firebird AS TEXT) = $2) 
-               AND ($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text)) 
+               AND ($1::text = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text)) 
              LIMIT 1`,
             [String(tenantId), String(tituloId)]
         );
@@ -4017,7 +4017,7 @@ router.post('/titulos/:id/desvincular-boleto', async (req, res, next) => {
                  status_boleto = NULL,
                  portador_nome = 'CARTEIRA',
                  alerta_bloqueio = false
-             WHERE id = $1 AND ($2 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($2::text))`,
+             WHERE id = $1 AND ($2::text = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($2::text))`,
             [title.id, String(tenantId)]
         );
 
@@ -4074,23 +4074,23 @@ router.get('/opcoes-erp', async (req, res, next) => {
         const tenantId = req.tenant.id;
         
         const ccRes = await db.query(
-            `SELECT DISTINCT nome AS item FROM dash_filiais WHERE ($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text)) AND nome IS NOT NULL AND TRIM(nome) != ''
+            `SELECT DISTINCT nome AS item FROM dash_filiais WHERE ($1::text = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text)) AND nome IS NOT NULL AND TRIM(nome) != ''
              UNION
-             SELECT DISTINCT centro_custo AS item FROM dash_financeiro WHERE ($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text)) AND centro_custo IS NOT NULL AND TRIM(centro_custo) != ''
+             SELECT DISTINCT centro_custo AS item FROM dash_financeiro WHERE ($1::text = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text)) AND centro_custo IS NOT NULL AND TRIM(centro_custo) != ''
              ORDER BY item ASC`,
             [String(tenantId)]
         ).catch(() => ({ rows: [] }));
 
         const pcRes = await db.query(
-            `SELECT DISTINCT plano_contas_nome AS item FROM dash_financeiro WHERE ($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text)) AND plano_contas_nome IS NOT NULL AND TRIM(plano_contas_nome) != ''
+            `SELECT DISTINCT plano_contas_nome AS item FROM dash_financeiro WHERE ($1::text = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text)) AND plano_contas_nome IS NOT NULL AND TRIM(plano_contas_nome) != ''
              UNION
-             SELECT DISTINCT tipo_documento AS item FROM dash_financeiro WHERE ($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text)) AND tipo_documento IS NOT NULL AND TRIM(tipo_documento) != ''
+             SELECT DISTINCT tipo_documento AS item FROM dash_financeiro WHERE ($1::text = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text)) AND tipo_documento IS NOT NULL AND TRIM(tipo_documento) != ''
              ORDER BY item ASC`,
             [String(tenantId)]
         ).catch(() => ({ rows: [] }));
 
         const clRes = await db.query(
-            `SELECT DISTINCT classe AS item FROM dash_clientes WHERE ($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text)) AND classe IS NOT NULL AND TRIM(classe) != ''
+            `SELECT DISTINCT classe AS item FROM dash_clientes WHERE ($1::text = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text)) AND classe IS NOT NULL AND TRIM(classe) != ''
              ORDER BY item ASC`,
             [String(tenantId)]
         ).catch(() => ({ rows: [] }));
@@ -4131,7 +4131,7 @@ router.put('/titulos/:id', async (req, res, next) => {
         let titleRes = await db.query(
             `SELECT * FROM dash_financeiro 
              WHERE CAST(id AS TEXT) = $2 
-               AND ($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text)) 
+               AND ($1::text = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text)) 
              LIMIT 1`,
             [String(tenantId), String(tituloId)]
         );
@@ -4140,7 +4140,7 @@ router.put('/titulos/:id', async (req, res, next) => {
             titleRes = await db.query(
                 `SELECT * FROM dash_financeiro 
                  WHERE CAST(id_firebird AS TEXT) = $2 
-                   AND ($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text)) 
+                   AND ($1::text = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($1::text)) 
                  LIMIT 1`,
                 [String(tenantId), String(tituloId)]
             );
@@ -4192,7 +4192,7 @@ router.put('/titulos/:id', async (req, res, next) => {
                  data_vencimento = COALESCE($7, data_vencimento),
                  valor = COALESCE($8, valor),
                  historico = COALESCE($9, historico)
-             WHERE id = $10 AND ($11 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($11::text))
+             WHERE id = $10 AND ($11::text = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($11::text))
              RETURNING *`,
             [
                 centro_custo || null,
@@ -4279,7 +4279,7 @@ router.post('/titulos/:id/eliminar', async (req, res, next) => {
              FROM dash_financeiro f
              LEFT JOIN dash_clientes c ON (c.id_firebird = f.cliente_id_firebird OR c.id = f.cliente_id) AND LOWER(c.tenant_id::text) = LOWER(f.tenant_id::text)
              WHERE (CAST(f.id AS TEXT) = $2 OR CAST(f.id_firebird AS TEXT) = $2 OR f.nosso_numero = $2 OR f.asaas_payment_id = $2)
-               AND ($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(f.tenant_id::text) = LOWER($1::text))
+               AND ($1::text = '00000000-0000-0000-0000-000000000000' OR LOWER(f.tenant_id::text) = LOWER($1::text))
              LIMIT 1`,
             [String(tenantId), String(tituloId)]
         );
@@ -4320,7 +4320,7 @@ router.post('/titulos/:id/eliminar', async (req, res, next) => {
 
         // 3. Exclui o título do banco de dados
         await db.query(
-            `DELETE FROM dash_financeiro WHERE id = $1 AND ($2 = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($2::text))`,
+            `DELETE FROM dash_financeiro WHERE id = $1 AND ($2::text = '00000000-0000-0000-0000-000000000000' OR LOWER(tenant_id::text) = LOWER($2::text))`,
             [title.id, String(targetTenantId)]
         );
 
@@ -4344,7 +4344,7 @@ router.get('/logs', async (req, res, next) => {
         const offset = (pNum - 1) * lNum;
 
         const where = [
-            `($1 = '00000000-0000-0000-0000-000000000000' OR LOWER(l.tenant_id::text) = LOWER($1::text))`
+            `($1::text = '00000000-0000-0000-0000-000000000000' OR LOWER(l.tenant_id::text) = LOWER($1::text))`
         ];
         const binds = [String(tenantId)];
         let pIndex = 2;
@@ -4419,7 +4419,7 @@ router.get('/varredura-origens', async (req, res, next) => {
                 COUNT(*) FILTER (WHERE status_pagamento = 'ABERTO') as total_abertos,
                 COUNT(*) FILTER (WHERE nosso_numero IS NOT NULL AND TRIM(nosso_numero) != '' AND nosso_numero != '—') as com_boleto_emitido
             FROM dash_financeiro
-            WHERE (LOWER(tenant_id::text) = LOWER($1::text) OR $1 = '00000000-0000-0000-0000-000000000000')
+            WHERE (LOWER(tenant_id::text) = LOWER($1::text) OR $1::text = '00000000-0000-0000-0000-000000000000')
         `, [String(tenantId)]);
 
         // 2. Lista dos títulos lançados diretamente no Nexus
@@ -4449,7 +4449,7 @@ router.get('/varredura-origens', async (req, res, next) => {
                 f.created_at
             FROM dash_financeiro f
             LEFT JOIN dash_clientes c ON (c.id = f.cliente_id OR (f.cliente_id_firebird IS NOT NULL AND f.cliente_id_firebird > 0 AND c.id_firebird = f.cliente_id_firebird))
-            WHERE (LOWER(f.tenant_id::text) = LOWER($1::text) OR $1 = '00000000-0000-0000-0000-000000000000')
+            WHERE (LOWER(f.tenant_id::text) = LOWER($1::text) OR $1::text = '00000000-0000-0000-0000-000000000000')
               AND (f.id_firebird IS NULL OR f.id_firebird <= 1 OR f.origem = 'NEXUS' OR f.origem = 'individual' OR f.origem = 'CONTRATO')
             ORDER BY f.id DESC
             LIMIT 200

@@ -5,7 +5,7 @@ import api from '../services/api';
 import {
   Truck, FileText, Package, ArrowUpRight, Layers,
   ShieldCheck, Navigation, Route as RouteIcon, Clock,
-  MapPin, CheckCircle2, ChevronRight, Activity, Zap
+  MapPin, CheckCircle2, ChevronRight, Activity, Zap, AlertTriangle, KeyRound
 } from 'lucide-react';
 
 export default function Home() {
@@ -25,6 +25,13 @@ export default function Home() {
     queryKey: ['mdfes-dashboard'],
     queryFn: async () => (await api.get('/transporte/mdfes', { params: { limit: 8 } })).data
   });
+
+  const { data: alertasResp } = useQuery({
+    queryKey: ['alertas-preventivos'],
+    queryFn: async () => (await api.get('/transporte/alertas-preventivos')).data,
+    refetchInterval: 120000
+  });
+  const alertas = alertasResp?.data;
 
   const cargas = cargasData?.data || [];
   const totalCargas = cargasData?.total ?? cargas.length;
@@ -69,6 +76,85 @@ export default function Home() {
           </button>
         </div>
       </div>
+
+      {/* Painel de Alertas Preventivos SEFAZ & Frota (Fase 3.5) */}
+      {alertas && Number(alertas.total_alertas || 0) > 0 && (
+        <div className="bg-amber-50/90 dark:bg-amber-950/35 border border-amber-200 dark:border-amber-800/70 rounded-3xl p-5 space-y-3">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2.5 text-sm font-bold text-amber-900 dark:text-amber-200">
+              <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0" />
+              <span>Alertas Preventivos SEFAZ & Conformidade de Frota ({alertas.total_alertas})</span>
+            </div>
+            <span className="text-[11px] font-semibold text-amber-700 dark:text-amber-300">
+              Ação preventiva contra multas ANTT e bloqueios SEFAZ
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+            {(alertas.mdfes_abertos_24h || []).length > 0 && (
+              <div
+                onClick={() => navigate('/transporte/documentos')}
+                className="cursor-pointer bg-white dark:bg-slate-900 p-3.5 rounded-2xl border border-amber-200 dark:border-amber-800/60 hover:border-amber-400 transition-all"
+              >
+                <p className="text-[11px] font-bold text-amber-700 dark:text-amber-300 uppercase flex items-center gap-1.5">
+                  <Clock className="w-3.5 h-3.5" />
+                  MDF-e(s) Abertos &gt; 24h ({alertas.mdfes_abertos_24h.length})
+                </p>
+                <p className="text-xs text-slate-600 dark:text-slate-300 mt-1">
+                  Placa {alertas.mdfes_abertos_24h[0].veiculo_placa} ({alertas.mdfes_abertos_24h[0].horas_aberto}h em aberto). Encerre para evitar Rejeição 686.
+                </p>
+              </div>
+            )}
+
+            {(alertas.certificados_vencendo || []).length > 0 && (
+              <div
+                onClick={() => navigate('/transporte/certificados')}
+                className="cursor-pointer bg-white dark:bg-slate-900 p-3.5 rounded-2xl border border-red-200 dark:border-red-800/60 hover:border-red-400 transition-all"
+              >
+                <p className="text-[11px] font-bold text-red-700 dark:text-red-300 uppercase flex items-center gap-1.5">
+                  <KeyRound className="w-3.5 h-3.5" />
+                  Certificado A1 ({alertas.certificados_vencendo.length})
+                </p>
+                <p className="text-xs text-slate-600 dark:text-slate-300 mt-1">
+                  {Number(alertas.certificados_vencendo[0].dias_restantes) <= 0
+                    ? 'Certificado A1 vencido! Renove para não parar emissões.'
+                    : `Vence em ${alertas.certificados_vencendo[0].dias_restantes} dia(s).`}
+                </p>
+              </div>
+            )}
+
+            {(alertas.cnhs_vencendo || []).length > 0 && (
+              <div
+                onClick={() => navigate('/transporte/frota')}
+                className="cursor-pointer bg-white dark:bg-slate-900 p-3.5 rounded-2xl border border-amber-200 dark:border-amber-800/60 hover:border-amber-400 transition-all"
+              >
+                <p className="text-[11px] font-bold text-amber-700 dark:text-amber-300 uppercase flex items-center gap-1.5">
+                  <ShieldCheck className="w-3.5 h-3.5" />
+                  CNH Vencendo / Vencida ({alertas.cnhs_vencendo.length})
+                </p>
+                <p className="text-xs text-slate-600 dark:text-slate-300 mt-1">
+                  Condutor {alertas.cnhs_vencendo[0].nome}: atualize a CNH no cadastro de frota.
+                </p>
+              </div>
+            )}
+
+            {(alertas.veiculos_terceiros_sem_rntrc || []).length > 0 && (
+              <div
+                onClick={() => navigate('/transporte/frota')}
+                className="cursor-pointer bg-white dark:bg-slate-900 p-3.5 rounded-2xl border border-sky-200 dark:border-sky-800/60 hover:border-sky-400 transition-all"
+              >
+                <p className="text-[11px] font-bold text-sky-700 dark:text-sky-300 uppercase flex items-center gap-1.5">
+                  <Truck className="w-3.5 h-3.5" />
+                  Terceiro sem RNTRC ({alertas.veiculos_terceiros_sem_rntrc.length})
+                </p>
+                <p className="text-xs text-slate-600 dark:text-slate-300 mt-1">
+                  Placa {alertas.veiculos_terceiros_sem_rntrc[0].placa}: informe o RNTRC ANTT de 8 dígitos.
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* 3 Métricas Estratégicas com Visual Limpo */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-5">

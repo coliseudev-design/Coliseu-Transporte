@@ -31,7 +31,8 @@ import {
   Settings,
   ArrowRight,
   Scale,
-  KeyRound
+  KeyRound,
+  Printer
 } from 'lucide-react';
 
 interface Contrato {
@@ -186,6 +187,9 @@ const criarFormInicial = (em?: any) => {
     valor_inss: '',
     valor_irrf: '',
     valor_sest_senat: '',
+    calcular_retencoes_tac: true,
+    vale_pedagio_fornecedora_cnpj: '',
+    vale_pedagio_comprovante: '',
     forma_quitacao: 'PIX',
     chave_pix: '',
     banco_codigo: '',
@@ -223,6 +227,39 @@ export default function CiotConsultaPage() {
   const [erro, setErro] = useState('');
   const [feedback, setFeedback] = useState<{ ok: boolean; msg: string } | null>(null);
   const [pisoPreview, setPisoPreview] = useState<any | null>(null);
+  const [retencaoPreview, setRetencaoPreview] = useState<any | null>(null);
+  const [baixandoParcelaId, setBaixandoParcelaId] = useState<number | null>(null);
+
+  const abrirContratoRpa = async (c: Contrato) => {
+    try {
+      const res = await api.get(`/transporte/contratos/${c.id}/rpa`);
+      const html = res.data?.html;
+      if (!html) throw new Error('Documento RPA indisponível.');
+      const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+      const blobUrl = URL.createObjectURL(blob);
+      window.open(blobUrl, '_blank', 'noopener,noreferrer');
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+    } catch (err: any) {
+      alert(err.response?.data?.error || err.message || 'Erro ao gerar Contrato/RPA.');
+    }
+  };
+
+  const quitarParcelaCiot = async (parcela: TituloFinanceiro) => {
+    if (!financeiroModal) return;
+    setBaixandoParcelaId(parcela.id);
+    try {
+      await api.post(`/transporte/contratos/${financeiroModal.contrato.id}/parcelas/${parcela.id}/baixar`, {
+        valor_pago: parcela.valor
+      });
+      await abrirFinanceiroContrato(financeiroModal.contrato);
+      await refetch();
+      setFeedback({ ok: true, msg: `Parcela #${parcela.numero_parcela} baixada como PAGA com sucesso!` });
+    } catch (err: any) {
+      alert(err.response?.data?.error || err.message || 'Erro ao quitar parcela.');
+    } finally {
+      setBaixandoParcelaId(null);
+    }
+  };
 
   const { data: emitentesResp } = useQuery({
     queryKey: ['emitentes-ciot'],
@@ -311,6 +348,38 @@ export default function CiotConsultaPage() {
     form.piso_isento,
     form.piso_isencao_motivo
   ]);
+
+  // Cálculo automático das retenções legais TAC (INSS, SEST/SENAT e IRRF)
+  useEffect(() => {
+    if (!modalCriar) return;
+    const freteNum = Number(form.valor_frete || 0);
+    if (!form.calcular_retencoes_tac || freteNum <= 0 || form.tipo_transporte !== '2') {
+      setRetencaoPreview(null);
+      return;
+    }
+    const t = setTimeout(async () => {
+      try {
+        const res = await api.post('/transporte/ciot/calcular-retencoes-tac', {
+          valor_frete: freteNum,
+          transportador_categoria: 'TAC',
+          transportador_cpf_cnpj: form.transportador_documento
+        });
+        const d = res.data?.data;
+        setRetencaoPreview(d || null);
+        if (d?.aplicavel) {
+          setForm(prev => ({
+            ...prev,
+            valor_inss: String(d.valor_inss ?? 0),
+            valor_sest_senat: String(d.valor_sest_senat ?? 0),
+            valor_irrf: String(d.valor_irrf ?? 0)
+          }));
+        }
+      } catch {
+        // silencioso
+      }
+    }, 220);
+    return () => clearTimeout(t);
+  }, [modalCriar, form.calcular_retencoes_tac, form.valor_frete, form.tipo_transporte, form.transportador_documento]);
 
   const { data, isLoading, refetch } = useQuery({
     queryKey: ['ciot-consulta'],
@@ -945,6 +1014,16 @@ export default function CiotConsultaPage() {
                         </button>
                       )}
 
+                      <button
+                        type="button"
+                        onClick={() => abrirContratoRpa(c)}
+                        title="Imprimir Contrato de Transporte & RPA (PDF)"
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-sky-50 dark:bg-sky-950/50 text-sky-700 dark:text-sky-300 border border-sky-200 dark:border-sky-800 hover:bg-sky-100 text-[11px] font-semibold transition-colors"
+                      >
+                        <Printer className="w-3 h-3" />
+                        <span className="hidden 2xl:inline">RPA</span>
+                      </button>
+
                       {c.ciot_payload_antt && (
                         <button
                           type="button"
@@ -1334,15 +1413,63 @@ export default function CiotConsultaPage() {
                       placeholder="0.00"
                     />
                   </CampoFiscal>
-                  <CampoFiscal rotulo="Retenções INSS/SEST/IRRF (R$)">
+                  <CampoFiscal rotulo="INSS TAC (R$)">
                     <InputFiscal
                       type="number"
                       value={form.valor_inss}
-                      onChange={v => setForm({ ...form, valor_inss: v })}
+                      onChange={v => setForm({ ...form, valor_inss: v, calcular_retencoes_tac: false })}
                       placeholder="0.00"
                     />
                   </CampoFiscal>
                 </div>
+
+                {form.tipo_transporte === '2' && (
+                  <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-900/70 border border-slate-200 dark:border-slate-700 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+                    <label className="inline-flex items-center gap-2 font-semibold text-slate-700 dark:text-slate-200 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={form.calcular_retencoes_tac}
+                        onChange={e => setForm({ ...form, calcular_retencoes_tac: e.target.checked })}
+                        className="rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                      />
+                      Calcular Retenções Legais TAC Automaticamente (INSS 11%/20% · SEST/SENAT 2,5%/20% · IRRF 10%)
+                    </label>
+                    {retencaoPreview?.aplicavel && (
+                      <div className="flex flex-wrap items-center gap-3 font-mono text-[11px]">
+                        <span className="text-amber-700 dark:text-amber-400">INSS: R$ {Number(retencaoPreview.valor_inss).toFixed(2)}</span>
+                        <span className="text-sky-700 dark:text-sky-400">SEST/SENAT: R$ {Number(retencaoPreview.valor_sest_senat).toFixed(2)}</span>
+                        <span className="text-red-700 dark:text-red-400">IRRF: R$ {Number(retencaoPreview.valor_irrf).toFixed(2)}</span>
+                        <strong className="text-emerald-700 dark:text-emerald-400">Líquido: R$ {Number(retencaoPreview.valor_liquido).toFixed(2)}</strong>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {Number(form.valor_pedagio || 0) > 0 && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-3 rounded-xl bg-sky-50/50 dark:bg-sky-950/25 border border-sky-200 dark:border-sky-800/60">
+                    <CampoFiscal rotulo="Operadora Vale-Pedágio Obrigatório (CNPJ ANTT)">
+                      <SelectFiscal
+                        value={form.vale_pedagio_fornecedora_cnpj}
+                        onChange={v => setForm({ ...form, vale_pedagio_fornecedora_cnpj: v })}
+                        opcoes={[
+                          { valor: '', rotulo: 'Selecionar operadora VPO (opcional)...' },
+                          { valor: '04088208000165', rotulo: 'Sem Parar / Via Fácil (04.088.208/0001-65)' },
+                          { valor: '16577631000108', rotulo: 'ConectCar (16.577.631/0001-08)' },
+                          { valor: '29031257000110', rotulo: 'Veloe (29.031.257/0001-10)' },
+                          { valor: '18572225000188', rotulo: 'Move Mais (18.572.225/0001-88)' },
+                          { valor: '34061547000129', rotulo: 'Taggy / Greenpass (34.061.547/0001-29)' }
+                        ]}
+                      />
+                    </CampoFiscal>
+                    <CampoFiscal rotulo="Nº Comprovante / Viagem VPO">
+                      <InputFiscal
+                        value={form.vale_pedagio_comprovante}
+                        onChange={v => setForm({ ...form, vale_pedagio_comprovante: v.replace(/\D/g, '').slice(0, 20) })}
+                        placeholder="Código numérico da compra VPO"
+                      />
+                    </CampoFiscal>
+                  </div>
+                )}
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
                   <CampoFiscal rotulo="Forma de Quitação">
@@ -1578,13 +1705,31 @@ export default function CiotConsultaPage() {
                         Vencimento: {t.data_vencimento ? new Date(t.data_vencimento).toLocaleDateString('pt-BR') : '—'} · Forma: {t.especie_nome || 'PIX'}
                       </p>
                     </div>
-                    <div className="text-right">
-                      <p className="font-bold text-slate-900 dark:text-white tabular-nums">
-                        R$ {Number(t.valor || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
-                      </p>
-                      <span className="inline-block mt-0.5 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300">
-                        {t.status_pagamento}
-                      </span>
+                    <div className="text-right flex items-center gap-2.5">
+                      <div>
+                        <p className="font-bold text-slate-900 dark:text-white tabular-nums">
+                          R$ {Number(t.valor || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                        </p>
+                        <span
+                          className={`inline-block mt-0.5 px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                            t.status_pagamento === 'PAGO'
+                              ? 'bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300'
+                              : 'bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300'
+                          }`}
+                        >
+                          {t.status_pagamento}
+                        </span>
+                      </div>
+                      {t.status_pagamento !== 'PAGO' && t.status_pagamento !== 'CANCELADO' && (
+                        <button
+                          type="button"
+                          disabled={baixandoParcelaId === t.id}
+                          onClick={() => quitarParcelaCiot(t)}
+                          className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold disabled:opacity-50"
+                        >
+                          {baixandoParcelaId === t.id ? 'Baixando...' : 'Dar Baixa'}
+                        </button>
+                      )}
                     </div>
                   </div>
                 ))}

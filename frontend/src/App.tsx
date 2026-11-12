@@ -115,29 +115,29 @@ export default function App() {
       >
         <Route index element={<Home />} />
 
-        {/* ── Módulo Coliseu Transporte ── */}
-        <Route path="transporte/cargas" element={<CargasPage />} />
-        <Route path="transporte/ctes" element={<CtesPage />} />
-        <Route path="transporte/mdfes" element={<MdfesPage />} />
-        <Route path="transporte/contratos" element={<CiotConsultaPage />} />
-        <Route path="transporte/ciot" element={<CiotConsultaPage />} />
-        <Route path="transporte/frota" element={<FrotaPage />} />
-        <Route path="transporte/empresa" element={<DadosEmpresaPage />} />
-        <Route path="transporte/emitentes" element={<DadosEmpresaPage />} />
-        <Route path="transporte/partes" element={<PartesPage />} />
-        <Route path="transporte/relatorios" element={<RelatoriosPage />} />
-        <Route path="transporte/config" element={<RegrasFiscaisPage />} />
-        <Route path="transporte/campos" element={<CamposDinamicosPage />} />
-        <Route path="transporte/roteiro" element={<RoteiroEntregaPage />} />
-        <Route path="transporte/certificados" element={<CertificadosPage />} />
-        <Route path="transporte/documentos" element={<DocumentosEmitidosPage />} />
-        <Route path="transporte/cte/novo" element={<CteWizardPage />} />
-        <Route path="transporte/mdfe/novo" element={<MdfeWizardPage />} />
+        {/* ── Módulo Coliseu Transporte (Protegido por RBAC RequirePermission) ── */}
+        <Route path="transporte/cargas" element={<RequirePermission module="operacao" submenu="cargas"><CargasPage /></RequirePermission>} />
+        <Route path="transporte/ctes" element={<RequirePermission module="documentos" submenu="documentos_emitidos"><CtesPage /></RequirePermission>} />
+        <Route path="transporte/mdfes" element={<RequirePermission module="documentos" submenu="documentos_emitidos"><MdfesPage /></RequirePermission>} />
+        <Route path="transporte/contratos" element={<RequirePermission module="ciot" submenu="consultar_ciot"><CiotConsultaPage /></RequirePermission>} />
+        <Route path="transporte/ciot" element={<RequirePermission module="ciot" submenu="consultar_ciot"><CiotConsultaPage /></RequirePermission>} />
+        <Route path="transporte/frota" element={<RequirePermission module="cadastros" submenu="frota"><FrotaPage /></RequirePermission>} />
+        <Route path="transporte/empresa" element={<RequirePermission module="configuracoes" submenu="dados_empresa"><DadosEmpresaPage /></RequirePermission>} />
+        <Route path="transporte/emitentes" element={<RequirePermission module="configuracoes" submenu="dados_empresa"><DadosEmpresaPage /></RequirePermission>} />
+        <Route path="transporte/partes" element={<RequirePermission module="cadastros" submenu="partes"><PartesPage /></RequirePermission>} />
+        <Route path="transporte/relatorios" element={<RequirePermission module="relatorios" submenu="desempenho"><RelatoriosPage /></RequirePermission>} />
+        <Route path="transporte/config" element={<RequirePermission module="configuracoes" submenu="regras_fiscais"><RegrasFiscaisPage /></RequirePermission>} />
+        <Route path="transporte/campos" element={<RequirePermission module="configuracoes" submenu="campos_dinamicos"><CamposDinamicosPage /></RequirePermission>} />
+        <Route path="transporte/roteiro" element={<RequirePermission module="operacao" submenu="roteiro"><RoteiroEntregaPage /></RequirePermission>} />
+        <Route path="transporte/certificados" element={<RequirePermission module="configuracoes" submenu="certificados"><CertificadosPage /></RequirePermission>} />
+        <Route path="transporte/documentos" element={<RequirePermission module="documentos" submenu="documentos_emitidos"><DocumentosEmitidosPage /></RequirePermission>} />
+        <Route path="transporte/cte/novo" element={<RequirePermission module="documentos" submenu="emitir_cte"><CteWizardPage /></RequirePermission>} />
+        <Route path="transporte/mdfe/novo" element={<RequirePermission module="documentos" submenu="emitir_mdfe"><MdfeWizardPage /></RequirePermission>} />
 
         {/* ── Cadastros do ERP Sincronizados ── */}
-        <Route path="clientes" element={<Clientes />} />
-        <Route path="regioes" element={<CadastrosPage type="regioes" />} />
-        <Route path="departamentos" element={<CadastrosPage type="regioes" />} />
+        <Route path="clientes" element={<RequirePermission module="cadastros" submenu="clientes"><Clientes /></RequirePermission>} />
+        <Route path="regioes" element={<RequirePermission module="cadastros" submenu="regioes"><CadastrosPage type="regioes" /></RequirePermission>} />
+        <Route path="departamentos" element={<RequirePermission module="cadastros" submenu="regioes"><CadastrosPage type="regioes" /></RequirePermission>} />
 
         {/* Administração (mantida do sistema base) */}
         <Route path="usuarios" element={<RequirePermission module="configuracoes" submenu="usuarios"><Usuarios /></RequirePermission>} />

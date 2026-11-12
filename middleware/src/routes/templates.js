@@ -102,23 +102,24 @@ router.delete('/:id', async (req, res, next) => {
     try {
         const tenantId = req.tenant.id;
         const id = parseInt(req.params.id, 10);
+        if (isNaN(id) || id <= 0) {
+            return res.status(400).json({ error: 'ID de template inválido.' });
+        }
 
-        // 1. Desvincula o template de automações e réguas para evitar bloqueio de chave estrangeira
-        await db.query('UPDATE dash_automacoes SET template_id = NULL WHERE template_id = $1', [id]).catch(() => {});
-        await db.query('UPDATE dash_automacoes SET template_email_id = NULL WHERE template_email_id = $1', [id]).catch(() => {});
-        await db.query('UPDATE dash_reguas SET template_id = NULL WHERE template_id = $1', [id]).catch(() => {});
-        await db.query('UPDATE dash_campanhas SET template_id = NULL WHERE template_id = $1', [id]).catch(() => {});
+        // 1. Desvincula o template apenas dentro do próprio tenant (isolamento estrito anti-IDOR)
+        await db.query('UPDATE dash_automacoes SET template_id = NULL WHERE tenant_id = $1 AND template_id = $2', [tenantId, id]).catch(() => {});
+        await db.query('UPDATE dash_automacoes SET template_email_id = NULL WHERE tenant_id = $1 AND template_email_id = $2', [tenantId, id]).catch(() => {});
+        await db.query('UPDATE dash_reguas SET template_id = NULL WHERE tenant_id = $1 AND template_id = $2', [tenantId, id]).catch(() => {});
+        await db.query('UPDATE dash_campanhas SET template_id = NULL WHERE tenant_id = $1 AND template_id = $2', [tenantId, id]).catch(() => {});
 
-        // 2. Deleta o template
+        // 2. Deleta exclusivamente se pertencer ao tenant autenticado
         const delRes = await db.query(
-            'DELETE FROM dash_templates WHERE (tenant_id = $1 OR LOWER(tenant_id::text) = LOWER($1::text)) AND id = $2',
+            'DELETE FROM dash_templates WHERE tenant_id = $1 AND id = $2',
             [tenantId, id]
-        ).catch(async () => {
-            return await db.query('DELETE FROM dash_templates WHERE id = $1', [id]);
-        });
+        );
 
         if (delRes.rowCount === 0) {
-            await db.query('DELETE FROM dash_templates WHERE id = $1', [id]).catch(() => {});
+            return res.status(404).json({ error: 'Template não encontrado nesta empresa.' });
         }
 
         res.json({ success: true, message: 'Template excluído com sucesso.' });

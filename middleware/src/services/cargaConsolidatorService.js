@@ -430,18 +430,18 @@ async function consolidarCargasErpTenant(tenantId, runner = db) {
 
       const updRes = await runner.query(
         `UPDATE dash_cargas
-         SET destinatario_codigo_ibge = COALESCE($2, destinatario_codigo_ibge),
-             destinatario_uf = COALESCE($3, destinatario_uf),
-             regiao_nome = COALESCE($4, regiao_nome),
+         SET destinatario_codigo_ibge = COALESCE($2::varchar, destinatario_codigo_ibge),
+             destinatario_uf = COALESCE($3::varchar, destinatario_uf),
+             regiao_nome = COALESCE($4::varchar, regiao_nome),
              destinatario_cep = COALESCE(destinatario_cep, NULLIF(REGEXP_REPLACE(dados_nfe->'destinatario'->>'cep', '\\D', '', 'g'), '')),
              destinatario_bairro = COALESCE(destinatario_bairro, NULLIF(TRIM(dados_nfe->'destinatario'->>'bairro'), ''))
          WHERE tenant_id = $1
-           AND COALESCE(destinatario_municipio, '') IS NOT DISTINCT FROM COALESCE($5, '')
-           AND COALESCE(destinatario_uf, '') IS NOT DISTINCT FROM COALESCE($6, '')
+           AND COALESCE(destinatario_municipio, '') IS NOT DISTINCT FROM COALESCE($5::varchar, '')
+           AND COALESCE(destinatario_uf, '') IS NOT DISTINCT FROM COALESCE($6::varchar, '')
            AND (
-             (destinatario_codigo_ibge IS DISTINCT FROM COALESCE($2, destinatario_codigo_ibge))
-             OR (destinatario_uf IS DISTINCT FROM COALESCE($3, destinatario_uf))
-             OR ($4::varchar IS NOT NULL AND regiao_nome IS DISTINCT FROM $4)
+             (destinatario_codigo_ibge IS DISTINCT FROM COALESCE($2::varchar, destinatario_codigo_ibge))
+             OR (destinatario_uf IS DISTINCT FROM COALESCE($3::varchar, destinatario_uf))
+             OR ($4::varchar IS NOT NULL AND regiao_nome IS DISTINCT FROM $4::varchar)
            )`,
         [tenantId, codigoParaGravar, ufParaGravar, regiaoCalculada, munRaw, ufRaw]
       );

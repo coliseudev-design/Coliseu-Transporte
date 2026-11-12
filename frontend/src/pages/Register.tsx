@@ -1,10 +1,11 @@
 import { useState } from 'react'
-import { useNavigate, Navigate, Link } from 'react-router-dom'
+import { useNavigate, Navigate, Link, useSearchParams } from 'react-router-dom'
 import { useAuthStore } from '../store/authStore'
-import { UserPlus } from 'lucide-react'
+import { UserPlus, KeyRound } from 'lucide-react'
 
 export default function Register() {
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
   const user = useAuthStore((s) => s.user)
   const register = useAuthStore((s) => s.register)
   const loading = useAuthStore((s) => s.loading)
@@ -13,14 +14,15 @@ export default function Register() {
   const [nome, setNome] = useState('')
   const [email, setEmail] = useState('')
   const [senha, setSenha] = useState('')
-  const [companyKey, setCompanyKey] = useState('')
+  const [companyKey, setCompanyKey] = useState(() => searchParams.get('serial') || searchParams.get('companyKey') || '')
+  const [moduleKey, setModuleKey] = useState(() => searchParams.get('chave') || searchParams.get('moduleKey') || '')
 
   // Se já logado, redireciona
   if (user) return <Navigate to="/" replace />
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    const ok = await register(nome, email, senha, companyKey.trim())
+    const ok = await register(nome, email, senha, companyKey.trim(), moduleKey.trim())
     if (ok) navigate('/', { replace: true })
   }
 
@@ -70,17 +72,37 @@ export default function Register() {
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-text-primary mb-1.5">ID da Empresa (CompanyKey)</label>
+            <label className="block text-sm font-medium text-text-primary mb-1.5">
+              Serial da Empresa (UUID)
+            </label>
             <input
               type="text"
               className="input text-base w-full p-2 border rounded font-mono text-sm"
               value={companyKey}
               onChange={(e) => setCompanyKey(e.target.value)}
-              placeholder="ex: ed1d3a98-4c4d-48db-..."
+              placeholder="ex: 4b722801-99ad-4b3f-8b56-..."
               required
             />
             <p className="text-xs text-text-secondary mt-1">
-              Fornecido pelo administrador de licenças da Coliseu Transporte.
+              Serial exibido abaixo do nome da empresa no Painel de Licenças.
+            </p>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-text-primary mb-1.5 flex items-center gap-1.5">
+              <KeyRound size={14} className="text-blue-600" />
+              Chave do Módulo Coliseu Transporte
+            </label>
+            <input
+              type="text"
+              className="input text-base w-full p-2 border rounded font-mono text-sm uppercase"
+              value={moduleKey}
+              onChange={(e) => setModuleKey(e.target.value.toUpperCase())}
+              placeholder="ex: COL-R43U-T93G-BGDP"
+              required
+            />
+            <p className="text-xs text-text-secondary mt-1">
+              Chave exclusiva do módulo Coliseu Transporte (respeita o limite de dispositivos contratados).
             </p>
           </div>
 

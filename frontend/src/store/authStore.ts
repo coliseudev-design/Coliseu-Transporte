@@ -24,7 +24,7 @@ interface AuthState {
   loading: boolean
   error: string | null
   login: (email: string, senha?: string) => Promise<boolean>
-  register: (nome: string, email: string, senha: string, companyKey: string) => Promise<boolean>
+  register: (nome: string, email: string, senha: string, companyKey: string, moduleKey: string) => Promise<boolean>
   logout: () => Promise<void>
   clearPrecisaAlterarSenha: () => void
   init: () => void
@@ -92,16 +92,18 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       return false
     }
   },
-  register: async (nome, email, senha, companyKey) => {
+  register: async (nome, email, senha, companyKey, moduleKey) => {
     set({ loading: true, error: null })
     try {
       const cleanEmail = email.trim()
       const cleanCompanyKey = companyKey.trim()
+      const cleanModuleKey = moduleKey.trim()
       await api.post('/auth/register', {
         nome: nome.trim(),
         email: cleanEmail,
         password: senha,
-        companyKey: cleanCompanyKey
+        companyKey: cleanCompanyKey,
+        moduleKey: cleanModuleKey
       })
       // Se sucesso no cadastro, faz o login logo em seguida
       return await get().login(cleanEmail, senha)

@@ -7,16 +7,108 @@ const jwt = require('jsonwebtoken');
 const db = require('../db/postgres');
 const config = require('../config/env');
 const logger = require('../config/logger');
-const { invalidateUserAuthCache } = require('../middleware/auth');
+const { MASTER_TENANT_ID, invalidateUserAuthCache } = require('../middleware/auth');
 
-let authUsuariosSchemaReady = false;
-async function ensureAuthUsuariosSchema() {
-    if (authUsuariosSchemaReady) return;
-    await db.query(`
-        ALTER TABLE dash_usuarios
-        ADD COLUMN IF NOT EXISTS precisa_alterar_senha BOOLEAN NOT NULL DEFAULT false
-    `);
-    authUsuariosSchemaReady = true;
+/**
+ * Valida a chave do módulo (COL-...) e obtém o limite real de dispositivos/usuários
+ * diretamente no Painel de Licenças (fail-closed: nunca aprova chave inválida ou offline).
+ */
+async function validarLicencaCadastroEmpresa(companyKey, moduleKey) {
+    const { identityApiUrl, identityInternalKey, expectedModuleSlug } = config.security;
+    if (!identityApiUrl || !identityInternalKey) {
+        const err = new Error('Servidor de licenças não configurado.');
+        err.statusCode = 503;
+        err.code = 'LICENSE_SERVER_UNAVAILABLE';
+        throw err;
+    }
+
+    const baseUrl = identityApiUrl.replace(/\/+$/, '');
+    const candidateSlugs = Array.from(
+        new Set([expectedModuleSlug, 'coliseu-transporte', 'transporte'].filter(Boolean))
+    );
+
+    let validatedSlug = null;
+    let lastReason = null;
+
+    for (const slug of candidateSlugs) {
+        const resKey = await fetch(
+            `${baseUrl}/internal/companies/${encodeURIComponent(companyKey)}/modules/${encodeURIComponent(slug)}/validate-key`,
+            {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Internal-Api-Key': identityInternalKey
+                },
+                body: JSON.stringify({ apiKey: moduleKey }),
+                signal: AbortSignal.timeout(5000)
+            }
+        );
+
+        if (resKey.status === 200) {
+            const dataKey = await resKey.json().catch(() => ({}));
+            if (dataKey.valid === true) {
+                validatedSlug = slug;
+                break;
+            }
+            lastReason = dataKey.reason || dataKey.error || 'Chave de licença do módulo inválida.';
+            continue;
+        }
+
+        if (resKey.status === 403 || resKey.status === 404) {
+            const dataKey = await resKey.json().catch(() => ({}));
+            lastReason = dataKey.reason || dataKey.error || 'Empresa ou módulo Coliseu Transporte não habilitado.';
+            continue;
+        }
+    }
+
+    if (!validatedSlug) {
+        const err = new Error(
+            lastReason || 'Chave de licença (COL-...) inválida ou módulo Coliseu Transporte não contratado para esta empresa.'
+        );
+        err.statusCode = 403;
+        err.code = 'INVALID_MODULE_KEY';
+        throw err;
+    }
+
+    const resInfo = await fetch(
+        `${baseUrl}/internal/companies/${encodeURIComponent(companyKey)}/modules/${encodeURIComponent(validatedSlug)}/info`,
+        {
+            method: 'GET',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Internal-Api-Key': identityInternalKey
+            },
+            signal: AbortSignal.timeout(5000)
+        }
+    );
+
+    if (resInfo.status !== 200) {
+        const dataInfo = await resInfo.json().catch(() => ({}));
+        const err = new Error(
+            dataInfo.reason || dataInfo.error || 'Módulo Coliseu Transporte suspenso ou inativo para esta empresa.'
+        );
+        err.statusCode = 403;
+        err.code = 'MODULE_BLOCKED';
+        throw err;
+    }
+
+    const infoData = await resInfo.json().catch(() => ({}));
+    if (infoData.valid === false) {
+        const err = new Error(infoData.reason || 'Licença do módulo Coliseu Transporte inativa.');
+        err.statusCode = 403;
+        err.code = 'MODULE_BLOCKED';
+        throw err;
+    }
+
+    const deviceLimit = Number(infoData.deviceLimit || 0);
+    if (!Number.isFinite(deviceLimit) || deviceLimit <= 0) {
+        const err = new Error('Esta empresa não possui vagas/licenças ativas liberadas no Painel de Licenças.');
+        err.statusCode = 403;
+        err.code = 'ZERO_LICENSE_LIMIT';
+        throw err;
+    }
+
+    return { deviceLimit, slug: validatedSlug, nomeEmpresa: infoData.nomeDaEmpresa || null };
 }
 
 /**
@@ -24,7 +116,6 @@ async function ensureAuthUsuariosSchema() {
  */
 router.post('/login', async (req, res) => {
     try {
-        await ensureAuthUsuariosSchema();
         const { email, password } = req.body;
 
         if (!email || !password) {
@@ -127,7 +218,6 @@ router.post('/login', async (req, res) => {
  */
 router.get('/me', async (req, res) => {
     try {
-        await ensureAuthUsuariosSchema();
         const authHeader = req.headers.authorization;
         if (!authHeader || !authHeader.startsWith('Bearer ')) {
             return res.status(401).json({ error: 'Token não fornecido' });
@@ -189,7 +279,6 @@ router.get('/me', async (req, res) => {
  */
 router.post('/alterar-senha', async (req, res) => {
     try {
-        await ensureAuthUsuariosSchema();
         const { senhaAtual, novaSenha } = req.body;
         const authHeader = req.headers.authorization;
 
@@ -272,132 +361,163 @@ router.post('/alterar-senha', async (req, res) => {
 });
 
 /**
- * Cadastro de novo usuário.
+ * Cadastro de novo usuário mediante Serial da Empresa (UUID) + Chave de Licença do Módulo (COL-...)
+ * respeitando estritamente o limite de dispositivos/usuários contratado no Painel de Licenças.
  */
 router.post('/register', async (req, res) => {
     try {
-        const { nome, email, password, companyKey } = req.body;
+        const { nome, email, password, companyKey, moduleKey } = req.body || {};
 
         const cleanNome = String(nome || '').trim();
         const cleanEmail = String(email || '').trim().toLowerCase();
         const cleanPassword = String(password || '');
         const cleanCompanyKey = String(companyKey || '').trim();
+        const cleanModuleKey = String(moduleKey || '').trim();
 
-        if (!cleanNome || !cleanEmail || !cleanPassword || !cleanCompanyKey) {
-            return res.status(400).json({ error: 'Nome, email, senha e ID da Empresa (CompanyKey) são obrigatórios', code: 'MISSING_FIELDS' });
+        if (!cleanNome || !cleanEmail || !cleanPassword || !cleanCompanyKey || !cleanModuleKey) {
+            return res.status(400).json({
+                error: 'Nome, e-mail, senha, Serial da Empresa (UUID) e Chave de Licença do Módulo (COL-...) são obrigatórios.',
+                code: 'MISSING_FIELDS'
+            });
+        }
+
+        if (cleanPassword.length < 6 || cleanPassword === '123456') {
+            return res.status(400).json({
+                error: 'Escolha uma senha segura com no mínimo 6 caracteres (não utilize "123456").',
+                code: 'WEAK_PASSWORD'
+            });
         }
 
         const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
         if (!uuidRegex.test(cleanCompanyKey)) {
-            return res.status(400).json({ error: 'ID da Empresa inválido. O CompanyKey deve ser um UUID válido.', code: 'INVALID_UUID' });
-        }
-
-        const isSuperAdminEmail = cleanEmail.endsWith('@silenus.com.br') || cleanEmail.endsWith('@coliseusistemas.com.br');
-
-        // 1. Validação no Servidor de Licenças (Limite de Dispositivos/Cadastros)
-        const { identityApiUrl, identityInternalKey, expectedModuleSlug } = config.security;
-        let deviceLimit = 10;
-
-        if (identityApiUrl && identityInternalKey) {
-            try {
-                const url = `${identityApiUrl}/internal/companies/${cleanCompanyKey}/modules/${expectedModuleSlug}/info`;
-                
-                const controller = new AbortController();
-                const timeout = setTimeout(() => controller.abort(), 5000);
-
-                const response = await fetch(url, {
-                    method: 'GET',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'X-Internal-Api-Key': identityInternalKey
-                    },
-                    signal: controller.signal
-                });
-                clearTimeout(timeout);
-
-                if (response.status === 200) {
-                    const data = await response.json();
-                    deviceLimit = data.deviceLimit || 10;
-                } else {
-                    const data = await response.json().catch(() => ({}));
-                    const reason = data.reason || data.error || '';
-                    // Se o módulo estiver explicitamente suspenso/desativado no painel de licenças, bloqueia
-                    if (reason.toLowerCase().includes('suspenso') || reason.toLowerCase().includes('desativado')) {
-                        return res.status(403).json({ error: reason, code: 'MODULE_BLOCKED' });
-                    }
-                    // Caso a empresa/módulo ainda esteja em aprovação ou não sincronizada no Identity, permite com limite padrão (10)
-                    logger.warn('[Auth] Empresa/Módulo ainda não consta no Identity API durante cadastro; aplicando fallback de licença local.', {
-                        companyKey: cleanCompanyKey,
-                        status: response.status,
-                        reason
-                    });
-                }
-            } catch (err) {
-                logger.warn('[Auth] Aviso ao consultar servidor de licenças durante cadastro; aplicando fallback local.', {
-                    companyKey: cleanCompanyKey,
-                    error: err.message
-                });
-            }
-        }
-
-        // Checar a quantidade atual de usuários ativos para este tenant (excluindo contas de suporte/gestão)
-        const countQuery = `
-            SELECT COUNT(*) as total FROM dash_usuarios
-            WHERE tenant_id = $1
-              AND ativo = true
-              AND LOWER(email) NOT LIKE '%@silenus.com.br'
-              AND LOWER(email) NOT LIKE '%@coliseusistemas.com.br'
-        `;
-        const countResult = await db.query(countQuery, [cleanCompanyKey]);
-        const currentUsersCount = parseInt(countResult.rows[0].total, 10);
-
-        if (!isSuperAdminEmail && currentUsersCount >= deviceLimit) {
-            return res.status(403).json({
-                error: `O limite de licenças (${deviceLimit}) para esta empresa foi atingido. Nenhuma nova conta pode ser criada.`,
-                code: 'LICENSE_LIMIT_REACHED'
+            return res.status(400).json({
+                error: 'Serial da Empresa inválido. Informe o UUID exibido abaixo do nome da empresa no Painel de Licenças.',
+                code: 'INVALID_UUID'
             });
         }
 
-        // 2. Valida se o email já existe (case-insensitive)
-        const checkQuery = `SELECT id FROM dash_usuarios WHERE LOWER(TRIM(email)) = LOWER(TRIM($1))`;
-        const checkResult = await db.query(checkQuery, [cleanEmail]);
-        
-        if (checkResult.rowCount > 0) {
-            return res.status(409).json({ error: 'Este email já está em uso', code: 'EMAIL_IN_USE' });
+        // Bloqueio absoluto de auto-cadastro no tenant Master Global
+        if (cleanCompanyKey.toLowerCase() === MASTER_TENANT_ID) {
+            logger.warn('[Auth] Tentativa bloqueada de auto-cadastro no MASTER_TENANT_ID', { email: cleanEmail, ip: req.ip });
+            return res.status(403).json({
+                error: 'Cadastro público não permitido para o identificador reservado da plataforma.',
+                code: 'FORBIDDEN_MASTER_TENANT'
+            });
         }
 
-        // Hash da senha
-        const salt = await bcrypt.genSalt(10);
-        const senhaHash = await bcrypt.hash(cleanPassword, salt);
-
-        // Insere o usuário (admin por padrão no cadastro da empresa para permitir configuração fiscal/operacional)
-        const initialRole = 'admin';
-        const insertQuery = `
-            INSERT INTO dash_usuarios (tenant_id, email, nome, role, ativo, senha_hash, permissions, layout_version)
-            VALUES ($1, $2, $3, $5, true, $4, NULL, 'v1.0')
-            RETURNING id, tenant_id, email, nome, role, permissions, layout_version
-        `;
-        const result = await db.query(insertQuery, [cleanCompanyKey, cleanEmail, cleanNome, senhaHash, initialRole]);
-        const user = result.rows[0];
+        // 1. Validação estrita (fail-closed) da Chave COL-... e do Limite de Licenças no servidor oficial
+        let licenca;
+        try {
+            licenca = await validarLicencaCadastroEmpresa(cleanCompanyKey, cleanModuleKey);
+        } catch (licErr) {
+            if (licErr.statusCode === 403 || licErr.statusCode === 503) {
+                return res.status(licErr.statusCode).json({
+                    error: licErr.message,
+                    code: licErr.code || 'LICENSE_VALIDATION_FAILED'
+                });
+            }
+            logger.error('[Auth] Falha de comunicação com servidor de licenças no /register', {
+                companyKey: cleanCompanyKey,
+                error: licErr.message
+            });
+            return res.status(503).json({
+                error: 'Não foi possível validar a chave da empresa no Servidor de Licenças no momento. Tente novamente em instantes.',
+                code: 'LICENSE_SERVER_UNAVAILABLE'
+            });
+        }
 
         const { ensureGruposTableAndSeeds } = require('./gruposAcesso');
         await ensureGruposTableAndSeeds(cleanCompanyKey);
 
-        logger.info('[Auth] Novo usuário cadastrado', { email: user.email, tenant: user.tenant_id, role: user.role });
+        const salt = await bcrypt.genSalt(10);
+        const senhaHash = await bcrypt.hash(cleanPassword, salt);
 
-        // Retorna sucesso. O front pode fazer auto-login depois.
-        res.status(201).json({
+        // 2. Transação atômica com lock por empresa para impedir ultrapassar o limite em cadastros simultâneos
+        const client = await db.pool.connect();
+        let createdUser = null;
+        try {
+            await client.query('BEGIN');
+            await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [cleanCompanyKey]);
+
+            // Nenhum bypass por domínio de e-mail em rota pública: toda conta ativa consome 1 vaga da licença
+            const countResult = await client.query(
+                `SELECT COUNT(*)::int AS total
+                 FROM dash_usuarios
+                 WHERE tenant_id = $1
+                   AND ativo = true`,
+                [cleanCompanyKey]
+            );
+            const currentUsersCount = Number(countResult.rows[0]?.total || 0);
+
+            if (currentUsersCount >= licenca.deviceLimit) {
+                await client.query('ROLLBACK');
+                return res.status(403).json({
+                    error: `O limite de licenças (${licenca.deviceLimit}) contratado para esta empresa foi atingido. Nenhuma nova conta pode ser criada.`,
+                    code: 'LICENSE_LIMIT_REACHED'
+                });
+            }
+
+            const checkResult = await client.query(
+                `SELECT id FROM dash_usuarios WHERE LOWER(TRIM(email)) = LOWER(TRIM($1)) LIMIT 1`,
+                [cleanEmail]
+            );
+            if (checkResult.rowCount > 0) {
+                await client.query('ROLLBACK');
+                return res.status(409).json({ error: 'Este email já está em uso.', code: 'EMAIL_IN_USE' });
+            }
+
+            // O 1º usuário da empresa assume perfil Admin (grupo Master) para parametrizar o sistema;
+            // os demais entram com menor privilégio (Operacional / Frota) até promoção pelo Admin da empresa.
+            const isFirstTenantUser = currentUsersCount === 0;
+            const initialRole = isFirstTenantUser ? 'admin' : 'viewer';
+            const targetGroupName = isFirstTenantUser ? 'Master' : 'Operacional / Frota';
+
+            const groupRes = await client.query(
+                `SELECT id FROM dash_grupos_acesso
+                 WHERE tenant_id = $1 AND LOWER(TRIM(nome)) = LOWER(TRIM($2))
+                 LIMIT 1`,
+                [cleanCompanyKey, targetGroupName]
+            );
+            const grupoId = groupRes.rows[0]?.id || null;
+
+            const insertResult = await client.query(
+                `INSERT INTO dash_usuarios (tenant_id, email, nome, role, grupo_id, ativo, senha_hash, permissions, layout_version, filial_acesso)
+                 VALUES ($1, $2, $3, $4, $5, true, $6, NULL, 'v1.0', 'todas')
+                 RETURNING id, tenant_id, email, nome, role, grupo_id, permissions, layout_version`,
+                [cleanCompanyKey, cleanEmail, cleanNome, initialRole, grupoId, senhaHash]
+            );
+            createdUser = insertResult.rows[0];
+
+            await client.query('COMMIT');
+        } catch (txErr) {
+            await client.query('ROLLBACK').catch(() => {});
+            throw txErr;
+        } finally {
+            client.release();
+        }
+
+        logger.info('[Auth] Novo usuário cadastrado com licença validada', {
+            email: createdUser.email,
+            tenant: createdUser.tenant_id,
+            role: createdUser.role,
+            limit: licenca.deviceLimit
+        });
+
+        return res.status(201).json({
             message: 'Usuário cadastrado com sucesso',
-            user
+            user: createdUser
         });
     } catch (err) {
         logger.error('[Auth] Erro na rota de cadastro', err);
-        // Tratar erro de UUID mal formatado (caso o usuário digite texto comum em vez de CompanyKey válida)
         if (err.code === '22P02') {
-            return res.status(400).json({ error: 'ID da Empresa inválido. O CompanyKey deve ser um UUID válido.', code: 'INVALID_UUID' });
+            return res.status(400).json({
+                error: 'Serial da Empresa inválido. O identificador deve ser um UUID válido.',
+                code: 'INVALID_UUID'
+            });
         }
-        res.status(500).json({ error: 'Erro interno no servidor ao cadastrar', code: 'INTERNAL_ERROR' });
+        return res.status(500).json({ error: 'Erro interno no servidor ao cadastrar', code: 'INTERNAL_ERROR' });
     }
 });
 
+router.validarLicencaCadastroEmpresa = validarLicencaCadastroEmpresa;
 module.exports = router;
