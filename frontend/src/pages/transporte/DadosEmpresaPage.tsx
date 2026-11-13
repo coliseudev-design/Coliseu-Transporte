@@ -36,6 +36,8 @@ interface EmitenteForm {
   email: string;
   serie_cte: string;
   serie_mdfe: string;
+  ultimo_numero_cte: string;
+  ultimo_numero_mdfe: string;
   cfop_padrao_cte: string;
   natureza_padrao_cte: string;
   aliquota_icms_padrao: string;
@@ -45,6 +47,8 @@ interface EmitenteForm {
   ciot_usuario: string;
   ciot_integrador_token: string;
   ciot_senha: string;
+  ciot_api_url_producao: string;
+  ciot_api_url_homologacao: string;
   seguro_seguradora_nome: string;
   seguro_seguradora_cnpj: string;
   seguro_numero_apolice: string;
@@ -171,9 +175,9 @@ export default function DadosEmpresaPage() {
     focus_token_homologacao: '',
     focus_token_producao: '',
     focus_ambiente: 'homologacao',
-    uf: 'MS',
-    municipio: 'Dourados',
-    codigo_municipio: '5003702',
+    uf: '',
+    municipio: '',
+    codigo_municipio: '',
     logradouro: '',
     numero: '',
     complemento: '',
@@ -183,15 +187,19 @@ export default function DadosEmpresaPage() {
     email: '',
     serie_cte: '1',
     serie_mdfe: '1',
+    ultimo_numero_cte: '0',
+    ultimo_numero_mdfe: '0',
     cfop_padrao_cte: '5353',
     natureza_padrao_cte: 'PRESTACAO DE SERVICO DE TRANSPORTE',
     aliquota_icms_padrao: '12.00',
-    ciot_provedor: 'HOMOLOGACAO_LOCAL',
+    ciot_provedor: 'MANUAL',
     ciot_ambiente: 'homologacao',
     ciot_cnpj_ipef: '',
     ciot_usuario: '',
     ciot_integrador_token: '',
     ciot_senha: '',
+    ciot_api_url_producao: '',
+    ciot_api_url_homologacao: '',
     seguro_seguradora_nome: '',
     seguro_seguradora_cnpj: '',
     seguro_numero_apolice: '',
@@ -255,9 +263,9 @@ export default function DadosEmpresaPage() {
         focus_token_homologacao: '',
         focus_token_producao: '',
         focus_ambiente: emAtual.focus_ambiente || 'homologacao',
-        uf: emAtual.uf || 'MS',
-        municipio: emAtual.municipio || 'Dourados',
-        codigo_municipio: emAtual.codigo_municipio || '5003702',
+        uf: emAtual.uf || '',
+        municipio: emAtual.municipio || '',
+        codigo_municipio: emAtual.codigo_municipio || '',
         logradouro: emAtual.logradouro || '',
         numero: emAtual.numero || '',
         complemento: emAtual.complemento || '',
@@ -267,6 +275,8 @@ export default function DadosEmpresaPage() {
         email: emAtual.email || '',
         serie_cte: emAtual.serie_cte || '1',
         serie_mdfe: emAtual.serie_mdfe || '1',
+        ultimo_numero_cte: String(emAtual.ultimo_numero_cte ?? 0),
+        ultimo_numero_mdfe: String(emAtual.ultimo_numero_mdfe ?? 0),
         cfop_padrao_cte: emAtual.cfop_padrao_cte || '5353',
         natureza_padrao_cte: emAtual.natureza_padrao_cte || 'PRESTACAO DE SERVICO DE TRANSPORTE',
         aliquota_icms_padrao: String(emAtual.aliquota_icms_padrao ?? '12.00'),
@@ -276,6 +286,8 @@ export default function DadosEmpresaPage() {
         ciot_usuario: emAtual.ciot_usuario || '',
         ciot_integrador_token: '',
         ciot_senha: '',
+        ciot_api_url_producao: emAtual.ciot_api_url_producao || '',
+        ciot_api_url_homologacao: emAtual.ciot_api_url_homologacao || '',
         seguro_seguradora_nome: emAtual.seguro_seguradora_nome || '',
         seguro_seguradora_cnpj: emAtual.seguro_seguradora_cnpj || '',
         seguro_numero_apolice: emAtual.seguro_numero_apolice || '',
@@ -1373,7 +1385,7 @@ export default function DadosEmpresaPage() {
                     {form.bairro ? ` - ${form.bairro}` : ''}
                   </p>
                   <p className="text-[10px] text-slate-700 leading-tight mt-0.5">
-                    {form.municipio || 'Dourados'} - {form.uf || 'MS'}
+                    {form.municipio || 'Município'} - {form.uf || 'UF'}
                     {form.cep ? ` - CEP: ${form.cep}` : ''}
                   </p>
                 </div>
@@ -1671,6 +1683,42 @@ export default function DadosEmpresaPage() {
               />
             </div>
 
+            <div className="md:col-span-2">
+              <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1.5">
+                Último Nº CT-e Emitido (Migração de Sistema)
+              </label>
+              <input
+                type="number"
+                min={0}
+                step={1}
+                placeholder="0 (inicia no nº 1)"
+                value={form.ultimo_numero_cte}
+                onChange={e => setForm({ ...form, ultimo_numero_cte: e.target.value.replace(/\D/g, '') })}
+                className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white font-mono"
+              />
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
+                Se já emitia CT-e na Série {form.serie_cte || '1'}, informe o último nº autorizado para iniciar em <strong>{(Number(form.ultimo_numero_cte || 0) || 0) + 1}</strong> (evita Rejeição 204).
+              </p>
+            </div>
+
+            <div className="md:col-span-2">
+              <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1.5">
+                Último Nº MDF-e Emitido (Migração de Sistema)
+              </label>
+              <input
+                type="number"
+                min={0}
+                step={1}
+                placeholder="0 (inicia no nº 1)"
+                value={form.ultimo_numero_mdfe}
+                onChange={e => setForm({ ...form, ultimo_numero_mdfe: e.target.value.replace(/\D/g, '') })}
+                className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white font-mono"
+              />
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
+                Se já emitia MDF-e na Série {form.serie_mdfe || '1'}, informe o último nº autorizado para iniciar em <strong>{(Number(form.ultimo_numero_mdfe || 0) || 0) + 1}</strong> (evita Rejeição 539).
+              </p>
+            </div>
+
             <div>
               <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1.5">
                 CFOP Padrão CT-e
@@ -1826,12 +1874,11 @@ export default function DadosEmpresaPage() {
                 }
                 className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white text-xs font-medium"
               >
-                <option value="HOMOLOGACAO_LOCAL">Simulador Homologação ANTT (Gera 12+4 dígitos p/ testes)</option>
-                <option value="MANUAL">Registro Manual Blindado (Código obtido no portal IPEF/Cartão)</option>
-                <option value="EFRETE">API e-Frete PEO (Automático via WebService)</option>
-                <option value="PAMCARD">API Pamcard / Roadcard</option>
-                <option value="TARGET">API Target Bank / Meio de Pagamento</option>
-                <option value="ANTT_A1">WebService ANTT Direto (Certificado A1 — Gratuito)</option>
+                <option value="HOMOLOGACAO_LOCAL">Simulador Homologação ANTT (Exclusivo p/ Testes)</option>
+                <option value="MANUAL">Registro Manual Blindado (12 dígitos gerados no Portal da IPEF)</option>
+                <option value="EFRETE">API e-Frete PEO (Automático via WebService SOAP)</option>
+                <option value="PAMCARD">Integrador REST Pamcard / Roadcard</option>
+                <option value="TARGET">Integrador REST Target Bank / Meio de Pagamento</option>
               </select>
             </div>
 
@@ -1918,9 +1965,32 @@ export default function DadosEmpresaPage() {
                     className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white text-xs"
                   />
                 </div>
+                {(form.ciot_provedor === 'PAMCARD' || form.ciot_provedor === 'TARGET') && (
+                  <div className="md:col-span-3">
+                    <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1.5">
+                      URL do Gateway REST Homologado ({form.ciot_provedor}) — Produção
+                    </label>
+                    <input
+                      type="url"
+                      placeholder="https://api-integrador-ipef.suaoperadora.com.br/v1/ciot"
+                      value={form.ciot_api_url_producao}
+                      onChange={e => setForm({ ...form, ciot_api_url_producao: e.target.value })}
+                      className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white font-mono text-xs"
+                    />
+                  </div>
+                )}
               </>
             )}
           </div>
+
+          {(form.focus_ambiente === 'producao' || form.ciot_ambiente === 'producao') && form.ciot_provedor === 'HOMOLOGACAO_LOCAL' && (
+            <div className="mt-3 flex items-start gap-2.5 p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-700 text-xs text-amber-900 dark:text-amber-200">
+              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+              <div>
+                <strong>Atenção para Produção SEFAZ / ANTT (NT 2026.001):</strong> O Simulador Local é exclusivo para testes em homologação e é bloqueado em Produção para evitar Rejeição 684 na SEFAZ. Para contratação de TAC/autônomo em Produção sem contrato de API integradora, selecione <strong>Registro Manual Blindado</strong> (e informe o código de 12 dígitos emitido no portal web da sua IPEF) ou configure suas credenciais <strong>e-Frete PEO</strong>.
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="flex flex-wrap items-center justify-end gap-3 pt-4 border-t border-slate-100 dark:border-slate-700/60">

@@ -10,15 +10,14 @@ export default function Login() {
   const loading = useAuthStore((s) => s.loading)
   const error = useAuthStore((s) => s.error)
 
-  const [email, setEmail] = useState(() => localStorage.getItem('coliseu_remember_email') || localStorage.getItem('nexus_remember_email') || '')
+  const [email, setEmail] = useState(() => localStorage.getItem('coliseu_remember_email') || '')
   const [password, setPassword] = useState('')
-  const [rememberMe, setRememberMe] = useState(() => (localStorage.getItem('coliseu_remember_me') || localStorage.getItem('nexus_remember_me')) !== 'false')
+  const [rememberMe, setRememberMe] = useState(() => localStorage.getItem('coliseu_remember_me') !== 'false')
   const [showPassword, setShowPassword] = useState(false)
 
   useEffect(() => {
     // Remove eventuais senhas legadas armazenadas em texto puro no navegador
     localStorage.removeItem('coliseu_remember_password')
-    localStorage.removeItem('nexus_remember_password')
   }, [])
 
   if (user) return <Navigate to="/" replace />
@@ -30,15 +29,12 @@ export default function Login() {
     const ok = await login(cleanEmail, cleanPass)
     if (ok) {
       localStorage.removeItem('coliseu_remember_password')
-      localStorage.removeItem('nexus_remember_password')
       if (rememberMe) {
         localStorage.setItem('coliseu_remember_email', cleanEmail)
         localStorage.setItem('coliseu_remember_me', 'true')
       } else {
         localStorage.removeItem('coliseu_remember_email')
         localStorage.setItem('coliseu_remember_me', 'false')
-        localStorage.removeItem('nexus_remember_email')
-        localStorage.removeItem('nexus_remember_me')
       }
       navigate('/', { replace: true })
     }
@@ -69,7 +65,7 @@ export default function Login() {
         <div className="relative z-10">
           <div className="flex items-center gap-3 mb-10">
             <div className="bg-white/10 p-2.5 rounded-xl backdrop-blur-md border border-white/20 shadow-lg">
-              <img src="/nexus-simbolo.png" className="w-6 h-6 object-contain" alt="Coliseu Transporte" />
+              <img src="/assets/logo-coliseu-transporte-compacto.svg" className="w-6 h-6 object-contain" alt="Coliseu Transporte" />
             </div>
             <div className="flex flex-col">
               <span className="text-white font-heading font-bold text-xl tracking-tight leading-none">Coliseu Transporte</span>
@@ -165,7 +161,7 @@ export default function Login() {
         {/* Mobile Header (Sempre visível em mobile, oculto em Desktop porque tem a barra lateral) */}
         <div className="lg:hidden absolute top-8 left-6 sm:left-12 flex items-center gap-2">
           <div className="bg-bg-primary shadow-sm border border-border p-2 rounded-xl">
-            <img src="/nexus-simbolo.png" className="w-5 h-5 object-contain" alt="Coliseu Transporte" />
+            <img src="/assets/logo-coliseu-transporte-compacto.svg" className="w-5 h-5 object-contain" alt="Coliseu Transporte" />
           </div>
           <span className="text-text-primary font-heading font-bold text-lg">Coliseu Transporte</span>
         </div>
@@ -173,9 +169,9 @@ export default function Login() {
         <div className="w-full max-w-sm mx-auto mt-16 lg:mt-0">
           <div className="mb-10 text-left">
             <img 
-              src="/logo-nexus.png" 
+              src="/assets/logo-coliseu-transporte.svg" 
               alt="Coliseu Transporte" 
-              className="h-16 sm:h-20 w-auto object-contain mb-8"
+              className="h-14 sm:h-16 w-auto object-contain mb-8"
               onError={(e) => {
                 e.currentTarget.style.display = 'none';
               }}
@@ -234,7 +230,7 @@ export default function Login() {
                   type="checkbox"
                   checked={rememberMe}
                   onChange={(e) => setRememberMe(e.target.checked)}
-                  className="w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                  className="w-4 h-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500 cursor-pointer"
                 />
                 <span>Salvar senha & dados de acesso</span>
               </label>

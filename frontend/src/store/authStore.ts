@@ -36,8 +36,8 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
   loading: false,
   error: null,
   init: () => {
-    const token = localStorage.getItem('coliseu_token') || localStorage.getItem('nexus_token')
-    const userStr = localStorage.getItem('coliseu_user') || localStorage.getItem('nexus_user')
+    const token = localStorage.getItem('coliseu_token')
+    const userStr = localStorage.getItem('coliseu_user')
     if (token && userStr) {
       try {
         set({ token, user: JSON.parse(userStr) })
@@ -131,8 +131,6 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
   logout: async () => {
     localStorage.removeItem('coliseu_token')
     localStorage.removeItem('coliseu_user')
-    localStorage.removeItem('nexus_token')
-    localStorage.removeItem('nexus_user')
     set({ user: null, token: null })
     try {
       // Rotas internas que precisem de limpeza (se houver)

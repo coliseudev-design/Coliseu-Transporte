@@ -10,11 +10,20 @@ const defaultLimit = rateLimit({
     legacyHeaders: false,
     message: { error: 'Muitas requisições. Tente novamente em instantes.', code: 'RATE_LIMITED' },
     keyGenerator: (req) => {
-        // Limita por tenant (ou por IP se não autenticado)
         return req.tenant?.id || req.ip;
     }
 });
 
+// Limite global por IP contra password spraying / enumeração de múltiplas contas
+const authIpLimit = rateLimit({
+    windowMs: config.security.authRateLimitWindowMs || 15 * 60 * 1000,
+    max: Number(process.env.AUTH_IP_RATE_LIMIT_MAX || 45),
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: 'Muitas tentativas originadas deste endereço IP. Aguarde alguns minutos.', code: 'AUTH_IP_RATE_LIMITED' }
+});
+
+// Limite estrito por par IP + conta contra força bruta direcionada
 const authLimit = rateLimit({
     windowMs: config.security.authRateLimitWindowMs || 15 * 60 * 1000,
     max: config.security.authRateLimitMax || 20,
@@ -29,5 +38,6 @@ const authLimit = rateLimit({
 
 module.exports = {
     defaultLimit,
+    authIpLimit,
     authLimit
 };

@@ -93,6 +93,17 @@ export default function DocumentosEmitidosPage() {
     resultados: any[];
   } | null>(null);
 
+  const { data: emitentesResp } = useQuery({
+    queryKey: ['empresa-emitente'],
+    queryFn: async () => (await api.get('/transporte/emitentes')).data
+  });
+  const emitenteAtivo = emitentesResp?.data?.[0];
+  const exibirGeradoresHomologacaoMs = Boolean(
+    emitenteAtivo &&
+    String(emitenteAtivo.focus_ambiente || 'homologacao').toLowerCase() !== 'producao' &&
+    String(emitenteAtivo.uf || '').toUpperCase() === 'MS'
+  );
+
   const { data, isLoading, refetch } = useQuery({
     queryKey: ['documentos-emitidos', tipo, status, search, dataInicio, dataFim],
     queryFn: async () => {
@@ -216,39 +227,43 @@ export default function DocumentosEmitidosPage() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2 shrink-0">
-          <button
-            type="button"
-            onClick={handleGerarCtesTesteHomologacao}
-            disabled={gerandoTestes || gerandoMdfesTeste}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm transition-colors disabled:opacity-60"
-            title="Cria e transmite 2 novos CT-es de teste em homologação na SEFAZ/MS (Interno MS 17% e Interestadual 12% + IBS/CBS)"
-          >
-            {gerandoTestes ? (
-              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-            ) : (
-              <Send className="w-3.5 h-3.5" />
-            )}
-            {gerandoTestes
-              ? 'Emitindo CT-es na SEFAZ/MS...'
-              : 'Gerar Novos CT-es de Teste (SEFAZ/MS)'}
-          </button>
+          {exibirGeradoresHomologacaoMs && (
+            <>
+              <button
+                type="button"
+                onClick={handleGerarCtesTesteHomologacao}
+                disabled={gerandoTestes || gerandoMdfesTeste}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm transition-colors disabled:opacity-60"
+                title="Cria e transmite 2 novos CT-es de teste em homologação na SEFAZ/MS (Interno MS 17% e Interestadual 12% + IBS/CBS)"
+              >
+                {gerandoTestes ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Send className="w-3.5 h-3.5" />
+                )}
+                {gerandoTestes
+                  ? 'Emitindo CT-es na SEFAZ/MS...'
+                  : 'Gerar Novos CT-es de Teste (SEFAZ/MS)'}
+              </button>
 
-          <button
-            type="button"
-            onClick={handleGerarMdfesTesteHomologacao}
-            disabled={gerandoTestes || gerandoMdfesTeste}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-teal-600 hover:bg-teal-700 text-white shadow-sm transition-colors disabled:opacity-60"
-            title="Cria e transmite 2 MDF-es 3.00 em homologação na SEFAZ/MS (Interno MS encerrado + Interestadual MS → SP autorizado)"
-          >
-            {gerandoMdfesTeste ? (
-              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-            ) : (
-              <Truck className="w-3.5 h-3.5" />
-            )}
-            {gerandoMdfesTeste
-              ? 'Emitindo MDF-es na SEFAZ/MS...'
-              : 'Gerar MDF-es de Teste (SEFAZ/MS)'}
-          </button>
+              <button
+                type="button"
+                onClick={handleGerarMdfesTesteHomologacao}
+                disabled={gerandoTestes || gerandoMdfesTeste}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-teal-600 hover:bg-teal-700 text-white shadow-sm transition-colors disabled:opacity-60"
+                title="Cria e transmite 2 MDF-es 3.00 em homologação na SEFAZ/MS (Interno MS encerrado + Interestadual MS → SP autorizado)"
+              >
+                {gerandoMdfesTeste ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Truck className="w-3.5 h-3.5" />
+                )}
+                {gerandoMdfesTeste
+                  ? 'Emitindo MDF-es na SEFAZ/MS...'
+                  : 'Gerar MDF-es de Teste (SEFAZ/MS)'}
+              </button>
+            </>
+          )}
 
           <button
             onClick={() => refetch()}

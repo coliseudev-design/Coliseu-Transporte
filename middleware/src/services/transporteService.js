@@ -342,6 +342,9 @@ async function alocarNumeroFiscalAtomico({
   tenantId,
   tabela,
   docId,
+  emitenteId = null,
+  serie = '1',
+  ultimoNumeroMigracao = 0,
   numeroAtual,
   precisaNovoNumeroHomolog,
 }) {
@@ -349,36 +352,68 @@ async function alocarNumeroFiscalAtomico({
     throw new Error(`Tabela fiscal inválida para numeração: ${tabela}`);
   }
 
-  const calcularNumero = (maxNumExistente) =>
-    precisaNovoNumeroHomolog
-      ? Math.max(maxNumExistente + 1, Number(docId || 1) + 10)
-      : Number(numeroAtual) > 0
-      ? Number(numeroAtual)
-      : Math.max(maxNumExistente + 1, 1);
+  const serieNorm = String(Number(serie) || 1);
+  const pisoMigracao = Math.max(0, parseInt(ultimoNumeroMigracao, 10) || 0);
+  const numAtualInt = parseInt(numeroAtual, 10) || 0;
+
+  const calcularNumero = (maxNumExistente) => {
+    const baseMax = Math.max(Number(maxNumExistente || 0), pisoMigracao);
+    if (precisaNovoNumeroHomolog) {
+      return Math.max(baseMax + 1, Number(docId || 1) + 10);
+    }
+    if (numAtualInt > pisoMigracao && numAtualInt > 0) {
+      return numAtualInt;
+    }
+    return Math.max(baseMax + 1, 1);
+  };
 
   const usarLockTransacional =
     db.query === _realDbQueryRef && db.pool && typeof db.pool.connect === 'function';
+
+  const emitIdInt = emitenteId ? parseInt(emitenteId, 10) || null : null;
 
   if (usarLockTransacional) {
     const client = await db.pool.connect();
     try {
       await client.query('BEGIN');
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
-        `num_seq:${tabela}:${String(tenantId)}`,
+        `num_seq:${tabela}:${String(tenantId)}:${emitIdInt || 0}:${serieNorm}`,
       ]);
-      await client.query(
-        'SELECT id FROM dash_emitentes WHERE tenant_id = $1 FOR UPDATE',
-        [tenantId]
-      );
-      const { rows } = await client.query(
-        `SELECT COALESCE(MAX(numero), 0)::int AS max_num FROM ${tabela} WHERE tenant_id = $1 AND id <> $2`,
-        [tenantId, docId]
-      );
-      const maxNumExistente = Number(rows[0]?.max_num || 0);
+      const colUltimo = tabela === 'dash_ctes' ? 'ultimo_numero_cte' : 'ultimo_numero_mdfe';
+      const emitLockRes = emitIdInt
+        ? await client.query(
+            `SELECT id, COALESCE(${colUltimo}, 0)::int AS ultimo_num FROM dash_emitentes WHERE tenant_id = $1 AND id = $2 FOR UPDATE`,
+            [tenantId, emitIdInt]
+          )
+        : await client.query(
+            `SELECT id, COALESCE(${colUltimo}, 0)::int AS ultimo_num FROM dash_emitentes WHERE tenant_id = $1 ORDER BY padrao DESC NULLS LAST, id ASC FOR UPDATE`,
+            [tenantId]
+          );
+      const pisoDb = Math.max(pisoMigracao, Number(emitLockRes.rows[0]?.ultimo_num || 0));
+
+      const { rows } = emitIdInt
+        ? await client.query(
+            `SELECT COALESCE(MAX(numero), 0)::int AS max_num
+             FROM ${tabela}
+             WHERE tenant_id = $1
+               AND id <> $2
+               AND (emitente_id = $3 OR emitente_id IS NULL)
+               AND COALESCE(NULLIF(TRIM(serie::text), ''), '1') = $4`,
+            [tenantId, docId, emitIdInt, serieNorm]
+          )
+        : await client.query(
+            `SELECT COALESCE(MAX(numero), 0)::int AS max_num
+             FROM ${tabela}
+             WHERE tenant_id = $1
+               AND id <> $2
+               AND COALESCE(NULLIF(TRIM(serie::text), ''), '1') = $3`,
+            [tenantId, docId, serieNorm]
+          );
+      const maxNumExistente = Math.max(Number(rows[0]?.max_num || 0), pisoDb);
       const numeroEnvio = calcularNumero(maxNumExistente);
       await client.query(
-        `UPDATE ${tabela} SET numero = $1 WHERE id = $2 AND tenant_id = $3`,
-        [numeroEnvio, docId, tenantId]
+        `UPDATE ${tabela} SET numero = $1, serie = $2 WHERE id = $3 AND tenant_id = $4`,
+        [numeroEnvio, serieNorm, docId, tenantId]
       );
       await client.query('COMMIT');
       return { maxNumExistente, numeroEnvio };
@@ -394,7 +429,7 @@ async function alocarNumeroFiscalAtomico({
     `SELECT COALESCE(MAX(numero), 0)::int AS max_num FROM ${tabela} WHERE tenant_id = $1 AND id <> $2`,
     [tenantId, docId]
   );
-  const maxNumExistente = Number(rows[0]?.max_num || 0);
+  const maxNumExistente = Math.max(Number(rows[0]?.max_num || 0), pisoMigracao);
   const numeroEnvio = calcularNumero(maxNumExistente);
   return { maxNumExistente, numeroEnvio };
 }
@@ -783,7 +818,9 @@ class TransporteService {
       numero: emitente?.numero || cfg?.focus_numero || cfg?.empresa_numero || 'SN',
       complemento: emitente?.complemento || cfg?.focus_complemento || cfg?.empresa_complemento || '',
       bairro: emitente?.bairro || cfg?.focus_bairro || cfg?.empresa_bairro || 'CENTRO',
-      cep: digitsOnly(emitente?.cep || cfg?.focus_cep || cfg?.empresa_cep || '79004000') || '79004000',
+      cep:
+        digitsOnly(emitente?.cep || cfg?.focus_cep || cfg?.empresa_cep || '') ||
+        (ambiente !== 'producao' ? '79004000' : ''),
       codigo_municipio: ibge.codigo,
       municipio: ibge.nome,
       uf: ibge.uf,
@@ -793,8 +830,10 @@ class TransporteService {
       focus_token: tokenAtivo,
       focus_token_homologacao: tokenHomologacao,
       focus_token_producao: tokenProducao,
-      serie_cte: emitente?.serie_cte || cfg?.focus_serie_cte || '1',
-      serie_mdfe: emitente?.serie_mdfe || cfg?.focus_serie_mdfe || '1',
+      serie_cte: emitente?.serie_cte || emitente?.serie_padrao_cte || cfg?.focus_serie_cte || '1',
+      serie_mdfe: emitente?.serie_mdfe || emitente?.serie_padrao_mdfe || cfg?.focus_serie_mdfe || '1',
+      ultimo_numero_cte: Math.max(0, parseInt(emitente?.ultimo_numero_cte ?? 0, 10) || 0),
+      ultimo_numero_mdfe: Math.max(0, parseInt(emitente?.ultimo_numero_mdfe ?? 0, 10) || 0),
       cfop_padrao_cte: emitente?.cfop_padrao_cte || cfg?.focus_cfop_padrao || '5353',
       natureza_padrao_cte:
         emitente?.natureza_padrao_cte ||
@@ -1032,8 +1071,8 @@ class TransporteService {
       ).trim(),
       cep:
         digitsOnly(
-          exp.cep || nfePart.cep || nfePart.CEP || cadastroParte?.cep || emitente?.cep || '79004000'
-        ) || '79004000',
+          exp.cep || nfePart.cep || nfePart.CEP || cadastroParte?.cep || emitente?.cep || ''
+        ) || (emitente?.focus_ambiente !== 'producao' ? '79004000' : ''),
       codigo_municipio: ibge.codigo,
       municipio: ibge.nome,
       uf: ibge.uf,
@@ -1082,7 +1121,13 @@ class TransporteService {
     out[`bairro_${sufixo}`] = String(part.bairro || 'CENTRO').slice(0, 60);
     out[`codigo_municipio_${sufixo}`] = String(part.codigo_municipio || '');
     out[`municipio_${sufixo}`] = String(part.municipio || '');
-    out[`cep_${sufixo}`] = digitsOnly(part.cep) || '79004000';
+    const cepLimpoPart = digitsOnly(part.cep);
+    if (!isHomolog && cepLimpoPart.length !== 8) {
+      throw new Error(
+        `CEP inválido ou ausente para o ${sufixo} (${part.razao_social || 'Participante'}). Informe um CEP válido de 8 dígitos antes de transmitir em Produção.`
+      );
+    }
+    out[`cep_${sufixo}`] = cepLimpoPart || '79004000';
     out[`uf_${sufixo}`] = String(part.uf || 'MS').toUpperCase();
     out[`codigo_pais_${sufixo}`] = '1058';
     out[`pais_${sufixo}`] = 'BRASIL';
@@ -1465,13 +1510,21 @@ class TransporteService {
       });
     }
 
-    const foneEmitenteFallback = digitsOnly(emitente.telefone) || '6734164605';
+    const isProdCte = emitente.focus_ambiente === 'producao';
+    const cepEmitLimpo = digitsOnly(emitente.cep);
+    if (isProdCte && cepEmitLimpo.length !== 8) {
+      throw new Error(
+        'CEP do emitente ausente ou inválido. Configure um CEP válido de 8 dígitos em Dados da Empresa antes de emitir em Produção.'
+      );
+    }
+    const foneEmitenteReal = digitsOnly(emitente.telefone);
+    const foneEmitenteFallback = isProdCte ? foneEmitenteReal : foneEmitenteReal || '6734164605';
     const retiraFlag = cte.retirar_mercadoria === true || cte.retirar_mercadoria === '0' ? '0' : '1';
     const serieEnvio = Number(cte.serie || emitente.serie_cte || 1) || 1;
 
-    // Aloca numeração sequencial única e atômica para evitar colisão de (série, número) na Focus NFe / SEFAZ
+    // Aloca numeração sequencial única e atômica por (emitente, série), respeitando último número migrado
     const precisaNovoNumeroHomolog =
-      emitente.focus_ambiente !== 'producao' &&
+      !isProdCte &&
       (cte.status === 'REJEITADO' ||
         cte.status === 'PROCESSANDO' ||
         !cte.numero ||
@@ -1481,6 +1534,9 @@ class TransporteService {
       tenantId,
       tabela: 'dash_ctes',
       docId: cteId,
+      emitenteId: cte.emitente_id || emitente.id,
+      serie: serieEnvio,
+      ultimoNumeroMigracao: emitente.ultimo_numero_cte,
       numeroAtual: cte.numero,
       precisaNovoNumeroHomolog,
     });
@@ -1518,9 +1574,11 @@ class TransporteService {
       bairro_emitente: String(emitente.bairro || 'CENTRO').slice(0, 60),
       codigo_municipio_emitente: emitente.codigo_municipio,
       municipio_emitente: emitente.municipio,
-      cep_emitente: digitsOnly(emitente.cep) || '79004000',
+      cep_emitente: cepEmitLimpo || '79004000',
       uf_emitente: emitente.uf,
-      telefone_emitente: foneEmitenteFallback,
+      ...(foneEmitenteFallback && foneEmitenteFallback.length >= 8
+        ? { telefone_emitente: foneEmitenteFallback.slice(0, 14) }
+        : {}),
       regime_tributario_emitente: String(emitente.regime_tributario || '3'),
 
       // Percurso
@@ -2826,7 +2884,186 @@ class TransporteService {
   }
 
   /**
-   * Cancela um CT-e ou CT-e OS na Focus NFe.
+   * Devolve NF-es/cargas de um CT-e ou MDF-e cancelado/excluído de volta para 'PENDENTE'
+   * quando não estiverem vinculadas a outro documento fiscal ativo.
+   */
+  static async liberarCargasDoDocumento(tenantId, tipoDocumento, docId) {
+    const idNum = parseInt(docId, 10);
+    if (!tenantId || !Number.isFinite(idNum) || idNum <= 0) return 0;
+
+    if (String(tipoDocumento).toUpperCase() === 'CTE') {
+      const upd = await db.query(
+        `UPDATE dash_cargas c
+         SET status = CASE
+                 WHEN c.mdfe_id IS NOT NULL AND EXISTS (
+                     SELECT 1 FROM dash_mdfes m
+                     WHERE m.id = c.mdfe_id AND m.tenant_id = c.tenant_id AND m.status NOT IN ('CANCELADO', 'REJEITADO')
+                 ) THEN 'EM_MDFE'
+                 ELSE 'PENDENTE'
+             END,
+             cte_id = CASE WHEN c.cte_id = $1::int THEN NULL ELSE c.cte_id END,
+             updated_at = NOW()
+         WHERE c.tenant_id = $2
+           AND (
+             c.cte_id = $1::int
+             OR EXISTS (
+               SELECT 1 FROM dash_cte_cargas cc
+               WHERE cc.cte_id = $1::int AND cc.carga_id = c.id AND cc.tenant_id = c.tenant_id
+             )
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM dash_cte_cargas cc2
+             INNER JOIN dash_ctes ct2 ON ct2.id = cc2.cte_id AND ct2.tenant_id = cc2.tenant_id
+             WHERE cc2.carga_id = c.id
+               AND cc2.tenant_id = c.tenant_id
+               AND ct2.id <> $1::int
+               AND ct2.status NOT IN ('CANCELADO', 'REJEITADO')
+           )`,
+        [idNum, tenantId]
+      );
+      return upd.rowCount || 0;
+    }
+
+    if (String(tipoDocumento).toUpperCase() === 'MDFE') {
+      const upd = await db.query(
+        `UPDATE dash_cargas c
+         SET status = CASE
+                 WHEN c.cte_id IS NOT NULL AND EXISTS (
+                     SELECT 1 FROM dash_ctes ct
+                     WHERE ct.id = c.cte_id AND ct.tenant_id = c.tenant_id AND ct.status NOT IN ('CANCELADO', 'REJEITADO')
+                 ) THEN 'EM_CTE'
+                 ELSE 'PENDENTE'
+             END,
+             mdfe_id = CASE WHEN c.mdfe_id = $1::int THEN NULL ELSE c.mdfe_id END,
+             updated_at = NOW()
+         WHERE c.tenant_id = $2
+           AND (
+             c.mdfe_id = $1::int
+             OR (
+               c.chave_acesso IS NOT NULL
+               AND EXISTS (
+                 SELECT 1 FROM dash_mdfe_documentos md
+                 WHERE md.mdfe_id = $1::int
+                   AND md.tenant_id = c.tenant_id
+                   AND md.chave = c.chave_acesso
+               )
+             )
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM dash_mdfe_documentos md2
+             INNER JOIN dash_mdfes m2 ON m2.id = md2.mdfe_id AND m2.tenant_id = md2.tenant_id
+             WHERE md2.tenant_id = c.tenant_id
+               AND md2.chave = c.chave_acesso
+               AND m2.id <> $1::int
+               AND m2.status NOT IN ('CANCELADO', 'REJEITADO')
+           )`,
+        [idNum, tenantId]
+      );
+      return upd.rowCount || 0;
+    }
+
+    return 0;
+  }
+
+  /**
+   * Normaliza o payload da Carta de Correção Eletrônica do CT-e (Evento 110110 - evCCeCTe SEFAZ).
+   * Garante sempre o formato estruturado exigido pela SEFAZ e Focus NFe:
+   * [{ grupo_corrigido, campo_corrigido, valor_corrigido, numero_item_alterado? }]
+   */
+  static normalizarCorrecoesCceCte(entrada) {
+    let listaBruta = [];
+    if (Array.isArray(entrada)) {
+      listaBruta = entrada;
+    } else if (entrada && typeof entrada === 'object') {
+      if (Array.isArray(entrada.correcoes)) {
+        listaBruta = entrada.correcoes;
+      } else if (entrada.grupo_corrigido && entrada.campo_corrigido) {
+        listaBruta = [entrada];
+      } else if (typeof entrada.correcao === 'string' && entrada.correcao.trim()) {
+        listaBruta = [
+          {
+            grupo_corrigido: 'compl',
+            campo_corrigido: 'xObs',
+            valor_corrigido: entrada.correcao.trim(),
+          },
+        ];
+      }
+    } else if (typeof entrada === 'string' && entrada.trim()) {
+      listaBruta = [
+        {
+          grupo_corrigido: 'compl',
+          campo_corrigido: 'xObs',
+          valor_corrigido: entrada.trim(),
+        },
+      ];
+    }
+
+    if (listaBruta.length === 0) {
+      throw new Error(
+        'Informe ao menos um item de correção (grupo_corrigido, campo_corrigido e valor_corrigido).'
+      );
+    }
+
+    // Campos vedados pela legislação ICMS/CONFAZ para Carta de Correção (Art. 58-B Convênio SINIEF 06/89)
+    const CAMPOS_VEDADOS_CCE = new Set([
+      'vtprest',
+      'vrec',
+      'vbc',
+      'picms',
+      'vicms',
+      'vcarga',
+      'cnpj',
+      'cpf',
+      'ie',
+      'dhemi',
+      'ncf',
+      'serie',
+      'nct',
+    ]);
+
+    return listaBruta.map((item, idx) => {
+      const grupo = String(item?.grupo_corrigido || '').trim();
+      const campo = String(item?.campo_corrigido || '').trim();
+      const valor = String(item?.valor_corrigido ?? '').trim();
+      const numItemRaw = item?.numero_item_alterado;
+
+      if (!grupo || !campo) {
+        throw new Error(
+          `Correção #${idx + 1}: grupo_corrigido e campo_corrigido são obrigatórios no layout SEFAZ do CT-e.`
+        );
+      }
+      if (CAMPOS_VEDADOS_CCE.has(campo.toLowerCase())) {
+        throw new Error(
+          `O campo "${campo}" não pode ser alterado por Carta de Correção (vedação legal CONFAZ: valores fiscais, alíquotas, CNPJ/IE de partes ou data de emissão).`
+        );
+      }
+      if (!valor) {
+        throw new Error(`Correção #${idx + 1}: informe o novo valor corrigido para "${campo}".`);
+      }
+      if (campo === 'xObs' && valor.length < 15) {
+        throw new Error(
+          'Para correção nas Observações Gerais (compl / xObs), o texto deve ter no mínimo 15 caracteres.'
+        );
+      }
+
+      const out = {
+        grupo_corrigido: grupo.slice(0, 20),
+        campo_corrigido: campo.slice(0, 20),
+        valor_corrigido: valor.slice(0, 500),
+      };
+
+      if (numItemRaw !== undefined && numItemRaw !== null && String(numItemRaw).trim() !== '') {
+        const n = parseInt(numItemRaw, 10);
+        if (Number.isFinite(n) && n > 0) {
+          out.numero_item_alterado = String(n).padStart(2, '0');
+        }
+      }
+      return out;
+    });
+  }
+
+  /**
+   * Cancela um CT-e ou CT-e OS na Focus NFe e devolve as cargas vinculadas para 'PENDENTE'.
    */
   static async cancelarCte(tenantId, cteId, justificativa) {
     if (!justificativa || String(justificativa).trim().length < 15) {
@@ -2857,13 +3094,19 @@ class TransporteService {
       [resFocus.mensagem_sefaz || 'CT-e cancelado', JSON.stringify(resFocus), cteId, tenantId]
     );
 
-    return { success: true, focus: resFocus };
+    const cargasLiberadas = await this.liberarCargasDoDocumento(tenantId, 'CTE', cteId).catch(
+      () => 0
+    );
+
+    return { success: true, cargas_liberadas: cargasLiberadas, focus: resFocus };
   }
 
   /**
-   * Emite Carta de Correção Eletrônica (CC-e) de um CT-e ou CT-e OS autorizado.
+   * Emite Carta de Correção Eletrônica (CC-e) estruturada de um CT-e ou CT-e OS autorizado.
    */
-  static async cartaCorrecaoCte(tenantId, cteId, correcao) {
+  static async cartaCorrecaoCte(tenantId, cteId, correcaoInput) {
+    const correcoes = this.normalizarCorrecoesCceCte(correcaoInput);
+
     const { rows } = await db.query(
       `SELECT c.ref, c.emitente_id, c.status, c.modelo, c.modelo_cte
        FROM dash_ctes c WHERE c.id = $1 AND c.tenant_id = $2`,
@@ -2872,23 +3115,36 @@ class TransporteService {
     if (rows.length === 0) throw new Error('CT-e não encontrado.');
 
     const cte = rows[0];
+    if (cte.status && String(cte.status).toUpperCase() !== 'AUTORIZADO') {
+      throw new Error(
+        `Apenas CT-es com status AUTORIZADO permitem Carta de Correção (status atual: ${cte.status}).`
+      );
+    }
+
     const { client } = await this.getFocusClient(tenantId, cte.emitente_id);
     const isCteOs =
       String(cte.modelo) === '67' || String(cte.modelo_cte || '').toLowerCase() === 'cteos';
 
+    const payloadFocus = { correcoes };
     const resFocus = isCteOs
-      ? await client.cartaCorrecaoCteOs(cte.ref, correcao)
-      : await client.cartaCorrecaoCte(cte.ref, correcao);
+      ? await client.cartaCorrecaoCteOs(cte.ref, payloadFocus)
+      : await client.cartaCorrecaoCte(cte.ref, payloadFocus);
+
+    const registroEvento = {
+      ...resFocus,
+      correcoes_enviadas: correcoes,
+      registrado_em: new Date().toISOString(),
+    };
 
     await db.query(
       `UPDATE dash_ctes
        SET retorno_focus = jsonb_set(COALESCE(retorno_focus,'{}'::jsonb), '{carta_correcao}', $1::jsonb),
            updated_at = NOW()
        WHERE id = $2 AND tenant_id = $3`,
-      [JSON.stringify(resFocus), cteId, tenantId]
+      [JSON.stringify(registroEvento), cteId, tenantId]
     );
 
-    return { success: true, focus: resFocus };
+    return { success: true, correcoes, focus: resFocus };
   }
 
   /**
@@ -3188,7 +3444,7 @@ class TransporteService {
     const ufInicio = normalizarUf(mdfe.uf_inicio || emitente.uf || 'MS') || 'MS';
     const ufFim = normalizarUf(primeiroDocUfFim || mdfe.uf_fim || emitente.uf || 'MS') || 'MS';
 
-    // Numeração sequencial segura e atômica por tenant
+    // Numeração sequencial segura e atômica por (emitente, série), respeitando último número migrado
     const serieEnvio = Number(mdfe.serie || emitente.serie_mdfe || 1);
     const precisaNovoNumeroHomolog =
       isHomolog &&
@@ -3200,6 +3456,9 @@ class TransporteService {
       tenantId,
       tabela: 'dash_mdfes',
       docId: mdfeId,
+      emitenteId: mdfe.emitente_id || emitente.id,
+      serie: serieEnvio,
+      ultimoNumeroMigracao: emitente.ultimo_numero_mdfe,
       numeroAtual: mdfe.numero,
       precisaNovoNumeroHomolog,
     });
@@ -3678,7 +3937,7 @@ class TransporteService {
       primeiroContratante?.cnpj ||
       primeiroContratante?.cpf ||
       digitsOnly(emitente.cnpj) ||
-      '03272053000150';
+      (isHomolog ? '03272053000150' : '');
     const nomePagadorFallback = String(
       primeiroContratante?.nome || emitente.razao_social || 'CONTRATANTE DO TRANSPORTE'
     )
@@ -3749,19 +4008,42 @@ class TransporteService {
           : null;
 
         const tipoBancario = String(p.tipo || '01').trim();
-        const infBanc =
-          p.pix || tipoBancario === '03'
-            ? { pix: String(p.pix || digitsOnly(emitente.cnpj) || '03272053000150').slice(0, 60) }
-            : p.cnpj_instituicao_pagamento || tipoBancario === '02'
-            ? {
-                cnpj_instituicao_pagamento: digitsOnly(
-                  p.cnpj_instituicao_pagamento || '60746948000112'
-                ).slice(0, 14),
-              }
-            : {
-                numero_banco: String(p.numero_banco || '001').slice(0, 5),
-                numero_agencia: String(p.numero_agencia || '1234').slice(0, 10),
-              };
+        let infBanc;
+        if (p.pix || tipoBancario === '03') {
+          const chavePixLimpa = String(
+            p.pix || digitsOnly(emitente.cnpj) || (isHomolog ? '03272053000150' : '')
+          ).trim();
+          if (!isHomolog && !chavePixLimpa) {
+            throw new Error(
+              'Pagamento do Frete (<infPag>): informe a Chave PIX do recebedor antes de emitir em Produção.'
+            );
+          }
+          infBanc = { pix: chavePixLimpa.slice(0, 60) };
+        } else if (p.cnpj_instituicao_pagamento || tipoBancario === '02') {
+          const cnpjIpefPag = digitsOnly(
+            p.cnpj_instituicao_pagamento ||
+              emitente.ciot_cnpj_ipef ||
+              (isHomolog ? '60746948000112' : '')
+          );
+          if (!isHomolog && cnpjIpefPag.length !== 14) {
+            throw new Error(
+              'Pagamento do Frete (<infPag>): informe o CNPJ válido de 14 dígitos da Instituição de Pagamento (IPEF).'
+            );
+          }
+          infBanc = { cnpj_instituicao_pagamento: cnpjIpefPag.slice(0, 14) };
+        } else {
+          const numBancoLimpo = String(p.numero_banco || (isHomolog ? '001' : '')).trim();
+          const numAgenciaLimpa = String(p.numero_agencia || (isHomolog ? '1234' : '')).trim();
+          if (!isHomolog && (!numBancoLimpo || !numAgenciaLimpa)) {
+            throw new Error(
+              'Pagamento do Frete (<infPag>): informe Banco e Agência reais do recebedor (ou altere para PIX / IPEF) antes de emitir em Produção.'
+            );
+          }
+          infBanc = {
+            numero_banco: numBancoLimpo.slice(0, 5),
+            numero_agencia: numAgenciaLimpa.slice(0, 10),
+          };
+        }
 
         const nomeResp = String(p.nome || p.razao_social || nomePagadorFallback)
           .trim()
@@ -3789,8 +4071,14 @@ class TransporteService {
       tipoEmitenteFinal === '3' ||
       (tipoEmitenteFinal === '2' && isVeiculoTerceiroPreCheck);
 
-    if (pagamentosPayload.length === 0 && pagtoFreteObrigatorio) {
+    if (pagamentosPayload.length === 0 && pagtoFreteObrigatorio && docPagadorFallback) {
       const vContratoStr = valorFretePadrao.toFixed(2);
+      const cnpjIpefEmit = digitsOnly(emitente.ciot_cnpj_ipef || '');
+      const infBancAuto = isHomolog
+        ? { numero_banco: '001', numero_agencia: '1234' }
+        : cnpjIpefEmit.length === 14
+        ? { cnpj_instituicao_pagamento: cnpjIpefEmit }
+        : { pix: digitsOnly(emitente.cnpj) || docPagadorFallback };
       pagamentosPayload.push({
         nome: nomePagadorFallback.length >= 2 ? nomePagadorFallback : 'CONTRATANTE DO TRANSPORTE',
         ...(docPagadorFallback.length === 11
@@ -3799,8 +4087,7 @@ class TransporteService {
         componentes: [{ tipo: '04', valor: vContratoStr }],
         valor_total_contrato: vContratoStr,
         forma_pagamento: '0',
-        numero_banco: '001',
-        numero_agencia: '1234',
+        ...infBancAuto,
       });
     }
 
@@ -4035,6 +4322,13 @@ class TransporteService {
       5000
     );
 
+    const cepEmitMdfe = digitsOnly(emitente.cep);
+    if (!isHomolog && cepEmitMdfe.length !== 8) {
+      throw new Error(
+        'CEP do emitente ausente ou inválido. Configure um CEP válido de 8 dígitos em Dados da Empresa antes de emitir o MDF-e em Produção.'
+      );
+    }
+
     const montarPayloadFocus = (numMdfe, placaAtual, ciotListaAtual) => ({
       emitente: tipoEmitenteFinal,
       ...(tipoTransporteFocus ? { tipo_transporte: tipoTransporteFocus } : {}),
@@ -4061,7 +4355,7 @@ class TransporteService {
       bairro_emitente: String(emitente.bairro || 'CENTRO').slice(0, 60),
       codigo_municipio_emitente: emitente.codigo_municipio,
       municipio_emitente: emitente.municipio,
-      cep_emitente: digitsOnly(emitente.cep) || '79841270',
+      cep_emitente: cepEmitMdfe || '79841270',
       uf_emitente: emitente.uf,
       ...(emitente.telefone
         ? { telefone_emitente: digitsOnly(emitente.telefone).slice(0, 14) }
@@ -4423,7 +4717,11 @@ class TransporteService {
       ]
     );
 
-    return { success: true, focus: resFocus };
+    const cargasLiberadas = await this.liberarCargasDoDocumento(tenantId, 'MDFE', mdfeId).catch(
+      () => 0
+    );
+
+    return { success: true, cargas_liberadas: cargasLiberadas, focus: resFocus };
   }
 
   /**
@@ -4760,33 +5058,116 @@ class TransporteService {
   }
 
   /**
-   * Inclui CT-e/NF-e em um MDF-e já autorizado.
+   * Inclui CT-e/NF-e em um MDF-e já autorizado (Evento 110115 — evIncDFeMDFe).
    */
   static async incluirDfe(
     tenantId,
     mdfeId,
-    { protocolo, codigo_municipio_carregamento, documentos, ...rest } = {}
+    {
+      protocolo,
+      codigo_municipio_carregamento,
+      nome_municipio_carregamento,
+      uf_carregamento,
+      documentos,
+      ...rest
+    } = {}
   ) {
     const { rows } = await db.query(
-      `SELECT m.ref, m.emitente_id, m.status FROM dash_mdfes m WHERE m.id = $1 AND m.tenant_id = $2`,
+      `SELECT m.ref, m.emitente_id, m.status, m.tipo_emitente, m.protocolo, m.uf_inicio, m.uf_fim, m.municipios_carregamento
+       FROM dash_mdfes m WHERE m.id = $1 AND m.tenant_id = $2`,
       [mdfeId, tenantId]
     );
     if (rows.length === 0) throw new Error('MDF-e não encontrado.');
+    const mdfe = rows[0];
 
-    const { client } = await this.getFocusClient(tenantId, rows[0].emitente_id);
-    const resFocus = await client.incluirDfeMdfe(rows[0].ref, {
-      protocolo,
-      codigo_municipio_carregamento,
-      documentos,
-      ...rest,
+    if (mdfe.status && String(mdfe.status).toUpperCase() !== 'AUTORIZADO') {
+      throw new Error(
+        `Apenas MDF-es em trânsito (AUTORIZADO) permitem Inclusão de DF-e (status atual: ${mdfe.status}).`
+      );
+    }
+
+    const { client, emitente } = await this.getFocusClient(tenantId, mdfe.emitente_id);
+    const munCarregSalvos = parseJsonSafe(mdfe.municipios_carregamento, []);
+    const munCarregDefault = Array.isArray(munCarregSalvos) ? munCarregSalvos[0] || {} : {};
+    const ibgeCarreg = resolverIbgeMunicipio(
+      codigo_municipio_carregamento || munCarregDefault.codigo || emitente.codigo_municipio,
+      nome_municipio_carregamento || munCarregDefault.nome || emitente.municipio,
+      uf_carregamento || mdfe.uf_inicio || emitente.uf || 'SP'
+    );
+
+    if (!Array.isArray(documentos) || documentos.length === 0) {
+      throw new Error('Informe ao menos uma chave de 44 dígitos (CT-e ou NF-e) para incluir no MDF-e.');
+    }
+
+    const tpEmit = String(mdfe.tipo_emitente || emitente.mdfe_tipo_emitente_padrao || '1');
+    const docsNormalizados = documentos.map((doc, idx) => {
+      const chaveCteExplicit = digitsOnly(doc?.chave_cte || '');
+      const chaveNfeExplicit = digitsOnly(doc?.chave_nfe || '');
+      const chaveGenerica = digitsOnly(doc?.chave || chaveCteExplicit || chaveNfeExplicit || '');
+      if (chaveGenerica.length !== 44) {
+        throw new Error(
+          `Documento #${idx + 1}: a chave de acesso deve conter exatamente 44 dígitos numéricos.`
+        );
+      }
+
+      // Modelo nos dígitos 21-22 da chave de acesso (57 = CT-e, 55 = NF-e)
+      const modeloChave = chaveGenerica.slice(20, 22);
+      const usarCte =
+        chaveCteExplicit.length === 44 ||
+        modeloChave === '57' ||
+        (chaveNfeExplicit.length !== 44 && modeloChave !== '55' && tpEmit !== '2');
+
+      const ibgeDesc = resolverIbgeMunicipio(
+        doc?.codigo_municipio_descarregamento || doc?.codigo_municipio,
+        doc?.nome_municipio_descarregamento || doc?.municipio_descarregamento || doc?.nome_municipio,
+        doc?.uf_descarregamento || mdfe.uf_fim || ibgeCarreg.uf
+      );
+
+      return {
+        codigo_municipio_descarregamento: ibgeDesc.codigo,
+        nome_municipio_descarregamento: ibgeDesc.nome,
+        ...(usarCte ? { chave_cte: chaveGenerica } : { chave_nfe: chaveGenerica }),
+      };
     });
+
+    const payloadFocus = {
+      ...(protocolo || mdfe.protocolo ? { protocolo: String(protocolo || mdfe.protocolo).trim() } : {}),
+      codigo_municipio_carregamento: ibgeCarreg.codigo,
+      nome_municipio_carregamento: ibgeCarreg.nome,
+      documentos: docsNormalizados,
+      ...rest,
+    };
+
+    const resFocus = await client.incluirDfeMdfe(mdfe.ref, payloadFocus);
+
+    for (const d of docsNormalizados) {
+      const ch = d.chave_cte || d.chave_nfe;
+      const tp = d.chave_cte ? 'CTE' : 'NFE';
+      await db
+        .query(
+          `INSERT INTO dash_mdfe_documentos (
+              tenant_id, mdfe_id, tipo_documento, chave,
+              codigo_municipio_descarregamento, nome_municipio_descarregamento
+           ) VALUES ($1, $2, $3, $4, $5, $6)
+           ON CONFLICT (tenant_id, mdfe_id, chave) DO NOTHING`,
+          [
+            tenantId,
+            mdfeId,
+            tp,
+            ch,
+            d.codigo_municipio_descarregamento,
+            d.nome_municipio_descarregamento,
+          ]
+        )
+        .catch(() => {});
+    }
 
     await db.query(
       `UPDATE dash_mdfes SET retorno_focus = jsonb_set(COALESCE(retorno_focus,'{}'::jsonb), '{inclusao_dfe}', $1::jsonb), updated_at = NOW() WHERE id = $2 AND tenant_id = $3`,
       [JSON.stringify(resFocus), mdfeId, tenantId]
     );
 
-    return { success: true, focus: resFocus };
+    return { success: true, documentos: docsNormalizados, focus: resFocus };
   }
 
   static async incluirDfeMdfe(tenantId, mdfeId, dadosDfe) {
@@ -4794,7 +5175,7 @@ class TransporteService {
   }
 
   /**
-   * Reconciliação: consulta na Focus documentos presos em PROCESSANDO.
+   * Reconciliação: consulta na Focus CT-es e MDF-es presos em PROCESSANDO.
    */
   static async reconciliarProcessando(tenantId = null, limiteMinutos = 2) {
     const params = [limiteMinutos];
@@ -4808,6 +5189,7 @@ class TransporteService {
       `SELECT c.id, c.tenant_id, c.ref, c.emitente_id, c.status, c.modelo, c.modelo_cte
        FROM dash_ctes c
        WHERE c.status = 'PROCESSANDO'
+         AND c.created_at > NOW() - INTERVAL '7 days'
          AND c.updated_at < NOW() - ($1 || ' minutes')::interval${filtro}
        LIMIT 50`,
       params
@@ -4865,7 +5247,76 @@ class TransporteService {
       }
     }
 
-    return { reconciliados, total: rows.length };
+    // Reconcilia também MDF-es presos em PROCESSANDO
+    const mdfeParams = [limiteMinutos];
+    let mdfeFiltro = '';
+    if (tenantId) {
+      mdfeParams.push(tenantId);
+      mdfeFiltro = ' AND m.tenant_id = $' + mdfeParams.length;
+    }
+    let mdfesReconciliados = 0;
+    let totalMdfes = 0;
+    try {
+      const { rows: mdfeRows } = await db.query(
+        `SELECT m.id, m.tenant_id, m.ref, m.emitente_id, m.status
+         FROM dash_mdfes m
+         WHERE m.status = 'PROCESSANDO'
+           AND m.created_at > NOW() - INTERVAL '7 days'
+           AND m.updated_at < NOW() - ($1 || ' minutes')::interval${mdfeFiltro}
+         LIMIT 50`,
+        mdfeParams
+      );
+      totalMdfes = mdfeRows.length;
+      for (const m of mdfeRows) {
+        try {
+          const { client } = await this.getFocusClient(m.tenant_id, m.emitente_id);
+          const st = await client.consultarMdfe(m.ref, true);
+          const novoStatus = mapFocusStatusToDb(st.status, m.status);
+          if (novoStatus !== m.status) {
+            await db.query(
+              `UPDATE dash_mdfes SET
+                  status = $1,
+                  status_sefaz = COALESCE($2, status_sefaz),
+                  mensagem_sefaz = COALESCE($3, mensagem_sefaz),
+                  chave_mdfe = COALESCE($4, chave_mdfe),
+                  caminho_xml = COALESCE($5, caminho_xml),
+                  caminho_damdfe = COALESCE($6, caminho_damdfe),
+                  protocolo = COALESCE($7, protocolo),
+                  numero = COALESCE($8, numero),
+                  serie = COALESCE($9, serie),
+                  updated_at = NOW()
+               WHERE id = $10 AND tenant_id = $11`,
+              [
+                novoStatus,
+                extrairStatusSefazFocus(st),
+                extrairMensagemSefazFocus(st),
+                digitsOnly(st.chave_mdfe || st.chave || '').slice(0, 44) || null,
+                FocusClient.normalizarUrlArquivo(
+                  st.caminho_xml_nota_fiscal || st.caminho_xml,
+                  client.ambiente
+                ),
+                FocusClient.normalizarUrlArquivo(st.caminho_damdfe, client.ambiente),
+                extrairProtocoloFocus(st),
+                st.numero ? parseInt(st.numero, 10) : null,
+                st.serie ? String(st.serie) : null,
+                m.id,
+                m.tenant_id,
+              ]
+            );
+            mdfesReconciliados++;
+          }
+        } catch (err) {
+          logger.warn(`[Reconciliação] MDF-e ref=${m.ref}: ${err.message}`);
+        }
+      }
+    } catch (_) {}
+
+    return {
+      reconciliados,
+      total: rows.length,
+      mdfes_reconciliados: mdfesReconciliados,
+      total_mdfes: totalMdfes,
+    };
   }
 
   /**
@@ -5370,15 +5821,23 @@ class TransporteService {
       serie_mdfe_homologacao: serieMdfe,
     };
 
-    if (isNew) {
-      const proxCte = Math.max(1, Number(emitente?.ultimo_numero_cte || 0) + 1);
-      const proxMdfe = Math.max(1, Number(emitente?.ultimo_numero_mdfe || 0) + 1);
+    const ultCte = Math.max(0, parseInt(emitente?.ultimo_numero_cte ?? 0, 10) || 0);
+    const ultMdfe = Math.max(0, parseInt(emitente?.ultimo_numero_mdfe ?? 0, 10) || 0);
+    if (isNew || ultCte > 0) {
+      const proxCte = Math.max(1, ultCte + 1);
       payload.proximo_numero_cte_producao = proxCte;
-      payload.proximo_numero_cte_homologacao = proxCte;
-      payload.proximo_numero_cteos_producao = 1;
-      payload.proximo_numero_cteos_homologacao = 1;
+      if (isNew) {
+        payload.proximo_numero_cte_homologacao = proxCte;
+        payload.proximo_numero_cteos_producao = 1;
+        payload.proximo_numero_cteos_homologacao = 1;
+      }
+    }
+    if (isNew || ultMdfe > 0) {
+      const proxMdfe = Math.max(1, ultMdfe + 1);
       payload.proximo_numero_mdfe_producao = proxMdfe;
-      payload.proximo_numero_mdfe_homologacao = proxMdfe;
+      if (isNew) {
+        payload.proximo_numero_mdfe_homologacao = proxMdfe;
+      }
     }
 
     if (
@@ -6589,6 +7048,178 @@ class TransporteService {
       focus: resManifesto,
     };
   }
+
+  /**
+   * Valida estrutura binária PKCS#12 (.pfx/.p12) e senha antes de persistir no cofre.
+   * Trata de forma segura o caso em que o certificado ICP-Brasil usa cifras legadas (RC2-40-CBC no OpenSSL 3),
+   * bloqueando imediatamente arquivos corrompidos ou com senha incorreta ('mac verify failure').
+   */
+  static validarArquivoESenhaPfx(rawPfxBuffer, senhaTexto) {
+    if (!Buffer.isBuffer(rawPfxBuffer) || rawPfxBuffer.length < 128 || rawPfxBuffer[0] !== 0x30) {
+      throw new Error(
+        'Arquivo de Certificado A1 inválido. Envie um arquivo .pfx ou .p12 íntegro emitido por Autoridade Certificadora ICP-Brasil.'
+      );
+    }
+    const senhaStr = String(senhaTexto ?? '');
+    if (!senhaStr) {
+      throw new Error('Informe a senha do Certificado Digital A1.');
+    }
+    try {
+      const tls = require('tls');
+      tls.createSecureContext({
+        pfx: rawPfxBuffer,
+        passphrase: senhaStr,
+      });
+      return { validadoOpenSsl: true, legacyCipher: false };
+    } catch (err) {
+      const msg = String(err?.message || '').toLowerCase();
+      const code = String(err?.code || '').toUpperCase();
+      if (
+        msg.includes('mac verify failure') ||
+        msg.includes('invalid password') ||
+        msg.includes('bad decrypt')
+      ) {
+        throw new Error(
+          'Senha do Certificado Digital A1 incorreta. Confira a senha do arquivo .pfx e tente novamente.'
+        );
+      }
+      if (code === 'ERR_OSSL_EVP_UNSUPPORTED' || msg.includes('unsupported')) {
+        // Cifra PKCS#12 legada comum em ACs ICP-Brasil (RC2-40-CBC) sob OpenSSL 3; Focus NFe validará na sincronização
+        return { validadoOpenSsl: false, legacyCipher: true };
+      }
+      throw new Error(`Não foi possível ler o arquivo .pfx informado (${err.message}).`);
+    }
+  }
+
+  /**
+   * Semeia de forma estritamente idempotente (nunca sobrescreve edições do contador/cliente)
+   * as regras fiscais iniciais da UF do emitente, respeitando Simples Nacional ('SN') vs Regime Normal ('00').
+   */
+  static async semearRegrasFiscaisIniciaisEmitente(tenantId, emitente) {
+    if (!tenantId || !emitente) return { criadas: 0 };
+    const ufEmit = normalizarUf(emitente.uf || '');
+    if (!ufEmit) return { criadas: 0 };
+
+    const ALIQUOTA_INTERNA_UF = {
+      AC: 19.0,
+      AL: 19.0,
+      AM: 20.0,
+      AP: 18.0,
+      BA: 20.5,
+      CE: 20.0,
+      DF: 20.0,
+      ES: 17.0,
+      GO: 19.0,
+      MA: 22.0,
+      MG: 18.0,
+      MS: 17.0,
+      MT: 17.0,
+      PA: 19.0,
+      PB: 20.0,
+      PE: 20.5,
+      PI: 21.0,
+      PR: 19.5,
+      RJ: 20.0,
+      RN: 18.0,
+      RO: 19.5,
+      RR: 20.0,
+      RS: 17.0,
+      SC: 17.0,
+      SE: 19.0,
+      SP: 12.0,
+      TO: 20.0,
+    };
+
+    const regTrib = String(emitente.regime_tributario || '1').trim();
+    const isSimples = ['1', '2', '4'].includes(regTrib);
+    const cstBase = isSimples ? 'SN' : '00';
+    const aliqInterna = isSimples ? 0.0 : ALIQUOTA_INTERNA_UF[ufEmit] || 18.0;
+    const aliqInterestadual = isSimples ? 0.0 : 12.0;
+    let criadas = 0;
+
+    // 1. Regra Interna da UF do Emitente (UF -> UF, CFOP 5353)
+    const exPar = await db.query(
+      `SELECT 1 FROM dash_regras_fiscais
+       WHERE tenant_id = $1 AND escopo = 'UF_PAR' AND uf_origem = $2 AND uf_destino = $3
+       LIMIT 1`,
+      [tenantId, ufEmit, ufEmit]
+    );
+    if (exPar.rowCount === 0) {
+      await db.query(
+        `INSERT INTO dash_regras_fiscais (
+            tenant_id, escopo, uf_origem, uf_destino, tipo_servico,
+            situacao_tributaria, cfop, aliquota_icms, percentual_fcp,
+            is_final_consumer, criterio_rateio, percentual_adicional, ativo,
+            ibs_cbs_cst, ibs_cbs_class_trib, aliquota_ibs, aliquota_ibs_mun, aliquota_cbs,
+            reducao_aliquota_ibs_cbs, diferimento_ibs_cbs, codigo_situacao_fiscal, vigente_de
+         ) VALUES (
+            $1, 'UF_PAR', $2, $3, '0',
+            $4, '5353', $5, 0.0000,
+            FALSE, 'PESO', 0.00, TRUE,
+            '000', '000001', 0.1000, 0.0000, 0.9000,
+            0.0000, 0.0000, '000001', '2026-01-01'
+         )`,
+        [tenantId, ufEmit, ufEmit, cstBase, aliqInterna]
+      );
+      criadas++;
+    }
+
+    // 2. Regra Interestadual de Saída da UF do Emitente (UF -> Outras UFs, CFOP 6353)
+    const exUf = await db.query(
+      `SELECT 1 FROM dash_regras_fiscais
+       WHERE tenant_id = $1 AND escopo = 'UF' AND uf_origem = $2
+       LIMIT 1`,
+      [tenantId, ufEmit]
+    );
+    if (exUf.rowCount === 0) {
+      await db.query(
+        `INSERT INTO dash_regras_fiscais (
+            tenant_id, escopo, uf_origem, uf_destino, tipo_servico,
+            situacao_tributaria, cfop, aliquota_icms, percentual_fcp,
+            is_final_consumer, criterio_rateio, percentual_adicional, ativo,
+            ibs_cbs_cst, ibs_cbs_class_trib, aliquota_ibs, aliquota_ibs_mun, aliquota_cbs,
+            reducao_aliquota_ibs_cbs, diferimento_ibs_cbs, codigo_situacao_fiscal, vigente_de
+         ) VALUES (
+            $1, 'UF', $2, NULL, '0',
+            $3, '6353', $4, 0.0000,
+            FALSE, 'PESO', 0.00, TRUE,
+            '000', '000001', 0.1000, 0.0000, 0.9000,
+            0.0000, 0.0000, '000001', '2026-01-01'
+         )`,
+        [tenantId, ufEmit, cstBase, aliqInterestadual]
+      );
+      criadas++;
+    }
+
+    // 3. Regra GLOBAL padrão caso o tenant ainda não possua
+    const exGlobal = await db.query(
+      `SELECT 1 FROM dash_regras_fiscais
+       WHERE tenant_id = $1 AND escopo = 'GLOBAL'
+       LIMIT 1`,
+      [tenantId]
+    );
+    if (exGlobal.rowCount === 0) {
+      await db.query(
+        `INSERT INTO dash_regras_fiscais (
+            tenant_id, escopo, uf_origem, uf_destino, tipo_servico,
+            situacao_tributaria, cfop, aliquota_icms, percentual_fcp,
+            is_final_consumer, criterio_rateio, percentual_adicional, ativo,
+            ibs_cbs_cst, ibs_cbs_class_trib, aliquota_ibs, aliquota_ibs_mun, aliquota_cbs,
+            reducao_aliquota_ibs_cbs, diferimento_ibs_cbs, codigo_situacao_fiscal, vigente_de
+         ) VALUES (
+            $1, 'GLOBAL', NULL, NULL, '0',
+            $2, '6353', $3, 0.0000,
+            FALSE, 'PESO', 0.00, TRUE,
+            '000', '000001', 0.1000, 0.0000, 0.9000,
+            0.0000, 0.0000, '000001', '2026-01-01'
+         )`,
+        [tenantId, cstBase, aliqInterestadual]
+      );
+      criadas++;
+    }
+
+    return { criadas, uf: ufEmit, situacao_tributaria: cstBase };
+  }
 }
 
 TransporteService.validarCnpjReal = validarCnpjReal;
@@ -6600,5 +7231,6 @@ TransporteService.validarPlacaVeiculoSefaz = validarPlacaVeiculoSefaz;
 TransporteService.gerarPlacaMercosulHomolog = gerarPlacaMercosulHomolog;
 TransporteService.gerarCiotHomologacao = gerarCiotHomologacao;
 TransporteService.comporObservacaoComCamposExtras = comporObservacaoComCamposExtras;
+TransporteService.alocarNumeroFiscalAtomico = alocarNumeroFiscalAtomico;
 
 module.exports = TransporteService;

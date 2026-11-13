@@ -68,40 +68,36 @@ router.get('/', async (req, res, next) => {
     if (!tenantId) return res.status(401).json({ error: 'Tenant não autenticado.' });
 
     try {
-        let syncDebugInfo = null;
-        let identityUrlUsed = '';
-
-        // 1) Sincroniza filiais do Identity Server para este tenant
+        // 1) Sincroniza filiais do Identity Server para este tenant (quando chave interna estiver configurada)
         try {
             const config = require('../config/env');
             const identityUrl = config.security?.identityApiUrl || process.env.IDENTITY_API_URL || 'https://adminlicencas.coliseusistemas.com.br';
-            identityUrlUsed = identityUrl;
-            const internalKey = config.security?.identityInternalKey || process.env.IDENTITY_INTERNAL_KEY || 'Nexus2026!IdentitySuperSecretKeyOauth20';
+            const internalKey = config.security?.identityInternalKey || process.env.IDENTITY_INTERNAL_KEY || '';
 
-            const resp = await fetch(`${identityUrl}/internal/companies/${tenantId}/branches`, {
-                headers: { 'x-internal-api-key': internalKey },
-                signal: AbortSignal.timeout(5000),
-            });
+            if (internalKey) {
+                const resp = await fetch(`${identityUrl}/internal/companies/${tenantId}/branches`, {
+                    headers: { 'x-internal-api-key': internalKey },
+                    signal: AbortSignal.timeout(5000),
+                });
 
-            if (resp.ok) {
-                const branches = await resp.json();
-                const validBranches = branches.filter(b => b.erpDeptoPadrao != null);
-                
-                for (const b of validBranches) {
-                    await db.query(
-                        `INSERT INTO dash_filiais (tenant_id, empresa_erp, depto_id, centro_custo, nome, documento, is_default, ativo, sincronizado_em)
-                         VALUES ($1,$2,$3,$4,$5,$6,$7,true,NOW())
-                         ON CONFLICT (tenant_id, depto_id) DO UPDATE
-                         SET empresa_erp=$2, centro_custo=$4, nome=$5, documento=$6, is_default=$7, ativo=true, sincronizado_em=NOW()`,
-                        [tenantId, b.erpEmpresaId || 1, b.erpDeptoPadrao, b.erpCentroPadrao || null, b.name, b.cnpj || null, b.isDefault || false]
-                    );
+                if (resp.ok) {
+                    const branches = await resp.json();
+                    const validBranches = branches.filter(b => b.erpDeptoPadrao != null);
+                    
+                    for (const b of validBranches) {
+                        await db.query(
+                            `INSERT INTO dash_filiais (tenant_id, empresa_erp, depto_id, centro_custo, nome, documento, is_default, ativo, sincronizado_em)
+                             VALUES ($1,$2,$3,$4,$5,$6,$7,true,NOW())
+                             ON CONFLICT (tenant_id, depto_id) DO UPDATE
+                             SET empresa_erp=$2, centro_custo=$4, nome=$5, documento=$6, is_default=$7, ativo=true, sincronizado_em=NOW()`,
+                            [tenantId, b.erpEmpresaId || 1, b.erpDeptoPadrao, b.erpCentroPadrao || null, b.name, b.cnpj || null, b.isDefault || false]
+                        );
+                    }
+                } else {
+                    logger.warn(`[Filiais] Falha no sync com Identity Server (HTTP ${resp.status}) para tenant ${tenantId}`);
                 }
-            } else {
-                syncDebugInfo = `HTTP ${resp.status} - ${await resp.text().catch(()=>'')}`;
-                logger.warn(`[Filiais] Falha no sync com Identity Server (HTTP ${resp.status}) para tenant ${tenantId}`);
             }
         } catch (syncErr) {
-            syncDebugInfo = syncErr.message;
             logger.warn(`[Filiais] Erro ao sincronizar filiais do Identity Server: ${syncErr.message}`);
         }
 
@@ -114,20 +110,7 @@ router.get('/', async (req, res, next) => {
             [tenantId]
         );
 
-        if (rows.length === 0) {
-            rows.push({
-                id: 9999,
-                empresa_erp: 99,
-                depto_id: 9999,
-                centro_custo: null,
-                nome: `DEBUG T:${tenantId.substring(0,8)} | ${syncDebugInfo ? syncDebugInfo.substring(0, 40) : '200 OK (Vazio)'}`,
-                documento: identityUrlUsed,
-                is_default: false,
-                ativo: true
-            });
-        }
-
-        res.json({ filiais: rows, _debug: syncDebugInfo });
+        res.json({ filiais: rows });
     } catch (err) {
         logger.error('[Filiais] Erro ao listar filiais:', err.message);
         next(err);

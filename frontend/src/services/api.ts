@@ -7,7 +7,7 @@ const api = axios.create({
 })
 
 api.interceptors.request.use((config) => {
-  const token = localStorage.getItem('coliseu_token') || localStorage.getItem('nexus_token')
+  const token = localStorage.getItem('coliseu_token')
   if (token) {
     config.headers.Authorization = `Bearer ${token}`
   }
@@ -18,11 +18,8 @@ api.interceptors.response.use(
   (r) => r,
   (err: AxiosError) => {
     if (err.response?.status === 401) {
-      // Token expirado/inválido
       localStorage.removeItem('coliseu_token')
       localStorage.removeItem('coliseu_user')
-      localStorage.removeItem('nexus_token')
-      localStorage.removeItem('nexus_user')
       if (!window.location.pathname.startsWith('/login')) {
         window.location.href = '/login'
       }

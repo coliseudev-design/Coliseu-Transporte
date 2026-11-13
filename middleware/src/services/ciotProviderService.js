@@ -4,6 +4,7 @@ const db = require('../db/postgres');
 const logger = require('../config/logger');
 const { decryptSecret } = require('../utils/cryptoVault');
 const { calcularPisoMinimoAntt } = require('../utils/anttPisoMinimo');
+const { resolverIbgeMunicipioSync: resolverIbgeMunicipio } = require('../utils/ibgeMunicipios');
 
 const PROVEDORES_CIOT_SUPORTADOS = [
   'HOMOLOGACAO_LOCAL',
@@ -289,7 +290,66 @@ function calcularRetencoesTac({
 }
 
 /**
- * Conector SOAP oficial e-Frete PEO (Sandbox & Produção) usando fetch nativo do Node 20+.
+ * Autentica sessão SOAP na e-Frete (LogonService.asmx -> Login) para obter o <Token> obrigatório nas chamadas PEF.
+ */
+async function autenticarSessaoEfrete(credenciais) {
+  const isProd = String(credenciais.ambiente || 'homologacao').toLowerCase() === 'producao';
+  const logonEndpoint = isProd
+    ? 'https://www.efrete.com.br/Services/LogonService.asmx'
+    : 'https://dev.efrete.com.br/Services/LogonService.asmx';
+
+  if (!credenciais.integrador || !credenciais.usuario || !credenciais.senha) {
+    throw new Error(
+      'Credenciais da IPEF e-Frete incompletas. Configure Token do Integrador, Usuário e Senha em Dados da Empresa.'
+    );
+  }
+
+  // Se o operador já informou um token de sessão pré-autenticado explícito, permite reutilizar
+  if (credenciais.sessionToken) {
+    return String(credenciais.sessionToken).trim();
+  }
+
+  const logonEnvelope = `<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+               xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+               xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Body>
+    <Login xmlns="http://schemas.ipc.adm.br/efrete/logon">
+      <request xmlns="http://schemas.ipc.adm.br/efrete/logon/objects">
+        <Integrador xmlns="http://schemas.ipc.adm.br/efrete/objects">${escapeXml(credenciais.integrador)}</Integrador>
+        <Versao xmlns="http://schemas.ipc.adm.br/efrete/objects">1</Versao>
+        <Usuario>${escapeXml(credenciais.usuario)}</Usuario>
+        <Senha>${escapeXml(credenciais.senha)}</Senha>
+      </request>
+    </Login>
+  </soap:Body>
+</soap:Envelope>`;
+
+  const resp = await fetch(logonEndpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'text/xml; charset=utf-8',
+      SOAPAction: '"http://schemas.ipc.adm.br/efrete/logon/Login"',
+    },
+    body: logonEnvelope,
+  });
+
+  const xmlLogon = await resp.text();
+  const matchToken = xmlLogon.match(/<Token[^>]*>([^<]+)<\/Token>/i);
+  if (!matchToken || !String(matchToken[1]).trim()) {
+    const matchErro = xmlLogon.match(/<Mensagem[^>]*>([^<]+)<\/Mensagem>/i);
+    throw new Error(
+      `Falha na autenticação e-Frete LogonService (${resp.status}): ${
+        matchErro ? matchErro[1] : 'Credenciais recusadas ou Token de sessão não retornado pela IPEF.'
+      }`
+    );
+  }
+
+  return String(matchToken[1]).trim();
+}
+
+/**
+ * Conector SOAP oficial e-Frete PEO (Sandbox & Produção) com autenticação prévia LogonService.asmx.
  */
 async function emitirViaEfrete(contrato, emitente, credenciais) {
   const isProd = String(credenciais.ambiente || 'homologacao').toLowerCase() === 'producao';
@@ -297,11 +357,18 @@ async function emitirViaEfrete(contrato, emitente, credenciais) {
     ? 'https://www.efrete.com.br/Services/PefService.asmx'
     : 'https://dev.efrete.com.br/Services/PefService.asmx';
 
-  if (!credenciais.integrador || !credenciais.usuario || !credenciais.senha) {
-    throw new Error(
-      'Credenciais da IPEF e-Frete incompletas. Configure Token do Integrador, Usuário e Senha em Dados da Empresa.'
-    );
-  }
+  const sessionToken = await autenticarSessaoEfrete(credenciais);
+
+  const ibgeOrig = resolverIbgeMunicipio(
+    contrato.codigo_ibge_inicio,
+    contrato.municipio_inicio,
+    contrato.uf_inicio || emitente?.uf || 'SP'
+  );
+  const ibgeDest = resolverIbgeMunicipio(
+    contrato.codigo_ibge_fim,
+    contrato.municipio_fim,
+    contrato.uf_fim || contrato.uf_inicio || emitente?.uf || 'SP'
+  );
 
   const soapEnvelope = `<?xml version="1.0" encoding="utf-8"?>
 <soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
@@ -310,12 +377,13 @@ async function emitirViaEfrete(contrato, emitente, credenciais) {
   <soap:Body>
     <AdicionarOperacaoTransporte xmlns="http://schemas.ipc.adm.br/efrete/pef">
       <request xmlns="http://schemas.ipc.adm.br/efrete/pef/AdicionarOperacaoTransporte">
+        <Token xmlns="http://schemas.ipc.adm.br/efrete/objects">${escapeXml(sessionToken)}</Token>
         <Integrador xmlns="http://schemas.ipc.adm.br/efrete/objects">${escapeXml(credenciais.integrador)}</Integrador>
         <Versao xmlns="http://schemas.ipc.adm.br/efrete/objects">7</Versao>
         <TipoViagem>${contrato.tipo_transporte === '2' ? 'Padrao' : 'TAC_Agregado'}</TipoViagem>
         <EmissaoGratuita>${contrato.tipo_transporte === '1' ? 'true' : 'false'}</EmissaoGratuita>
-        <CodigoMunicipioOrigem>${escapeXml(contrato.codigo_ibge_inicio || '5003702')}</CodigoMunicipioOrigem>
-        <CodigoMunicipioDestino>${escapeXml(contrato.codigo_ibge_fim || '5002704')}</CodigoMunicipioDestino>
+        <CodigoMunicipioOrigem>${escapeXml(ibgeOrig.codigo)}</CodigoMunicipioOrigem>
+        <CodigoMunicipioDestino>${escapeXml(ibgeDest.codigo)}</CodigoMunicipioDestino>
         <Contratado>
           <CpfOuCnpj>${escapeXml(digitsOnly(contrato.transportador_documento))}</CpfOuCnpj>
           <RNTRC>${escapeXml(digitsOnly(contrato.transportador_rntrc))}</RNTRC>
@@ -380,11 +448,7 @@ async function encerrarViaEfrete(contrato, credenciais) {
     ? 'https://www.efrete.com.br/Services/PefService.asmx'
     : 'https://dev.efrete.com.br/Services/PefService.asmx';
 
-  if (!credenciais.integrador || !credenciais.usuario || !credenciais.senha) {
-    throw new Error(
-      'Credenciais da IPEF e-Frete incompletas para encerramento em Produção. Configure Token do Integrador, Usuário e Senha em Dados da Empresa.'
-    );
-  }
+  const sessionToken = await autenticarSessaoEfrete(credenciais);
 
   const codigoFormatado = contrato.ciot_verificador
     ? `${digitsOnly(contrato.ciot_codigo)}/${digitsOnly(contrato.ciot_verificador)}`
@@ -397,6 +461,7 @@ async function encerrarViaEfrete(contrato, credenciais) {
   <soap:Body>
     <EncerrarOperacaoTransporte xmlns="http://schemas.ipc.adm.br/efrete/pef">
       <request xmlns="http://schemas.ipc.adm.br/efrete/pef/EncerrarOperacaoTransporte">
+        <Token xmlns="http://schemas.ipc.adm.br/efrete/objects">${escapeXml(sessionToken)}</Token>
         <Integrador xmlns="http://schemas.ipc.adm.br/efrete/objects">${escapeXml(credenciais.integrador)}</Integrador>
         <Versao xmlns="http://schemas.ipc.adm.br/efrete/objects">2</Versao>
         <CodigoIdentificacaoOperacao>${escapeXml(codigoFormatado)}</CodigoIdentificacaoOperacao>
@@ -443,11 +508,7 @@ async function cancelarViaEfrete(contrato, motivo, credenciais) {
     ? 'https://www.efrete.com.br/Services/PefService.asmx'
     : 'https://dev.efrete.com.br/Services/PefService.asmx';
 
-  if (!credenciais.integrador || !credenciais.usuario || !credenciais.senha) {
-    throw new Error(
-      'Credenciais da IPEF e-Frete incompletas para cancelamento em Produção. Configure Token do Integrador, Usuário e Senha em Dados da Empresa.'
-    );
-  }
+  const sessionToken = await autenticarSessaoEfrete(credenciais);
 
   const codigoFormatado = contrato.ciot_verificador
     ? `${digitsOnly(contrato.ciot_codigo)}/${digitsOnly(contrato.ciot_verificador)}`
@@ -460,6 +521,7 @@ async function cancelarViaEfrete(contrato, motivo, credenciais) {
   <soap:Body>
     <CancelarOperacaoTransporte xmlns="http://schemas.ipc.adm.br/efrete/pef">
       <request xmlns="http://schemas.ipc.adm.br/efrete/pef/CancelarOperacaoTransporte">
+        <Token xmlns="http://schemas.ipc.adm.br/efrete/objects">${escapeXml(sessionToken)}</Token>
         <Integrador xmlns="http://schemas.ipc.adm.br/efrete/objects">${escapeXml(credenciais.integrador)}</Integrador>
         <Versao xmlns="http://schemas.ipc.adm.br/efrete/objects">2</Versao>
         <CodigoIdentificacaoOperacao>${escapeXml(codigoFormatado)}</CodigoIdentificacaoOperacao>
@@ -491,6 +553,67 @@ async function cancelarViaEfrete(contrato, motivo, credenciais) {
   return {
     protocolo: String(matchProt[1]).trim().slice(0, 40),
     raw_retorno: xmlResp.slice(0, 4000),
+  };
+}
+
+/**
+ * Emissão REST padronizada para Pamcard / Target quando URL/Gateway homologado + Token estão configurados.
+ * Nunca retorna falso-positivo sem protocolo de 12 dígitos válido.
+ */
+async function emitirViaRestIpef({ provedor, contrato, credenciais }) {
+  const customUrl = String(credenciais.baseUrl || '').trim().replace(/\/+$/, '');
+  if (!customUrl) {
+    const err = new Error(
+      `Para emissão automática direta na ${provedor} em Produção, configure o Endpoint homologado da Integradora em Dados da Empresa — ou utilize o modo "Portal IPEF (Manual)" informando os 12 dígitos emitidos no portal da ${provedor}.`
+    );
+    err.statusCode = 422;
+    err.code = 'IPEF_PRODUCTION_ENDPOINT_REQUIRED';
+    throw err;
+  }
+
+  const resp = await fetch(`${customUrl}/operacoes`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${credenciais.integrador}`,
+      ...(credenciais.usuario ? { 'X-Ipef-User': credenciais.usuario } : {}),
+    },
+    body: JSON.stringify(montarPayloadPadraoAntt(contrato, contrato)),
+  });
+
+  const bodyText = await resp.text();
+  let parsedJson = null;
+  try {
+    parsedJson = JSON.parse(bodyText);
+  } catch (_) {
+    parsedJson = null;
+  }
+
+  if (!resp.ok) {
+    const errMsg = parsedJson?.mensagem || parsedJson?.message || parsedJson?.error || bodyText.slice(0, 200);
+    throw new Error(`Retorno ${provedor} (${resp.status}): ${errMsg}`);
+  }
+
+  const rawCode =
+    parsedJson?.ciot_codigo ||
+    parsedJson?.ciot ||
+    parsedJson?.codigo_ciot ||
+    parsedJson?.numero_ciot ||
+    '';
+  const rawVerif = parsedJson?.ciot_verificador || parsedJson?.codigo_verificador || '';
+  const norm = normalizarProtocoloCiot(rawCode, rawVerif);
+  if (!norm.valido) {
+    throw new Error(
+      `A integradora ${provedor} não retornou um número CIOT válido de 12 dígitos (${norm.erro}).`
+    );
+  }
+
+  return {
+    codigo: norm.codigo,
+    verificador: norm.verificador,
+    provedor,
+    cnpj_ipef: CNPJ_PADRAO_IPEF[provedor] || null,
+    raw_retorno: bodyText.slice(0, 4000),
   };
 }
 
@@ -725,7 +848,9 @@ async function emitirOuRegistrarCiot({
             e.ciot_integrador_token AS emit_ciot_token,
             e.ciot_usuario AS emit_ciot_usuario,
             e.ciot_senha AS emit_ciot_senha,
-            e.ciot_cnpj_ipef AS emit_ciot_cnpj_ipef
+            e.ciot_cnpj_ipef AS emit_ciot_cnpj_ipef,
+            e.ciot_api_url_producao AS emit_ciot_api_url_producao,
+            e.ciot_api_url_homologacao AS emit_ciot_api_url_homologacao
      FROM dash_contratos_transporte c
      LEFT JOIN dash_emitentes e ON e.id = c.emitente_id AND e.tenant_id = c.tenant_id
      WHERE c.id = $1 AND c.tenant_id = $2
@@ -806,13 +931,16 @@ async function emitirOuRegistrarCiot({
     ciotVerificador4 = norm.verificador;
   } else if (provedor === 'HOMOLOGACAO_LOCAL') {
     if (ambienteEfetivo === 'producao') {
-      // Em produção sem provedor externo configurado, prepara apenas o Payload GERADO aguardando o código real da IPEF
-      statusFinal = 'GERADO';
-    } else {
-      const sim = gerarCodigoCiotHomologacao(c.id);
-      ciotCodigo12 = sim.codigo;
-      ciotVerificador4 = sim.verificador;
+      const err = new Error(
+        'O provedor CIOT da empresa ainda está configurado como "Simulador Local (Homologação)", que não gera protocolo válido na SEFAZ Produção (NT 2026.001). Informe os 12 dígitos emitidos na sua IPEF ("Informar Código CIOT") ou altere o provedor em Dados da Empresa.'
+      );
+      err.statusCode = 422;
+      err.code = 'SIMULADOR_BLOQUEADO_EM_PRODUCAO';
+      throw err;
     }
+    const sim = gerarCodigoCiotHomologacao(c.id);
+    ciotCodigo12 = sim.codigo;
+    ciotVerificador4 = sim.verificador;
   } else if (provedor === 'MANUAL') {
     statusFinal = 'GERADO';
   } else if (provedor === 'EFRETE') {
@@ -829,27 +957,38 @@ async function emitirOuRegistrarCiot({
   } else if (provedor === 'PAMCARD' || provedor === 'TARGET' || provedor === 'ANTT_A1') {
     const tok = String(decryptSecret(c.emit_ciot_token) || '').trim();
     if (!tok && ambienteEfetivo !== 'producao') {
-      // Se ainda sem credencial de Sandbox, permite simular em homologação
       const sim = gerarCodigoCiotHomologacao(c.id);
       ciotCodigo12 = sim.codigo;
       ciotVerificador4 = sim.verificador;
       cnpjIpefUsado = cnpjIpefUsado || CNPJ_PADRAO_IPEF[provedor] || null;
     } else if (!tok) {
       const err = new Error(
-        `Credenciais da integradora ${provedor} não configuradas para Produção. Configure o Token/Usuário em Dados da Empresa ou registre o código emitido manualmente.`
+        `Credenciais da integradora ${provedor} não configuradas para Produção. Configure o Token/Usuário em Dados da Empresa ou informe o código de 12 dígitos emitido no portal da ${provedor}.`
       );
       err.statusCode = 422;
       throw err;
+    } else if (ambienteEfetivo !== 'producao' && !c.emit_ciot_api_url_homologacao) {
+      const sim = gerarCodigoCiotHomologacao(c.id);
+      ciotCodigo12 = sim.codigo;
+      ciotVerificador4 = sim.verificador;
+      cnpjIpefUsado = cnpjIpefUsado || CNPJ_PADRAO_IPEF[provedor] || null;
     } else {
-      // Payload pronto para conector customizado da IPEF; se em homologação gera protocolo homologado
-      if (ambienteEfetivo !== 'producao') {
-        const sim = gerarCodigoCiotHomologacao(c.id);
-        ciotCodigo12 = sim.codigo;
-        ciotVerificador4 = sim.verificador;
-        cnpjIpefUsado = cnpjIpefUsado || CNPJ_PADRAO_IPEF[provedor] || null;
-      } else {
-        statusFinal = 'GERADO';
-      }
+      const ret = await emitirViaRestIpef({
+        provedor,
+        contrato: c,
+        credenciais: {
+          ambiente: ambienteEfetivo,
+          integrador: tok,
+          usuario: String(c.emit_ciot_usuario || '').trim(),
+          baseUrl:
+            ambienteEfetivo === 'producao'
+              ? c.emit_ciot_api_url_producao
+              : c.emit_ciot_api_url_homologacao,
+        },
+      });
+      ciotCodigo12 = ret.codigo;
+      ciotVerificador4 = ret.verificador;
+      cnpjIpefUsado = cnpjIpefUsado || ret.cnpj_ipef;
     }
   }
 
@@ -1268,6 +1407,8 @@ module.exports = {
   gerarCodigoCiotHomologacao,
   calcularRetencoesTac,
   montarPayloadPadraoAntt,
+  autenticarSessaoEfrete,
+  emitirViaEfrete,
   sincronizarFinanceiroCiot,
   estornarFinanceiroCiot,
   emitirOuRegistrarCiot,

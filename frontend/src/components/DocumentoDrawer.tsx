@@ -4,7 +4,7 @@ import api from '../services/api';
 import {
   X, FileText, Truck, CheckCircle2, AlertTriangle, XCircle, Clock,
   Download, Eye, Send, Ban, FilePen, UserPlus, PlusCircle,
-  MapPin, Package, Copy, Loader2, ShieldCheck, Info, RefreshCw, Mail, CheckSquare
+  MapPin, Package, Copy, Loader2, ShieldCheck, Info, RefreshCw, Mail, CheckSquare, Trash2
 } from 'lucide-react';
 
 interface DrawerProps {
@@ -48,6 +48,27 @@ const COR_EVENTO: Record<string, string> = {
     INCLUSAO_DFE: 'bg-cyan-100 dark:bg-cyan-950/60 text-cyan-600 dark:text-cyan-400'
 };
 
+const PRESETS_CCE_CTE = [
+  { id: 'compl|xObs', label: 'Observações Gerais do CT-e (compl / xObs)', grupo: 'compl', campo: 'xObs' },
+  { id: 'ide|CFOP', label: 'CFOP da Prestação (ide / CFOP)', grupo: 'ide', campo: 'CFOP' },
+  { id: 'ide|natOp', label: 'Natureza da Operação (ide / natOp)', grupo: 'ide', campo: 'natOp' },
+  { id: 'infCarga|proPred', label: 'Produto Predominante (infCarga / proPred)', grupo: 'infCarga', campo: 'proPred' },
+  { id: 'infCarga|xOutCat', label: 'Outras Características da Carga (infCarga / xOutCat)', grupo: 'infCarga', campo: 'xOutCat' },
+  { id: 'enderReme|xLgr', label: 'Logradouro do Remetente (enderReme / xLgr)', grupo: 'enderReme', campo: 'xLgr' },
+  { id: 'enderDest|xLgr', label: 'Logradouro do Destinatário (enderDest / xLgr)', grupo: 'enderDest', campo: 'xLgr' },
+  { id: 'enderDest|nro', label: 'Número do Endereço Destinatário (enderDest / nro)', grupo: 'enderDest', campo: 'nro' },
+  { id: 'enderDest|xBairro', label: 'Bairro do Destinatário (enderDest / xBairro)', grupo: 'enderDest', campo: 'xBairro' },
+  { id: 'CUSTOM', label: 'Outro Grupo / Campo XML do CT-e (Personalizado)', grupo: '', campo: '' }
+];
+
+interface ItemCorrecaoCce {
+  preset: string;
+  grupo_corrigido: string;
+  campo_corrigido: string;
+  valor_corrigido: string;
+  numero_item_alterado: string;
+}
+
 export default function DocumentoDrawer({ tipo, documentoId, onClose, onVerRoteiro }: DrawerProps) {
   const qc = useQueryClient();
   const [aba, setAba] = useState<'resumo' | 'eventos' | 'json'>('resumo');
@@ -57,8 +78,25 @@ export default function DocumentoDrawer({ tipo, documentoId, onClose, onVerRotei
   const [modalCondutor, setModalCondutor] = useState(false);
   const [modalDfe, setModalDfe] = useState(false);
   const [condutor, setCondutor] = useState({ nome: '', cpf: '' });
-  const [dfe, setDfe] = useState({ protocolo: '', codigo_municipio_carregamento: '', chave: '' });
-  const [corrigenda, setCorrigenda] = useState('');
+  const [dfe, setDfe] = useState({
+    protocolo: '',
+    codigo_municipio_carregamento: '',
+    nome_municipio_carregamento: '',
+    uf_carregamento: '',
+    codigo_municipio_descarregamento: '',
+    nome_municipio_descarregamento: '',
+    uf_descarregamento: '',
+    chave: ''
+  });
+  const [correcoesCce, setCorrecoesCce] = useState<ItemCorrecaoCce[]>([
+    {
+      preset: 'compl|xObs',
+      grupo_corrigido: 'compl',
+      campo_corrigido: 'xObs',
+      valor_corrigido: '',
+      numero_item_alterado: ''
+    }
+  ]);
   const [modalCorrecao, setModalCorrecao] = useState(false);
   const [enviando, setEnviando] = useState(false);
   const [erro, setErro] = useState('');
@@ -100,7 +138,17 @@ export default function DocumentoDrawer({ tipo, documentoId, onClose, onVerRotei
       setModalDfe(false);
       setModalCorrecao(false);
       setJustificativa('');
-      setCorrigenda('');
+      setCorrecoesCce([
+        {
+          preset: 'compl|xObs',
+          grupo_corrigido: 'compl',
+          campo_corrigido: 'xObs',
+          valor_corrigido: '',
+          numero_item_alterado: ''
+        }
+      ]);
+      qc.invalidateQueries({ queryKey: ['cargas'] });
+      qc.invalidateQueries({ queryKey: ['cargas-dashboard'] });
       if (d.status === 'REJEITADO') {
         const msgRej = `SEFAZ [${d.status_sefaz || 'REJEITADO'}]: ${d.mensagem_sefaz || 'Documento rejeitado pela SEFAZ.'}`;
         setErro(msgRej);
@@ -488,6 +536,37 @@ export default function DocumentoDrawer({ tipo, documentoId, onClose, onVerRotei
                   </button>
                 )}
 
+                {(doc.status === 'RASCUNHO' || doc.status === 'REJEITADO') && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      if (!window.confirm(`Deseja excluir este ${tipo} (${doc.status}) e liberar as NF-es vinculadas na Central de Cargas?`)) {
+                        return;
+                      }
+                      setEnviando(true);
+                      try {
+                        await api.delete(`/transporte/${tipo === 'CTE' ? 'ctes' : 'mdfes'}/${doc.id}`);
+                        qc.invalidateQueries({ queryKey: ['cargas'] });
+                        qc.invalidateQueries({ queryKey: ['cargas-dashboard'] });
+                        qc.invalidateQueries({ queryKey: ['ctes'] });
+                        qc.invalidateQueries({ queryKey: ['mdfes'] });
+                        qc.invalidateQueries({ queryKey: ['documentos-emitidos'] });
+                        alert(`${tipo} excluído e NF-es liberadas com sucesso!`);
+                        onClose();
+                      } catch (e: any) {
+                        alert(e.response?.data?.error || e.message || 'Erro ao excluir rascunho/rejeitado.');
+                      } finally {
+                        setEnviando(false);
+                      }
+                    }}
+                    disabled={enviando}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-red-200 dark:border-red-900 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 text-xs font-semibold disabled:opacity-50"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    Excluir e Liberar NF-es
+                  </button>
+                )}
+
                 {tipo === 'CTE' && doc.status === 'AUTORIZADO' && (
                   <>
                     <button
@@ -596,7 +675,19 @@ export default function DocumentoDrawer({ tipo, documentoId, onClose, onVerRotei
                       Incluir condutor
                     </button>
                     <button
-                      onClick={() => setModalDfe(true)}
+                      onClick={() => {
+                        setDfe({
+                          protocolo: doc.protocolo || '',
+                          codigo_municipio_carregamento: doc.codigo_municipio_carregamento || '',
+                          nome_municipio_carregamento: doc.municipio_carregamento || '',
+                          uf_carregamento: doc.uf_inicio || '',
+                          codigo_municipio_descarregamento: doc.codigo_municipio_descarregamento || '',
+                          nome_municipio_descarregamento: doc.municipio_descarregamento || '',
+                          uf_descarregamento: doc.uf_fim || '',
+                          chave: ''
+                        });
+                        setModalDfe(true);
+                      }}
                       className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-teal-600 hover:bg-teal-700 text-white text-xs font-semibold shadow-sm"
                     >
                       <PlusCircle className="w-3.5 h-3.5" />
@@ -662,34 +753,173 @@ export default function DocumentoDrawer({ tipo, documentoId, onClose, onVerRotei
         </div>
       )}
 
-      {/* Modal Carta de Correção */}
+      {/* Modal Carta de Correção Estruturada SEFAZ CT-e */}
       {modalCorrecao && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[60] flex items-center justify-center p-4">
-          <div className="bg-white dark:bg-slate-800 w-full max-w-md rounded-2xl p-6 shadow-xl border border-slate-200 dark:border-slate-700">
+          <div className="bg-white dark:bg-slate-800 w-full max-w-xl rounded-2xl p-6 shadow-xl border border-slate-200 dark:border-slate-700 max-h-[90vh] overflow-y-auto">
             <h3 className="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
               <FilePen className="w-5 h-5 text-teal-500" />
-              Carta de Correção Eletrônica
+              Carta de Correção Eletrônica (CC-e — CT-e 4.00)
             </h3>
-            <textarea
-              rows={5}
-              placeholder="Descreva a correção (mínimo 15 caracteres)"
-              value={corrigenda}
-              onChange={e => setCorrigenda(e.target.value)}
-              className="w-full mt-4 px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-sm text-slate-900 dark:text-white"
-            />
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+              Selecione o grupo/campo oficial do XML a retificar. Pelo Ajuste SINIEF 09/07, <strong>não é permitido</strong> alterar valores de frete/impostos, alíquota ICMS, CNPJ/CPF de partes ou data de emissão.
+            </p>
+
+            <div className="space-y-3 mt-4">
+              {correcoesCce.map((item, idx) => (
+                <div key={idx} className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-900/70 border border-slate-200 dark:border-slate-700 space-y-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                      Item #{idx + 1} da CC-e
+                    </span>
+                    {correcoesCce.length > 1 && (
+                      <button
+                        type="button"
+                        onClick={() => setCorrecoesCce(prev => prev.filter((_, i) => i !== idx))}
+                        className="text-xs text-red-600 hover:underline"
+                      >
+                        Remover
+                      </button>
+                    )}
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
+                      Campo do CT-e a Corrigir
+                    </label>
+                    <select
+                      value={item.preset}
+                      onChange={e => {
+                        const val = e.target.value;
+                        const found = PRESETS_CCE_CTE.find(p => p.id === val);
+                        setCorrecoesCce(prev =>
+                          prev.map((row, i) =>
+                            i === idx
+                              ? {
+                                  ...row,
+                                  preset: val,
+                                  grupo_corrigido: found && val !== 'CUSTOM' ? found.grupo : row.grupo_corrigido,
+                                  campo_corrigido: found && val !== 'CUSTOM' ? found.campo : row.campo_corrigido
+                                }
+                              : row
+                          )
+                        );
+                      }}
+                      className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-xs text-slate-900 dark:text-white"
+                    >
+                      {PRESETS_CCE_CTE.map(p => (
+                        <option key={p.id} value={p.id}>{p.label}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {item.preset === 'CUSTOM' && (
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                      <input
+                        type="text"
+                        placeholder="Grupo XML (ex: compl)"
+                        value={item.grupo_corrigido}
+                        onChange={e =>
+                          setCorrecoesCce(prev =>
+                            prev.map((row, i) => (i === idx ? { ...row, grupo_corrigido: e.target.value } : row))
+                          )
+                        }
+                        className="px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-xs font-mono text-slate-900 dark:text-white"
+                      />
+                      <input
+                        type="text"
+                        placeholder="Campo XML (ex: xObs)"
+                        value={item.campo_corrigido}
+                        onChange={e =>
+                          setCorrecoesCce(prev =>
+                            prev.map((row, i) => (i === idx ? { ...row, campo_corrigido: e.target.value } : row))
+                          )
+                        }
+                        className="px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-xs font-mono text-slate-900 dark:text-white"
+                      />
+                      <input
+                        type="number"
+                        min={1}
+                        placeholder="Nº Item (opcional)"
+                        value={item.numero_item_alterado}
+                        onChange={e =>
+                          setCorrecoesCce(prev =>
+                            prev.map((row, i) => (i === idx ? { ...row, numero_item_alterado: e.target.value } : row))
+                          )
+                        }
+                        className="px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-xs font-mono text-slate-900 dark:text-white"
+                      />
+                    </div>
+                  )}
+
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
+                      Novo Valor Corrigido ({item.grupo_corrigido || 'grupo'} / {item.campo_corrigido || 'campo'}) *
+                    </label>
+                    <textarea
+                      rows={item.campo_corrigido === 'xObs' ? 3 : 2}
+                      placeholder="Informe o novo conteúdo exato para este campo..."
+                      value={item.valor_corrigido}
+                      onChange={e =>
+                        setCorrecoesCce(prev =>
+                          prev.map((row, i) => (i === idx ? { ...row, valor_corrigido: e.target.value } : row))
+                        )
+                      }
+                      className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-xs text-slate-900 dark:text-white"
+                    />
+                  </div>
+                </div>
+              ))}
+
+              <button
+                type="button"
+                onClick={() =>
+                  setCorrecoesCce(prev => [
+                    ...prev,
+                    {
+                      preset: 'compl|xObs',
+                      grupo_corrigido: 'compl',
+                      campo_corrigido: 'xObs',
+                      valor_corrigido: '',
+                      numero_item_alterado: ''
+                    }
+                  ])
+                }
+                className="text-xs font-semibold text-teal-600 dark:text-teal-400 hover:underline inline-flex items-center gap-1"
+              >
+                <PlusCircle className="w-3.5 h-3.5" />
+                Adicionar outro campo nesta CC-e
+              </button>
+            </div>
+
             <div className="flex justify-end gap-2.5 pt-4 border-t border-slate-100 dark:border-slate-700 mt-4">
               <button onClick={() => setModalCorrecao(false)} className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-700 dark:text-slate-300 hover:bg-slate-100">
                 Voltar
               </button>
               <button
-                onClick={() => acao(
-                    () => api.post(`/transporte/ctes/${doc.id}/carta-correcao`, { correcao: corrigenda }),
-                    'Carta de Correção registrada!'
-                )}
-                disabled={enviando || corrigenda.trim().length < 15}
+                onClick={() =>
+                  acao(
+                    () =>
+                      api.post(`/transporte/ctes/${doc.id}/carta-correcao`, {
+                        correcoes: correcoesCce.map(c => ({
+                          grupo_corrigido: c.grupo_corrigido.trim(),
+                          campo_corrigido: c.campo_corrigido.trim(),
+                          valor_corrigido: c.valor_corrigido.trim(),
+                          ...(c.numero_item_alterado ? { numero_item_alterado: Number(c.numero_item_alterado) } : {})
+                        }))
+                      }),
+                    'Carta de Correção Eletrônica autorizada na SEFAZ!'
+                  )
+                }
+                disabled={
+                  enviando ||
+                  correcoesCce.some(
+                    c => !c.grupo_corrigido.trim() || !c.campo_corrigido.trim() || !c.valor_corrigido.trim()
+                  )
+                }
                 className="px-5 py-2 rounded-xl text-xs font-semibold text-white bg-teal-600 hover:bg-teal-700 disabled:opacity-50"
               >
-                {enviando ? 'Enviando...' : 'Emitir CC-e'}
+                {enviando ? 'Transmitindo CC-e...' : 'Emitir CC-e na SEFAZ'}
               </button>
             </div>
           </div>
@@ -737,54 +967,148 @@ export default function DocumentoDrawer({ tipo, documentoId, onClose, onVerRotei
         </div>
       )}
 
-      {/* Modal Incluir DF-e */}
+      {/* Modal Incluir DF-e em Trânsito (MDF-e 3.00) */}
       {modalDfe && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[60] flex items-center justify-center p-4">
-          <div className="bg-white dark:bg-slate-800 w-full max-w-md rounded-2xl p-6 shadow-xl border border-slate-200 dark:border-slate-700">
+          <div className="bg-white dark:bg-slate-800 w-full max-w-lg rounded-2xl p-6 shadow-xl border border-slate-200 dark:border-slate-700 max-h-[90vh] overflow-y-auto">
             <h3 className="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
               <PlusCircle className="w-5 h-5 text-teal-500" />
-              Incluir documento no manifesto
+              Incluir DF-e (NF-e ou CT-e) em Trânsito no MDF-e
             </h3>
-            <div className="space-y-3 mt-4">
-              <input
-                type="text" placeholder="Protocolo de autorização do MDF-e"
-                value={dfe.protocolo}
-                onChange={e => setDfe({ ...dfe, protocolo: e.target.value })}
-                className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-sm text-slate-900 dark:text-white font-mono"
-              />
-              <input
-                type="text" placeholder="Código IBGE do município de carregamento"
-                value={dfe.codigo_municipio_carregamento}
-                onChange={e => setDfe({ ...dfe, codigo_municipio_carregamento: e.target.value })}
-                className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-sm text-slate-900 dark:text-white font-mono"
-              />
-              <input
-                type="text" placeholder="Chave da NF-e (44 dígitos) ou do CT-e"
-                value={dfe.chave}
-                onChange={e => setDfe({ ...dfe, chave: e.target.value })}
-                className="w-full px-3.5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-sm text-slate-900 dark:text-white font-mono"
-              />
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+              Informe os municípios de carregamento e descarregamento separadamente e a chave de 44 dígitos (o sistema identifica automaticamente NF-e mod. 55 ou CT-e mod. 57).
+            </p>
+
+            <div className="space-y-3 mt-4 text-xs">
+              <div>
+                <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                  Protocolo de Autorização do MDF-e
+                </label>
+                <input
+                  type="text"
+                  placeholder="Protocolo SEFAZ (15 dígitos)"
+                  value={dfe.protocolo}
+                  onChange={e => setDfe({ ...dfe, protocolo: e.target.value })}
+                  className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white font-mono"
+                />
+              </div>
+
+              <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-700 space-y-2">
+                <p className="font-bold text-slate-700 dark:text-slate-200 uppercase tracking-wider text-[10px]">
+                  1. Local de Carregamento
+                </p>
+                <div className="grid grid-cols-1 sm:grid-cols-6 gap-2">
+                  <input
+                    type="text"
+                    placeholder="Município de Carregamento"
+                    value={dfe.nome_municipio_carregamento}
+                    onChange={e => setDfe({ ...dfe, nome_municipio_carregamento: e.target.value })}
+                    className="sm:col-span-3 px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white"
+                  />
+                  <input
+                    type="text"
+                    maxLength={2}
+                    placeholder="UF"
+                    value={dfe.uf_carregamento}
+                    onChange={e => setDfe({ ...dfe, uf_carregamento: e.target.value.toUpperCase() })}
+                    className="sm:col-span-1 px-2.5 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white uppercase text-center"
+                  />
+                  <input
+                    type="text"
+                    placeholder="IBGE (7 díg.)"
+                    value={dfe.codigo_municipio_carregamento}
+                    onChange={e => setDfe({ ...dfe, codigo_municipio_carregamento: e.target.value.replace(/\D/g, '').slice(0, 7) })}
+                    className="sm:col-span-2 px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white font-mono"
+                  />
+                </div>
+              </div>
+
+              <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-700 space-y-2">
+                <p className="font-bold text-slate-700 dark:text-slate-200 uppercase tracking-wider text-[10px]">
+                  2. Local de Descarregamento (Destino da Carga)
+                </p>
+                <div className="grid grid-cols-1 sm:grid-cols-6 gap-2">
+                  <input
+                    type="text"
+                    placeholder="Município de Descarga"
+                    value={dfe.nome_municipio_descarregamento}
+                    onChange={e => setDfe({ ...dfe, nome_municipio_descarregamento: e.target.value })}
+                    className="sm:col-span-3 px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white"
+                  />
+                  <input
+                    type="text"
+                    maxLength={2}
+                    placeholder="UF"
+                    value={dfe.uf_descarregamento}
+                    onChange={e => setDfe({ ...dfe, uf_descarregamento: e.target.value.toUpperCase() })}
+                    className="sm:col-span-1 px-2.5 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white uppercase text-center"
+                  />
+                  <input
+                    type="text"
+                    placeholder="IBGE (7 díg.)"
+                    value={dfe.codigo_municipio_descarregamento}
+                    onChange={e => setDfe({ ...dfe, codigo_municipio_descarregamento: e.target.value.replace(/\D/g, '').slice(0, 7) })}
+                    className="sm:col-span-2 px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white font-mono"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                  Chave de Acesso de 44 dígitos (NF-e ou CT-e) *
+                </label>
+                <input
+                  type="text"
+                  placeholder="44 dígitos numéricos da chave SEFAZ"
+                  value={dfe.chave}
+                  onChange={e => setDfe({ ...dfe, chave: e.target.value.replace(/\D/g, '').slice(0, 44) })}
+                  className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white font-mono"
+                />
+                {dfe.chave.length === 44 && (
+                  <p className="text-[11px] text-emerald-600 dark:text-emerald-400 mt-1 font-medium">
+                    Modelo detectado: {dfe.chave.slice(20, 22) === '57' || dfe.chave.slice(20, 22) === '67' ? 'CT-e (Modelo 57/67)' : 'NF-e (Modelo 55)'}
+                  </p>
+                )}
+              </div>
             </div>
+
             <div className="flex justify-end gap-2.5 pt-4 border-t border-slate-100 dark:border-slate-700 mt-4">
               <button onClick={() => setModalDfe(false)} className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-700 dark:text-slate-300 hover:bg-slate-100">
                 Voltar
               </button>
               <button
-                onClick={() => acao(
-                    () => api.post(`/transporte/mdfes/${doc.id}/incluir-dfe`, {
-                        protocolo: dfe.protocolo,
-                        codigo_municipio_carregamento: dfe.codigo_municipio_carregamento,
-                        documentos: [{
-                            chave_nfe: dfe.chave,
-                            codigo_municipio_descarregamento: dfe.codigo_municipio_carregamento
-                        }]
-                    }),
-                    'Documento incluído no MDF-e!'
-                )}
-                disabled={enviando || !dfe.protocolo || !dfe.chave}
+                onClick={() => {
+                  const chaveLimpa = dfe.chave.replace(/\D/g, '');
+                  const modelo = chaveLimpa.slice(20, 22);
+                  const ehCte = modelo === '57' || modelo === '67';
+                  acao(
+                    () =>
+                      api.post(`/transporte/mdfes/${doc.id}/incluir-dfe`, {
+                        protocolo: dfe.protocolo || undefined,
+                        codigo_municipio_carregamento: dfe.codigo_municipio_carregamento || undefined,
+                        nome_municipio_carregamento: dfe.nome_municipio_carregamento || undefined,
+                        uf_carregamento: dfe.uf_carregamento || undefined,
+                        documentos: [
+                          {
+                            ...(ehCte ? { chave_cte: chaveLimpa } : { chave_nfe: chaveLimpa }),
+                            codigo_municipio_descarregamento: dfe.codigo_municipio_descarregamento || undefined,
+                            nome_municipio_descarregamento: dfe.nome_municipio_descarregamento || undefined,
+                            uf_descarregamento: dfe.uf_descarregamento || undefined
+                          }
+                        ]
+                      }),
+                    'Documento fiscal incluído com sucesso no MDF-e em trânsito!'
+                  );
+                }}
+                disabled={
+                  enviando ||
+                  dfe.chave.replace(/\D/g, '').length !== 44 ||
+                  (!dfe.codigo_municipio_carregamento && !dfe.nome_municipio_carregamento) ||
+                  (!dfe.codigo_municipio_descarregamento && !dfe.nome_municipio_descarregamento)
+                }
                 className="px-5 py-2 rounded-xl text-xs font-semibold text-white bg-teal-600 hover:bg-teal-700 disabled:opacity-50"
               >
-                {enviando ? 'Incluindo...' : 'Incluir documento'}
+                {enviando ? 'Transmitindo Evento SEFAZ...' : 'Incluir DF-e na SEFAZ'}
               </button>
             </div>
           </div>

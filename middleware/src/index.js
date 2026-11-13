@@ -9,14 +9,12 @@ const path = require('path');
 
 async function startServer() {
     try {
-        // 1. Inicia o servidor HTTP IMEDIATAMENTE na porta 3200 (0.0.0.0) para garantir que o Coolify/Nginx não retornem 502 Bad Gateway no boot
+        // 1. Inicia o servidor HTTP IMEDIATAMENTE na porta configurada para que Coolify/Nginx não retornem 502 no boot
         const server = app.listen(config.server.port, '0.0.0.0', () => {
-            logger.info(`[App] Dashboard Middleware rodando na porta ${config.server.port} [${config.server.nodeEnv}]`);
+            logger.info(`[App] Coliseu Transporte Middleware rodando na porta ${config.server.port} [${config.server.nodeEnv}]`);
         });
 
-        // Iniciar o Scheduler de Disparos Automáticos
-        const scheduler = require('./utils/scheduler');
-        scheduler.start();
+        const transporteWorker = require('./utils/transporteWorker');
 
         // 2. Inicialização assíncrona do banco e migrações
         const dbOk = await db.checkConnection();
@@ -28,24 +26,45 @@ async function startServer() {
                 const { initSystemKeyring } = require('./utils/cryptoVault');
                 await initSystemKeyring(db);
 
-                // Define o ambiente no banco (usado por seeds condicionais como a frota de teste)
+                // Define o ambiente no banco (usado por seeds condicionais estritos de demo)
                 const ambiente = process.env.APP_AMBIENTE || process.env.NODE_ENV || 'production';
                 await db.query(`SELECT set_config('app.ambiente', $1, false)`, [ambiente]);
                 logger.info(`[App] Ambiente de banco definido como: ${ambiente}`);
 
-                logger.info('[App] Sincronizando tabelas do banco de dados (schema.sql)...');
+                logger.info('[App] Sincronizando estrutura base (schema.sql)...');
                 const schemaPath = path.join(__dirname, 'db', 'schema.sql');
                 const schemaSql = fs.readFileSync(schemaPath, 'utf8');
                 await db.query(schemaSql);
 
-                await db.runStartupMaintenance();
-
-                logger.info('[App] Executando migração de permissões...');
                 await db.query(`
                     ALTER TABLE dash_usuarios
                     ADD COLUMN IF NOT EXISTS permissions JSONB DEFAULT NULL,
                     ADD COLUMN IF NOT EXISTS precisa_alterar_senha BOOLEAN NOT NULL DEFAULT false;
                 `);
+
+                // --- Migrações Automáticas ANTES da manutenção complementar ---
+                try {
+                    const migrationsDir = path.join(__dirname, 'db', 'migrations');
+                    if (fs.existsSync(migrationsDir)) {
+                        const files = fs.readdirSync(migrationsDir)
+                            .filter(f => f.endsWith('.sql'))
+                            .sort();
+                        for (const file of files) {
+                            try {
+                                logger.info(`[App] Aplicando migração ${file}...`);
+                                const migrationSql = fs.readFileSync(path.join(migrationsDir, file), 'utf8');
+                                await db.query(migrationSql);
+                                logger.info(`[App] Migração ${file} aplicada com sucesso.`);
+                            } catch (err) {
+                                logger.warn(`[App] Aviso na migração ${file}:`, err.message);
+                            }
+                        }
+                    }
+                } catch (migErr) {
+                    logger.warn('[App] Erro na aplicação de migrações automáticas:', migErr.message);
+                }
+
+                await db.runStartupMaintenance();
 
                 // Bootstrap opcional e seguro de administrador inicial (sem sobrescrever credenciais existentes)
                 const initialAdminEmail = (process.env.INITIAL_ADMIN_EMAIL || '').trim().toLowerCase();
@@ -61,49 +80,9 @@ async function startServer() {
                         ['00000000-0000-0000-0000-000000000000', initialAdminEmail, 'Admin Inicial', 'master', hash]
                     );
                 }
-                logger.info('[App] Tabelas inicializadas com sucesso.');
 
-                // --- Migrações Automáticas ---
-                try {
-                    const migrationsDir = path.join(__dirname, 'db', 'migrations');
-                    if (fs.existsSync(migrationsDir)) {
-                        const files = fs.readdirSync(migrationsDir)
-                            .filter(f => f.endsWith('.sql'))
-                            .sort();
-                        for (const file of files) {
-                            try {
-                                logger.info(`[App] Aplicando migração ${file}...`);
-                                const migrationSql = fs.readFileSync(path.join(migrationsDir, file), 'utf8');
-                                await db.query(migrationSql);
-                                logger.info(`[App] Migração ${file} aplicada com sucesso.`);
-                            } catch (err) {
-                                logger.warn(`[App] Aviso na migração ${file} para main:`, err.message);
-                            }
-                        }
-                    }
-                } catch (migErr) {
-                    logger.warn('[App] Erro na aplicação de migrações automáticas:', migErr.message);
-                }
-
-                // Auto-reconciliação e criação do lote de testes SEFAZ/MS em background no boot (estritamente em homologação)
-                setImmediate(async () => {
-                    try {
-                        const TransporteService = require('./services/transporteService');
-                        const { rows: tenantsHomolog } = await db.query(
-                            `SELECT DISTINCT tenant_id
-                             FROM dash_emitentes
-                             WHERE tenant_id IS NOT NULL
-                               AND ativo = true
-                               AND COALESCE(focus_ambiente, 'homologacao') <> 'producao'`
-                        );
-                        for (const row of tenantsHomolog) {
-                            await TransporteService.reconciliarEGerarTestesHomologacaoMs(row.tenant_id);
-                        }
-                    } catch (reconcileErr) {
-                        logger.warn('[App] Aviso na auto-reconciliação inicial de CT-es:', reconcileErr.message);
-                    }
-                });
-
+                logger.info('[App] Banco de dados pronto para operação.');
+                transporteWorker.start();
             } catch (dbErr) {
                 logger.error('[App] Erro ao sincronizar as tabelas do banco:', dbErr);
             }
@@ -111,10 +90,8 @@ async function startServer() {
 
         const shutdown = () => {
             logger.info('[App] Recebido sinal de parada. Fechando servidor...');
-            // Parar o Scheduler
-            const scheduler = require('./utils/scheduler');
-            scheduler.stop();
-            
+            transporteWorker.stop();
+
             server.close(async () => {
                 logger.info('[App] Servidor HTTP fechado.');
                 await db.pool.end();

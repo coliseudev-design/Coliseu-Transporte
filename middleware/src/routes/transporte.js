@@ -14,7 +14,6 @@ const {
     requireActionPermission,
     invalidateUserAuthCache,
 } = require('../middleware/auth');
-const EmailService = require('../services/emailService');
 const {
     decryptSecret,
     maskSecret,
@@ -1220,12 +1219,6 @@ router.get('/documentos', async (req, res) => {
             ORDER BY data_emissao DESC NULLS LAST, id DESC
             LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
         params.push(parseInt(limit, 10), parseInt(offset, 10));
-
-        // Garante que em homologação o lote inicial de testes SEFAZ/MS seja criado e os documentos presos em nCT=1 sejam destravados (uma única vez por tenant)
-        await Promise.race([
-            TransporteService.reconciliarEGerarTestesHomologacaoMs(tenantId),
-            new Promise((r) => setTimeout(r, 25000)),
-        ]);
 
         let { rows } = await db.query(finalSql, params);
 
@@ -3259,9 +3252,27 @@ router.post('/emitentes', requireAdmin, async (req, res) => {
                 ? String(b.seguro_averbacao_padrao || '').trim().slice(0, 60) || null
                 : existingEmit.seguro_averbacao_padrao || null;
         const enviarDacteAutomatico =
-            b.enviar_dacte_automatico !== undefined
+            b.enviar_dacteAutomatico !== undefined
+                ? Boolean(b.enviar_dacteAutomatico)
+                : b.enviar_dacte_automatico !== undefined
                 ? Boolean(b.enviar_dacte_automatico)
                 : Boolean(existingEmit.enviar_dacte_automatico);
+        const ultimoNumeroCte =
+            b.ultimo_numero_cte !== undefined
+                ? Math.max(0, parseInt(b.ultimo_numero_cte, 10) || 0)
+                : Math.max(0, parseInt(existingEmit.ultimo_numero_cte ?? 0, 10) || 0);
+        const ultimoNumeroMdfe =
+            b.ultimo_numero_mdfe !== undefined
+                ? Math.max(0, parseInt(b.ultimo_numero_mdfe, 10) || 0)
+                : Math.max(0, parseInt(existingEmit.ultimo_numero_mdfe ?? 0, 10) || 0);
+        const ciotApiUrlProducao =
+            b.ciot_api_url_producao !== undefined
+                ? String(b.ciot_api_url_producao || '').trim().slice(0, 300) || null
+                : existingEmit.ciot_api_url_producao || null;
+        const ciotApiUrlHomologacao =
+            b.ciot_api_url_homologacao !== undefined
+                ? String(b.ciot_api_url_homologacao || '').trim().slice(0, 300) || null
+                : existingEmit.ciot_api_url_homologacao || null;
 
         let saved = null;
 
@@ -3308,6 +3319,10 @@ router.post('/emitentes', requireAdmin, async (req, res) => {
                     seguro_numero_apolice = $39,
                     seguro_averbacao_padrao = $40,
                     enviar_dacte_automatico = $41,
+                    ultimo_numero_cte = $42,
+                    ultimo_numero_mdfe = $43,
+                    ciot_api_url_producao = $44,
+                    ciot_api_url_homologacao = $45,
                     updated_at = NOW()
                  WHERE id = $35 AND tenant_id = $36
                  RETURNING *`,
@@ -3353,6 +3368,10 @@ router.post('/emitentes', requireAdmin, async (req, res) => {
                     seguroNumeroApolice,
                     seguroAverbacaoPadrao,
                     enviarDacteAutomatico,
+                    ultimoNumeroCte,
+                    ultimoNumeroMdfe,
+                    ciotApiUrlProducao,
+                    ciotApiUrlHomologacao,
                 ]
             );
             saved = rows[0];
@@ -3367,7 +3386,8 @@ router.post('/emitentes', requireAdmin, async (req, res) => {
                     serie_cte, serie_mdfe, cfop_padrao_cte, natureza_padrao_cte, aliquota_icms_padrao,
                     perfil_operacional, mdfe_tipo_emitente_padrao,
                     ciot_provedor, ciot_ambiente, ciot_usuario, ciot_cnpj_ipef, ciot_integrador_token, ciot_senha,
-                    seguro_seguradora_nome, seguro_seguradora_cnpj, seguro_numero_apolice, seguro_averbacao_padrao, enviar_dacte_automatico
+                    seguro_seguradora_nome, seguro_seguradora_cnpj, seguro_numero_apolice, seguro_averbacao_padrao, enviar_dacte_automatico,
+                    ultimo_numero_cte, ultimo_numero_mdfe, ciot_api_url_producao, ciot_api_url_homologacao
                  ) VALUES (
                     $1, $2, $3, $4, $5, $6,
                     $7, $8,
@@ -3377,7 +3397,8 @@ router.post('/emitentes', requireAdmin, async (req, res) => {
                     $23, $24, $25, $26, $27,
                     $28, $29,
                     $30, $31, $32, $33, $34, $35,
-                    $36, $37, $38, $39, $40
+                    $36, $37, $38, $39, $40,
+                    $41, $42, $43, $44
                  )
                  ON CONFLICT (tenant_id, cnpj) DO UPDATE SET
                     razao_social = EXCLUDED.razao_social,
@@ -3418,6 +3439,10 @@ router.post('/emitentes', requireAdmin, async (req, res) => {
                     seguro_numero_apolice = COALESCE(EXCLUDED.seguro_numero_apolice, dash_emitentes.seguro_numero_apolice),
                     seguro_averbacao_padrao = COALESCE(EXCLUDED.seguro_averbacao_padrao, dash_emitentes.seguro_averbacao_padrao),
                     enviar_dacte_automatico = EXCLUDED.enviar_dacte_automatico,
+                    ultimo_numero_cte = EXCLUDED.ultimo_numero_cte,
+                    ultimo_numero_mdfe = EXCLUDED.ultimo_numero_mdfe,
+                    ciot_api_url_producao = COALESCE(EXCLUDED.ciot_api_url_producao, dash_emitentes.ciot_api_url_producao),
+                    ciot_api_url_homologacao = COALESCE(EXCLUDED.ciot_api_url_homologacao, dash_emitentes.ciot_api_url_homologacao),
                     updated_at = NOW()
                  RETURNING *`,
                 [
@@ -3461,10 +3486,17 @@ router.post('/emitentes', requireAdmin, async (req, res) => {
                     seguroNumeroApolice,
                     seguroAverbacaoPadrao,
                     enviarDacteAutomatico,
+                    ultimoNumeroCte,
+                    ultimoNumeroMdfe,
+                    ciotApiUrlProducao,
+                    ciotApiUrlHomologacao,
                 ]
             );
             saved = rows[0];
         }
+
+        // Semeia regras fiscais iniciais da UF da empresa (Simples SN vs Normal CST 00) sem sobrescrever regras existentes
+        await TransporteService.semearRegrasFiscaisIniciaisEmitente(tenantId, saved).catch(() => {});
 
         // Sincronizar de volta com dash_integracoes_config para manter a aba Fiscal em Configurações atualizada
         await db.query(
@@ -5730,6 +5762,15 @@ router.post('/certificados', requireActionPermission('permitir_gerenciar_certifi
         }
 
         const rawPfxBuffer = arquivo_base64 ? Buffer.from(arquivo_base64, 'base64') : Buffer.alloc(0);
+        const plainSenha = decryptSecret(encryptedSenha);
+        if (rawPfxBuffer.length > 0) {
+            try {
+                TransporteService.validarArquivoESenhaPfx(rawPfxBuffer, plainSenha);
+            } catch (pfxErr) {
+                return res.status(400).json({ error: pfxErr.message });
+            }
+        }
+
         const encryptedPfx = rawPfxBuffer.length > 0 ? encryptBuffer(rawPfxBuffer) : rawPfxBuffer;
         const dataVenc = valido_ate ? new Date(valido_ate) : new Date(Date.now() + 365 * 24 * 3600 * 1000);
         const diffDias = Math.ceil((dataVenc.getTime() - Date.now()) / (1000 * 3600 * 24));
@@ -5752,6 +5793,7 @@ router.post('/certificados', requireActionPermission('permitir_gerenciar_certifi
             [tenantId, emitente_id, nome_arquivo, encryptedPfx, encryptedSenha, dataVenc, diffDias]
         );
 
+        let certSaved = rows[0];
         let focusSync = null;
         if (sincronizar_focus !== false) {
             await TransporteService.autoHidratarEmitentePeloCertificado(tenantId);
@@ -5767,13 +5809,19 @@ router.post('/certificados', requireActionPermission('permitir_gerenciar_certifi
                         incluirCertificado: true,
                         registrarWebhooks: true,
                     });
+                    const certReload = await db.query(
+                        `SELECT id, emitente_id, nome_arquivo, valido_ate, dias_para_vencer, status, focus_sincronizado
+                         FROM dash_certificados WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
+                        [certSaved.id, tenantId]
+                    );
+                    if (certReload.rows[0]) certSaved = certReload.rows[0];
                 } catch (syncErr) {
                     focusSync = { success: false, erro: syncErr.message };
                 }
             }
         }
 
-        return res.status(201).json({ success: true, data: rows[0], focus_sync: focusSync });
+        return res.status(201).json({ success: true, data: certSaved, focus_sync: focusSync });
     } catch (err) {
         return sendSafeError(res, err);
     }
@@ -5946,13 +5994,70 @@ router.post('/ctes/:id/validar', async (req, res) => {
 });
 
 /**
- * Carta de Correção Eletrônica (CC-e) do CT-e autorizado.
+ * Exclui rascunho ou CT-e rejeitado (não autorizado na SEFAZ), liberando as NF-es para reemissão.
+ */
+router.delete('/ctes/:id', requireActionPermission('permitir_emitir_cte'), async (req, res) => {
+    const tenantId = req.tenant.id;
+    const cteId = parseInt(req.params.id, 10);
+    try {
+        const { rows } = await db.query(
+            `SELECT id, status FROM dash_ctes WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
+            [cteId, tenantId]
+        );
+        if (rows.length === 0) return res.status(404).json({ error: 'CT-e não encontrado.' });
+        const st = String(rows[0].status || '').toUpperCase();
+        if (!['RASCUNHO', 'REJEITADO'].includes(st)) {
+            return res.status(400).json({
+                error: `Não é permitido excluir CT-e com status ${st}. Utilize o Cancelamento SEFAZ para documentos autorizados.`,
+            });
+        }
+        const cargasLiberadas = await TransporteService.liberarCargasDoDocumento(tenantId, 'CTE', cteId);
+        await db.query(`DELETE FROM dash_cte_cargas WHERE cte_id = $1 AND tenant_id = $2`, [cteId, tenantId]);
+        await db.query(`DELETE FROM dash_ctes WHERE id = $1 AND tenant_id = $2`, [cteId, tenantId]);
+        return res.json({ success: true, cargas_liberadas: cargasLiberadas });
+    } catch (err) {
+        return sendSafeError(res, err);
+    }
+});
+
+/**
+ * Exclui rascunho ou MDF-e rejeitado (não autorizado na SEFAZ), liberando as NF-es para reemissão.
+ */
+router.delete('/mdfes/:id', requireActionPermission('permitir_emitir_mdfe'), async (req, res) => {
+    const tenantId = req.tenant.id;
+    const mdfeId = parseInt(req.params.id, 10);
+    try {
+        const { rows } = await db.query(
+            `SELECT id, status FROM dash_mdfes WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
+            [mdfeId, tenantId]
+        );
+        if (rows.length === 0) return res.status(404).json({ error: 'MDF-e não encontrado.' });
+        const st = String(rows[0].status || '').toUpperCase();
+        if (!['RASCUNHO', 'REJEITADO'].includes(st)) {
+            return res.status(400).json({
+                error: `Não é permitido excluir MDF-e com status ${st}. Utilize o Cancelamento ou Encerramento SEFAZ.`,
+            });
+        }
+        const cargasLiberadas = await TransporteService.liberarCargasDoDocumento(tenantId, 'MDFE', mdfeId);
+        await db.query(`DELETE FROM dash_mdfe_documentos WHERE mdfe_id = $1 AND tenant_id = $2`, [mdfeId, tenantId]);
+        await db.query(`DELETE FROM dash_mdfes WHERE id = $1 AND tenant_id = $2`, [mdfeId, tenantId]);
+        return res.json({ success: true, cargas_liberadas: cargasLiberadas });
+    } catch (err) {
+        return sendSafeError(res, err);
+    }
+});
+
+/**
+ * Carta de Correção Eletrônica (CC-e) estruturada do CT-e autorizado.
  */
 router.post('/ctes/:id/carta-correcao', requireActionPermission('permitir_emitir_cte'), async (req, res) => {
     const tenantId = req.tenant.id;
-    const { correcao } = req.body || {};
     try {
-        const result = await TransporteService.cartaCorrecaoCte(tenantId, parseInt(req.params.id, 10), correcao);
+        const result = await TransporteService.cartaCorrecaoCte(
+            tenantId,
+            parseInt(req.params.id, 10),
+            req.body || {}
+        );
         return res.json(result);
     } catch (err) {
         return res.status(400).json({ error: err.message });
@@ -5978,12 +6083,20 @@ router.post('/mdfes/:id/incluir-condutor', requireActionPermission('permitir_emi
  */
 router.post('/mdfes/:id/incluir-dfe', requireActionPermission('permitir_emitir_mdfe'), async (req, res) => {
     const tenantId = req.tenant.id;
-    const { protocolo, codigo_municipio_carregamento, documentos } = req.body || {};
+    const {
+        protocolo,
+        codigo_municipio_carregamento,
+        nome_municipio_carregamento,
+        uf_carregamento,
+        documentos,
+    } = req.body || {};
     try {
         const result = await TransporteService.incluirDfe(tenantId, parseInt(req.params.id, 10), {
             protocolo,
             codigo_municipio_carregamento,
-            documentos
+            nome_municipio_carregamento,
+            uf_carregamento,
+            documentos,
         });
         return res.json(result);
     } catch (err) {

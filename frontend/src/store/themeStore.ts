@@ -16,7 +16,7 @@ export const useThemeStore = create<ThemeState>((set, get) => ({
     get().initTheme()
   },
   initTheme: () => {
-    const savedTheme = (localStorage.getItem('coliseu_theme') || localStorage.getItem('nexus_theme')) as Theme | null
+    const savedTheme = localStorage.getItem('coliseu_theme') as Theme | null
     const theme = savedTheme || get().theme
     
     if (theme === 'system') {

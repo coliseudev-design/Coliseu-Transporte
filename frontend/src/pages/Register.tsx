@@ -32,14 +32,14 @@ export default function Register() {
         <div className="text-center mb-6 sm:mb-8">
           <div className="inline-flex items-center justify-center mb-4">
             <img
-              src="/nexus-logo.png"
+              src="/assets/logo-coliseu-transporte.svg"
               alt="Coliseu Transporte"
               className="h-14 sm:h-16 w-auto object-contain"
             />
           </div>
           <h1 className="font-heading text-xl sm:text-2xl font-semibold text-white">Criar Conta</h1>
           <p className="text-white/60 text-sm mt-1">
-            Cadastre-se para acessar o Dashboard
+            Cadastre-se para acessar o Coliseu Transporte
           </p>
         </div>
 

@@ -111,13 +111,8 @@ export const DEFAULT_ACOES = [
   },
   {
     key: 'permitir_ver_ficha_cliente',
-    label: 'Permitir Visualizar Ficha Completa de Clientes',
-    desc: 'Se desativado, restringe a abertura de detalhes cadastrais na tela de Clientes.'
-  },
-  {
-    key: 'permitir_ver_titulos_cliente',
-    label: 'Permitir Visualizar Dados Financeiros do Cliente',
-    desc: 'Se desativado, oculta informações financeiras e títulos na ficha do cliente.'
+    label: 'Permitir Visualizar Ficha Logística 360° de Clientes',
+    desc: 'Se desativado, restringe a abertura do histórico de cargas, CT-es e entregas na tela de Clientes.'
   }
 ]
 

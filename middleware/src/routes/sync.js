@@ -1094,25 +1094,6 @@ router.post('/confirm-titulo-link', async (req, res) => {
 });
 
 /**
- * GET /api/sync/sync-cora
- * Dispara sincronização de boletos quitados no Banco Cora para a fila pending_payments.
- */
-router.get('/sync-cora', async (req, res) => {
-    const scope = resolveAuthenticatedTenant(req);
-    if (!scope || scope.allowAllTenants) {
-        return res.status(400).json({ error: 'Tenant específico obrigatório.' });
-    }
-    const { tenantId } = scope;
-    try {
-        const CoraService = require('../services/CoraService');
-        const result = await CoraService.sincronizarFaturasCora(tenantId);
-        return res.json({ success: true, tenantId, ...result });
-    } catch (e) {
-        return res.status(500).json({ error: e.message });
-    }
-});
-
-/**
  * GET /api/sync/pending-payment-check
  * Consulta o status de quitações na fila pending_payments (parametrizado e isolado por tenant).
  */

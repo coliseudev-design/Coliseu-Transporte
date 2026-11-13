@@ -32,7 +32,7 @@ export function BranchProvider({ children }: { children: ReactNode }) {
 
   // Restaurar seleção do localStorage
   const [selectedBranch, setSelectedBranchState] = useState<number | 'todas'>(() => {
-    const stored = localStorage.getItem('coliseu:branch') || localStorage.getItem('nexus:branch')
+    const stored = localStorage.getItem('coliseu:branch')
     if (stored === 'todas' || stored === null) return 'todas'
     const num = parseInt(stored, 10)
     return isNaN(num) ? 'todas' : num

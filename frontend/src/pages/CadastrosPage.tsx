@@ -1,13 +1,10 @@
 import { useState, useEffect } from 'react'
-import { useSearchParams, useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom'
 import ModalCadastroDepartamentos from '../components/cadastros/ModalCadastroDepartamentos'
-import ModalCadastroCentroCustos from '../components/cadastros/ModalCadastroCentroCustos'
 import ModalCadastroRegioes from '../components/cadastros/ModalCadastroRegioes'
-import ModalCadastroFormaPagamento from '../components/cadastros/ModalCadastroFormaPagamento'
-import ModalCadastroEspeciePagamento from '../components/cadastros/ModalCadastroEspeciePagamento'
 
 interface Props {
-  type: 'departamentos' | 'centro-custos' | 'regioes' | 'formas-pagamento' | 'especies-pagamento'
+  type: 'departamentos' | 'regioes'
 }
 
 export default function CadastrosPage({ type }: Props) {
@@ -29,26 +26,9 @@ export default function CadastrosPage({ type }: Props) {
         onClose={handleClose}
       />
 
-      <ModalCadastroCentroCustos
-        isOpen={activeModal === 'centro-custos'}
-        onClose={handleClose}
-      />
-
       <ModalCadastroRegioes
         isOpen={activeModal === 'regioes'}
         onClose={handleClose}
-      />
-
-      <ModalCadastroFormaPagamento
-        isOpen={activeModal === 'formas-pagamento'}
-        onClose={handleClose}
-        onSwitchToEspecie={() => setActiveModal('especies-pagamento')}
-      />
-
-      <ModalCadastroEspeciePagamento
-        isOpen={activeModal === 'especies-pagamento'}
-        onClose={handleClose}
-        onSwitchToForma={() => setActiveModal('formas-pagamento')}
       />
     </div>
   )

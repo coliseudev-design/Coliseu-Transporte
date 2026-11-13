@@ -47,6 +47,17 @@ export default function MdfesPage() {
     resultados: any[];
   } | null>(null);
 
+  const { data: emitentesResp } = useQuery({
+    queryKey: ['empresa-emitente'],
+    queryFn: async () => (await api.get('/transporte/emitentes')).data
+  });
+  const emitenteAtivo = emitentesResp?.data?.[0];
+  const exibirGeradorHomologacaoMs = Boolean(
+    emitenteAtivo &&
+    String(emitenteAtivo.focus_ambiente || 'homologacao').toLowerCase() !== 'producao' &&
+    String(emitenteAtivo.uf || '').toUpperCase() === 'MS'
+  );
+
   const { data, isLoading, refetch } = useQuery({
     queryKey: ['mdfes'],
     queryFn: async () => {
@@ -159,16 +170,18 @@ export default function MdfesPage() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2 shrink-0">
-          <button
-            type="button"
-            onClick={handleGerarMdfesTesteHomologacao}
-            disabled={gerandoTestes}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-teal-600 hover:bg-teal-700 text-white shadow-sm transition-colors disabled:opacity-60"
-            title="Emite 2 MDF-es 3.00 em homologação na SEFAZ/MS (Interno MS encerrado + Interestadual MS → SP autorizado)"
-          >
-            {gerandoTestes ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
-            {gerandoTestes ? 'Emitindo MDF-es SEFAZ/MS...' : 'Gerar MDF-es de Teste (Homologação)'}
-          </button>
+          {exibirGeradorHomologacaoMs && (
+            <button
+              type="button"
+              onClick={handleGerarMdfesTesteHomologacao}
+              disabled={gerandoTestes}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-teal-600 hover:bg-teal-700 text-white shadow-sm transition-colors disabled:opacity-60"
+              title="Emite 2 MDF-es 3.00 em homologação na SEFAZ/MS (Interno MS encerrado + Interestadual MS → SP autorizado)"
+            >
+              {gerandoTestes ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
+              {gerandoTestes ? 'Emitindo MDF-es SEFAZ/MS...' : 'Gerar MDF-es de Teste (Homologação)'}
+            </button>
+          )}
 
           <button
             type="button"
