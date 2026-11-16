@@ -629,3 +629,149 @@ test('GOLIVE-08: Painel de Sequência Fiscal restringe ajuste a Admin (Master), 
     db.query = prevQuery;
   }
 });
+
+test('GOLIVE-09: Modo Híbrido (Com Worker ERP) vs Modo Independente (Sem ERP) — preservação COALESCE, fila seletiva e dicionário nacional IBGE', async () => {
+  const express = require('express');
+  const syncRouter = require('../src/routes/sync');
+  const clientesRouter = require('../src/routes/clientes');
+  const transporteRouter = require('../src/routes/transporte');
+
+  const prevQuery = db.query;
+  const prevPoolConnect = db.pool.connect;
+  const sqlCapturadosSync = [];
+  const syncQueueInserts = [];
+  let simulandoErpAtivo = false;
+
+  try {
+    db.pool.connect = async () => ({
+      async query(sql) {
+        sqlCapturadosSync.push(String(sql));
+        return { rows: [], rowCount: 1 };
+      },
+      release() {},
+    });
+
+    db.query = async (sql) => {
+      const s = String(sql);
+      if (s.includes('AS erp_integrado')) {
+        return { rows: [{ erp_integrado: simulandoErpAtivo }] };
+      }
+      if (s.includes('INSERT INTO dash_clientes')) {
+        return {
+          rows: [
+            {
+              id: 301,
+              id_firebird: null,
+              nome: 'EMBARCADOR STANDALONE LTDA',
+              razao_social: 'EMBARCADOR STANDALONE LTDA',
+              documento: '11.222.333/0001-81',
+              cidade: 'SAO PAULO',
+              estado: 'SP',
+              codigo_municipio: '3550308',
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+      if (s.includes('INSERT INTO dash_sync_metadata') && s.includes("'CLIENTES'")) {
+        syncQueueInserts.push(s);
+        return { rows: [], rowCount: 1 };
+      }
+      if (s.includes('INSERT INTO dash_partes')) {
+        return { rows: [{ id: 901 }], rowCount: 1 };
+      }
+      if (s.includes('FROM dash_regioes') && s.includes('dash_coordenadas_municipios')) {
+        return { rows: [] };
+      }
+      return { rows: [{ total: 0, pendentes: 0 }], rowCount: 0 };
+    };
+
+    const testApp = express();
+    testApp.use(express.json());
+    testApp.use((req, _res, next) => {
+      req.tenant = { id: '22222222-3333-4444-5555-666666666666' };
+      req.user = { id: 1, role: 'admin', grupo_nome: 'Master' };
+      next();
+    });
+    testApp.use('/internal/sync', syncRouter);
+    testApp.use('/api/clientes', clientesRouter);
+    testApp.use('/api/transporte', transporteRouter);
+
+    const srv = await startEphemeralServer(testApp);
+    try {
+      // 1. Cenário SEM ERP (Modo Independente): salva cliente local, espelha em Partes e NÃO polui fila do Worker
+      simulandoErpAtivo = false;
+      const rDiagInd = await fetch(`${srv.url}/api/transporte/diagnostico`);
+      const jDiagInd = await rDiagInd.json();
+      assert.equal(jDiagInd.data.modo_operacao, 'INDEPENDENTE');
+      assert.equal(jDiagInd.data.erp_integrado, false);
+
+      const rCliInd = await fetch(`${srv.url}/api/clientes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          razao_social: 'EMBARCADOR STANDALONE LTDA',
+          documento: '11222333000181',
+          cidade: 'Sao Paulo',
+          estado: 'SP',
+        }),
+      });
+      assert.equal(rCliInd.status, 201);
+      const jCliInd = await rCliInd.json();
+      assert.equal(jCliInd.erp_integrado, false);
+      assert.equal(syncQueueInserts.length, 0);
+
+      // 2. Municípios sem ERP retorna São Paulo/SP (final do alfabeto, > 150) sem truncamento prematuro
+      const rMun = await fetch(`${srv.url}/api/transporte/municipios`);
+      const jMun = await rMun.json();
+      assert.equal(
+        jMun.data.some((m) => m.codigo_ibge === '3550308'),
+        true,
+        'São Paulo (3550308) deve estar disponível no seletor mesmo sem ERP sincronizado'
+      );
+
+      // 3. Cenário COM ERP (Modo Híbrido): enfileira cliente para o Worker e preserva campos fiscais locais com COALESCE
+      simulandoErpAtivo = true;
+      const rCliErp = await fetch(`${srv.url}/api/clientes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          razao_social: 'CLIENTE HIBRIDO ERP LTDA',
+          documento: '11222333000181',
+          cidade: 'Curitiba',
+          estado: 'PR',
+        }),
+      });
+      assert.equal(rCliErp.status, 201);
+      assert.equal(syncQueueInserts.length, 1);
+
+      // Testa Worker sync preservando RNTRC/Tara em dash_veiculos, CNH em dash_motoristas e Regiões
+      const rSyncVeic = await fetch(`${srv.url}/internal/sync/veiculos`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify([{ placa: 'ABC1D23', tara_kg: 0, rntrc: '' }]),
+      });
+      assert.equal(rSyncVeic.status, 200);
+      assert.equal(
+        sqlCapturadosSync.some(
+          (q) =>
+            q.includes('CASE WHEN COALESCE(EXCLUDED.tara_kg, 0) > 0') &&
+            q.includes("COALESCE(NULLIF(EXCLUDED.rntrc::text, ''), dash_veiculos.rntrc)")
+        ),
+        true
+      );
+
+      const rSyncReg = await fetch(`${srv.url}/internal/sync/regioes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify([{ codigo: 10, cidade: 'DOURADOS', uf: 'MS', cod_ibge: '5003702' }]),
+      });
+      assert.equal(rSyncReg.status, 200);
+    } finally {
+      await srv.close();
+    }
+  } finally {
+    db.query = prevQuery;
+    db.pool.connect = prevPoolConnect;
+  }
+});

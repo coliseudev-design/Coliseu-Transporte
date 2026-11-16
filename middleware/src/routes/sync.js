@@ -425,8 +425,10 @@ function resolveAuthenticatedTenant(req) {
 
 const TABELAS_MAP = {
     'dash_clientes': [
-        'id_firebird', 'nome', 'razao_social', 'nome_fantasia', 'documento', 'email', 'email_financeiro',
-        'telefone', 'celular_secundario', 'cidade', 'estado', 'classificacao', 'data_cadastro', 'ativo',
+        'id_firebird', 'nome', 'razao_social', 'nome_fantasia', 'documento', 'inscricao_estadual', 'indicador_ie',
+        'email', 'email_financeiro', 'telefone', 'celular_secundario', 'cidade', 'estado',
+        'cep', 'logradouro', 'numero', 'complemento', 'bairro', 'codigo_municipio',
+        'classificacao', 'data_cadastro', 'ativo',
         'responsavel_nome', 'responsavel_rg', 'responsavel_cpf', 'regime_tributario', 'endereco_completo',
         'tipo_cliente', 'observacoes'
     ],
@@ -468,6 +470,7 @@ const TABELAS_MAP = {
     ],
     'dash_veiculos': ['id_firebird', 'placa', 'renavam', 'chassi', 'uf', 'tipo_rodado', 'tipo_carroceria', 'tara_kg', 'capacidade_kg', 'capacidade_m3', 'tipo_proprietario', 'rntrc', 'cpf_cnpj_proprietario', 'nome_proprietario', 'uf_proprietario'],
     'dash_motoristas': ['id_firebird', 'cpf', 'nome', 'cnh', 'cnh_categoria', 'cnh_validade', 'telefone'],
+    'dash_regioes': ['codigo', 'cidade', 'distrito', 'uf', 'localizacao', 'cod_ibge', 'pais_codigo', 'pais_nome'],
 };
 
 /**
@@ -598,6 +601,9 @@ const ALIAS_MAP = {
     'motoristas':             'dash_motoristas',
     'condutores':             'dash_motoristas',
     'transporte-motoristas':  'dash_motoristas',
+    'regioes':                'dash_regioes',
+    'cidades':                'dash_regioes',
+    'transporte-regioes':     'dash_regioes',
 };
 
 router.post('/adm-ocorrencias', requireInternalAuth, (req, res, next) => {
@@ -1280,6 +1286,7 @@ router.post('/:tabela', async (req, res) => {
         if (tbl === 'dash_cargas') return 'chave_acesso';
         if (tbl === 'dash_veiculos') return 'placa';
         if (tbl === 'dash_motoristas') return 'cpf';
+        if (tbl === 'dash_regioes') return 'codigo';
         return 'id_firebird';
     };
 
@@ -1341,6 +1348,23 @@ router.post('/:tabela', async (req, res) => {
                     ADD COLUMN IF NOT EXISTS cliente_id_firebird INTEGER,
                     ADD COLUMN IF NOT EXISTS venda_id_firebird INTEGER;
             `).catch(() => {});
+        } else if (tabela === 'dash_regioes') {
+            await client.query(`
+                ALTER TABLE dash_regioes ADD COLUMN IF NOT EXISTS sincronizado_em TIMESTAMPTZ DEFAULT NOW();
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_dash_regioes_tenant_codigo ON dash_regioes(tenant_id, codigo);
+            `).catch(() => {});
+        } else if (tabela === 'dash_clientes') {
+            await client.query(`
+                ALTER TABLE dash_clientes
+                    ADD COLUMN IF NOT EXISTS inscricao_estadual VARCHAR(30),
+                    ADD COLUMN IF NOT EXISTS indicador_ie VARCHAR(5) DEFAULT '9',
+                    ADD COLUMN IF NOT EXISTS cep VARCHAR(15),
+                    ADD COLUMN IF NOT EXISTS logradouro VARCHAR(255),
+                    ADD COLUMN IF NOT EXISTS numero VARCHAR(40),
+                    ADD COLUMN IF NOT EXISTS complemento VARCHAR(120),
+                    ADD COLUMN IF NOT EXISTS bairro VARCHAR(120),
+                    ADD COLUMN IF NOT EXISTS codigo_municipio VARCHAR(10);
+            `).catch(() => {});
         }
 
         await client.query('BEGIN');
@@ -1366,6 +1390,21 @@ router.post('/:tabela', async (req, res) => {
                     normalizarVeiculoErpRow(row);
                 } else if (tabela === 'dash_motoristas') {
                     normalizarMotoristaErpRow(row);
+                } else if (tabela === 'dash_regioes') {
+                    if (row.codigo === undefined || row.codigo === null || row.codigo === '') {
+                        const candCod = row.id_regiao ?? row.cod_regiao ?? row.id_firebird ?? row.id;
+                        if (candCod !== undefined && candCod !== null && candCod !== '') {
+                            const parsedCod = parseInt(String(candCod), 10);
+                            if (!Number.isNaN(parsedCod)) row.codigo = parsedCod;
+                        }
+                    }
+                    if (!row.cidade && (row.municipio || row.nome_cidade || row.nome)) {
+                        row.cidade = String(row.municipio || row.nome_cidade || row.nome).trim().toUpperCase();
+                    }
+                    if (!row.cod_ibge && (row.codigo_ibge || row.ibge || row.cmun)) {
+                        row.cod_ibge = digitsOnlySync(row.codigo_ibge || row.ibge || row.cmun).slice(0, 10);
+                    }
+                    if (row.uf) row.uf = String(row.uf).trim().toUpperCase();
                 }
 
                 // Guarda: valida chave primária obrigatória
@@ -1533,6 +1572,18 @@ router.post('/:tabela', async (req, res) => {
                     if (!row.regime_tributario) {
                         row.regime_tributario = row.regime || row.regime_trib;
                     }
+                    if (!row.inscricao_estadual && (row.ie || row.insc_estadual || row.rg_ie)) {
+                        row.inscricao_estadual = String(row.ie || row.insc_estadual || row.rg_ie).trim().toUpperCase().slice(0, 30);
+                    }
+                    if (!row.logradouro && (row.endereco || row.end || row.rua)) {
+                        row.logradouro = String(row.endereco || row.end || row.rua).trim().toUpperCase().slice(0, 255);
+                    }
+                    if (row.cep) {
+                        row.cep = digitsOnlySync(row.cep).slice(0, 8) || null;
+                    }
+                    if (!row.codigo_municipio && (row.cod_ibge || row.codigo_ibge || row.ibge || row.cmun)) {
+                        row.codigo_municipio = digitsOnlySync(row.cod_ibge || row.codigo_ibge || row.ibge || row.cmun).slice(0, 10) || null;
+                    }
 
                     // Anti-duplicação: Se o cliente veio do Firebird com id_firebird e CPF/CNPJ,
                     // e no Nexus já existe um cliente com mesmo CPF/CNPJ sem id_firebird, vincula-o!
@@ -1663,11 +1714,58 @@ router.post('/:tabela', async (req, res) => {
                         })
                         .join(', ');
                 } else if (tabela === 'dash_clientes') {
+                    const camposPreservarCliente = [
+                        'inscricao_estadual', 'indicador_ie', 'cep', 'logradouro', 'numero',
+                        'complemento', 'bairro', 'codigo_municipio', 'email', 'email_financeiro',
+                        'telefone', 'celular_secundario', 'observacoes'
+                    ];
                     updateSet = usedCols
                         .filter(c => c !== conflictKey)
                         .map(c => {
-                            if (['email', 'email_financeiro', 'telefone', 'celular_secundario', 'observacoes'].includes(c)) {
-                                return `${c} = COALESCE(EXCLUDED.${c}, dash_clientes.${c})`;
+                            if (camposPreservarCliente.includes(c)) {
+                                return `${c} = COALESCE(NULLIF(EXCLUDED.${c}::text, ''), dash_clientes.${c})`;
+                            }
+                            return `${c} = EXCLUDED.${c}`;
+                        })
+                        .join(', ');
+                } else if (tabela === 'dash_veiculos') {
+                    const camposNumVeiculo = ['tara_kg', 'capacidade_kg', 'capacidade_m3'];
+                    const camposTextoPreservarVeiculo = [
+                        'renavam', 'chassi', 'uf', 'rntrc', 'cpf_cnpj_proprietario',
+                        'nome_proprietario', 'uf_proprietario', 'tipo_rodado', 'tipo_carroceria', 'tipo_proprietario'
+                    ];
+                    updateSet = usedCols
+                        .filter(c => c !== conflictKey)
+                        .map(c => {
+                            if (camposNumVeiculo.includes(c)) {
+                                return `${c} = CASE WHEN COALESCE(EXCLUDED.${c}, 0) > 0 THEN EXCLUDED.${c} ELSE dash_veiculos.${c} END`;
+                            }
+                            if (camposTextoPreservarVeiculo.includes(c)) {
+                                return `${c} = COALESCE(NULLIF(EXCLUDED.${c}::text, ''), dash_veiculos.${c})`;
+                            }
+                            return `${c} = EXCLUDED.${c}`;
+                        })
+                        .join(', ');
+                } else if (tabela === 'dash_motoristas') {
+                    const camposTextoPreservarMot = ['cnh', 'cnh_categoria', 'telefone'];
+                    updateSet = usedCols
+                        .filter(c => c !== conflictKey)
+                        .map(c => {
+                            if (camposTextoPreservarMot.includes(c)) {
+                                return `${c} = COALESCE(NULLIF(EXCLUDED.${c}::text, ''), dash_motoristas.${c})`;
+                            }
+                            if (c === 'cnh_validade') {
+                                return `cnh_validade = COALESCE(EXCLUDED.cnh_validade, dash_motoristas.cnh_validade)`;
+                            }
+                            return `${c} = EXCLUDED.${c}`;
+                        })
+                        .join(', ');
+                } else if (tabela === 'dash_regioes') {
+                    updateSet = usedCols
+                        .filter(c => c !== conflictKey)
+                        .map(c => {
+                            if (['cod_ibge', 'uf', 'localizacao', 'distrito'].includes(c)) {
+                                return `${c} = COALESCE(NULLIF(EXCLUDED.${c}::text, ''), dash_regioes.${c})`;
                             }
                             return `${c} = EXCLUDED.${c}`;
                         })

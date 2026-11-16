@@ -3189,7 +3189,7 @@ router.patch('/emitentes/:id/sequencia', requireAdmin, async (req, res) => {
 router.get('/diagnostico', async (req, res) => {
     const tenantId = req.tenant.id;
     try {
-        const [cargas, ultimaSync, emitteres, heartbeat] = await Promise.all([
+        const [cargas, ultimaSync, emitteres, heartbeat, erpCheck] = await Promise.all([
             db.query(
                 `SELECT COUNT(*)::int AS total,
                         COUNT(*) FILTER (WHERE status = 'PENDENTE')::int AS pendentes,
@@ -3210,43 +3210,61 @@ router.get('/diagnostico', async (req, res) => {
                 `SELECT status, ultima_sincronizacao FROM dash_sync_metadata
                  WHERE tenant_id = $1 AND tabela = 'dash_cargas'`,
                 [tenantId]
-            ).catch(() => ({ rows: [] }))
+            ).catch(() => ({ rows: [] })),
+            db.query(
+                `SELECT (
+                    EXISTS (SELECT 1 FROM dash_sync_metadata WHERE tenant_id = $1 AND operacao IS NULL)
+                    OR EXISTS (SELECT 1 FROM dash_cargas WHERE tenant_id = $1 AND id_firebird IS NOT NULL)
+                    OR EXISTS (SELECT 1 FROM dash_clientes WHERE tenant_id = $1 AND id_firebird IS NOT NULL)
+                 ) AS erp_integrado`,
+                [tenantId]
+            ).catch(() => ({ rows: [{ erp_integrado: false }] }))
         ]);
 
         const totalCargas = cargas.rows[0]?.total || 0;
         const meta = ultimaSync.rows[0] || {};
         const hb = heartbeat.rows[0] || {};
+        const erpIntegrado = Boolean(erpCheck.rows[0]?.erp_integrado);
 
         const diagnostico = {
             notas_no_banco: totalCargas,
             notas_pendentes: cargas.rows[0]?.pendentes || 0,
             ultima_sincronizacao: cargas.rows[0]?.ultima || meta.ultima || null,
             registros_no_metadata: meta.registros || 0,
-            status_sync: hb.status || 'NUNCA_SINCRONIZOU',
+            status_sync: hb.status || (erpIntegrado ? 'SINCRONIZADO' : 'INDEPENDENTE'),
+            erp_integrado: erpIntegrado,
+            modo_operacao: erpIntegrado ? 'HIBRIDO_ERP' : 'INDEPENDENTE',
             emitentes_cadastrados: emitteres.rows[0]?.total || 0,
             diagnostico: null,
             acoes: []
         };
 
         if (totalCargas === 0) {
-            diagnostico.diagnostico =
-                'O Worker do ERP ainda nao enviou as notas fiscais para este tenant. Verifique no Configurator do Cliente: ative o modulo "Coliseu Transporte" e informe a Internal API Key.';
-            diagnostico.acoes = [
-                'No Configurator (ColiseuSales), marque "Coliseu Transporte" como habilitado',
-                'Confirme a URL: https://transporte.coliseusistemas.com.br',
-                'Informe a Internal API Key do módulo no campo correspondente',
-                'Reinicie o servico ColiseuSales.Worker no Windows do cliente',
-                'Aguarde o primeiro ciclo de sincronizacao (o Worker envia a cada 10 minutos)'
-            ];
+            if (erpIntegrado) {
+                diagnostico.diagnostico =
+                    'Integração ERP Coliseu detectada, porém nenhuma nota fiscal foi recebida ainda na Central de Cargas.';
+                diagnostico.acoes = [
+                    'Clique em "Consolidar ERP" para importar imediatamente as NF-es das vendas sincronizadas',
+                    'Ou importe arquivos .xml de NF-e / busque pela SEFAZ (MDe) a qualquer momento'
+                ];
+            } else {
+                diagnostico.diagnostico =
+                    'Modo Independente ativo: você pode operar 100% no banco do Coliseu Transporte (sem depender de ERP) ou integrar o Worker do ERP Coliseu quando desejar.';
+                diagnostico.acoes = [
+                    'Clique em "Importar XML de NF-e" para carregar uma ou várias notas fiscais (.xml)',
+                    'Ou clique em "Buscar NF-es Destinadas na SEFAZ (MDe)" para baixar notas emitidas contra o CNPJ',
+                    'Caso utilize o ERP Coliseu, basta ativar o módulo "Coliseu Transporte" no Worker para sincronizar automaticamente'
+                ];
+            }
         } else if (diagnostico.emitentes_cadastrados === 0) {
             diagnostico.diagnostico =
-                'As notas chegaram, mas nenhum emitente fiscal esta cadastrado. Configure em Configuracoes > Dados da Empresa.';
+                'As notas chegaram, mas nenhum emitente fiscal está cadastrado. Configure em Configurações > Dados da Empresa.';
             diagnostico.acoes = [
-                'Acesse Configuracoes > Dados da Empresa no Coliseu Transporte',
-                'Cadastre o CNPJ, Inscricao Estadual, RNTRC e o token da Focus NFe'
+                'Acesse Configurações > Dados da Empresa no Coliseu Transporte',
+                'Cadastre o CNPJ, Inscrição Estadual, RNTRC e envie o Certificado A1'
             ];
         } else {
-            diagnostico.diagnostico = 'Sincronizacao ativa.';
+            diagnostico.diagnostico = erpIntegrado ? 'Sincronizacao ativa.' : 'Modo Independente ativo.';
         }
 
         return res.json({ success: true, data: diagnostico });
@@ -3282,7 +3300,7 @@ router.get('/municipios', async (req, res) => {
             sql += ` AND (r.cidade ILIKE $${params.length} OR c.nome ILIKE $${params.length} OR r.cod_ibge ILIKE $${params.length} OR c.codigo_ibge ILIKE $${params.length})`;
         }
 
-        sql += ` ORDER BY cidade ASC LIMIT 100`;
+        sql += ` ORDER BY cidade ASC LIMIT 1200`;
 
         const { rows } = await db.query(sql, params).catch(() => ({ rows: [] }));
         const dictList = listarMunicipiosDicionario(uf, search);
@@ -3290,10 +3308,11 @@ router.get('/municipios', async (req, res) => {
         const merged = new Map();
         for (const r of rows) {
             if (!r.cidade) continue;
-            const key = `${String(r.cidade).toUpperCase().trim()}|${String(r.uf || '').toUpperCase().trim()}`;
+            const ufItem = normalizarUf(r.uf) || String(r.uf || '').toUpperCase().trim();
+            const key = `${String(r.cidade).toUpperCase().trim()}|${ufItem}`;
             merged.set(key, {
                 cidade: r.cidade,
-                uf: normalizarUf(r.uf) || r.uf,
+                uf: ufItem,
                 codigo_ibge: r.codigo_ibge,
             });
         }
@@ -3308,9 +3327,13 @@ router.get('/municipios', async (req, res) => {
             }
         }
 
+        const listaOrdenada = Array.from(merged.values()).sort((a, b) =>
+            String(a.cidade || '').localeCompare(String(b.cidade || ''), 'pt-BR')
+        );
+
         return res.json({
             success: true,
-            data: Array.from(merged.values()).slice(0, 150),
+            data: listaOrdenada.slice(0, 1500),
         });
     } catch (err) {
         logger.error('[Transporte] Erro ao buscar municípios:', err.message);

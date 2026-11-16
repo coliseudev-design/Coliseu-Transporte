@@ -78,7 +78,7 @@ const GRUPOS: MenuGroup[] = [
     icon: Users,
     cor: '#0284C7',
     items: [
-      { to: '/clientes', subKey: 'clientes', label: 'Clientes (ERP Coliseu)', icon: Users, palavras: ['cliente', 'parceiro'] },
+      { to: '/clientes', subKey: 'clientes', label: 'Clientes & Embarcadores', icon: Users, palavras: ['cliente', 'embarcador', 'parceiro', 'erp'] },
       { to: '/regioes', subKey: 'regioes', label: 'Regiões & Cidades', icon: Route, palavras: ['regiao', 'cidade', 'municipio', 'ibge'] },
       { to: '/transporte/frota', subKey: 'frota', label: 'Frota & Condutores', icon: Truck, palavras: ['veiculo', 'placa', 'motorista', 'condutor'] },
       { to: '/transporte/partes', subKey: 'partes', label: 'Partes do Transporte', icon: Building2, palavras: ['remetente', 'destinatario', 'tomador'] }

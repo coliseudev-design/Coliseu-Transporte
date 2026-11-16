@@ -89,6 +89,7 @@ interface ClientesKpisResponse {
     vinculados_partes: number
     cargas_pendentes: number
     regioes_ativas: number
+    erp_integrado?: boolean
   }
 }
 
@@ -520,16 +521,22 @@ export default function Clientes() {
         classificacao: form.classificacao.trim() || 'ATIVO',
       }
       if (editingId) {
-        await api.put(`/clientes/${editingId}`, payload)
+        const res = await api.put(`/clientes/${editingId}`, payload)
+        const temErp = Boolean(res.data?.erp_integrado ?? kpis?.erp_integrado)
         setFeedbackBanner({
           type: 'success',
-          text: 'Cadastro atualizado, enfileirado para o ERP Coliseu e sincronizado com o Transporte.',
+          text: temErp
+            ? 'Cadastro atualizado, sincronizado com o Transporte e enfileirado para o ERP Coliseu.'
+            : 'Cadastro atualizado na base própria do Coliseu Transporte e habilitado para CT-e / MDF-e.',
         })
       } else {
-        await api.post('/clientes', payload)
+        const res = await api.post('/clientes', payload)
+        const temErp = Boolean(res.data?.erp_integrado ?? kpis?.erp_integrado)
         setFeedbackBanner({
           type: 'success',
-          text: 'Novo cliente cadastrado, enfileirado para o ERP Coliseu e habilitado no Transporte.',
+          text: temErp
+            ? 'Novo cliente cadastrado, habilitado no Transporte e enfileirado para o ERP Coliseu.'
+            : 'Novo cliente cadastrado na base própria do Coliseu Transporte e habilitado para CT-e / MDF-e.',
         })
       }
       setIsModalOpen(false)
@@ -578,11 +585,17 @@ export default function Clientes() {
             <div>
               <div className="flex flex-wrap items-center gap-2">
                 <h1 className="text-lg font-bold tracking-tight text-slate-900 dark:text-white">
-                  Clientes & Embarcadores (ERP Coliseu)
+                  Clientes & Embarcadores
                 </h1>
-                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-semibold bg-sky-50 text-[#0B63A5] border border-sky-200 dark:bg-sky-950/60 dark:text-sky-300 dark:border-sky-800">
-                  Sync Bidirecional ERP
-                </span>
+                {kpis?.erp_integrado ? (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-semibold bg-sky-50 text-[#0B63A5] border border-sky-200 dark:bg-sky-950/60 dark:text-sky-300 dark:border-sky-800">
+                    Sync Bidirecional ERP
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-300 dark:border-emerald-800">
+                    Base Própria Transporte
+                  </span>
+                )}
               </div>
               <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
                 Base cadastral integrada às NF-es/Cargas, Regiões de Entrega e habilitação em 1 clique para emissão de CT-e e MDF-e.

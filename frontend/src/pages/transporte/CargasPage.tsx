@@ -148,6 +148,7 @@ export default function CargasPage() {
   const syncItems: Array<{ tabela: string; ultima: string | null; status: string; registros: number }> = syncStatusData?.status || [];
   const getSyncInfo = (tbl: string) => syncItems.find(s => s.tabela === tbl);
   const hbInfo = getSyncInfo('__heartbeat__');
+  const erpIntegrado = Boolean(diag?.erp_integrado || hbInfo?.status === 'OK');
 
   // Emitentes (transportadoras) cadastrados
   const { data: emitentesData } = useQuery({
@@ -486,34 +487,54 @@ export default function CargasPage() {
               Central de Cargas & NF-e
             </h1>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-              Notas fiscais do ERP Coliseu prontas para despacho em CT-e ou MDF-e
+              {erpIntegrado
+                ? 'Notas fiscais sincronizadas do ERP Coliseu, XML ou SEFAZ MDe prontas para CT-e e MDF-e'
+                : 'Notas fiscais via Upload XML ou SEFAZ MDe prontas para emissão de CT-e e MDF-e'}
             </p>
           </div>
 
-          {/* Status inline do Worker */}
-          <div className="hidden lg:flex items-center gap-4 pl-5 border-l border-slate-200 dark:border-slate-700">
-            <div>
-              <span className="text-[10px] font-medium text-slate-400 uppercase block leading-none">ERP</span>
-              <span className={`text-xs font-bold mt-0.5 inline-flex items-center gap-1.5 ${
-                hbInfo?.status === 'OK' ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'
-              }`}>
-                <span className={`w-1.5 h-1.5 rounded-full ${hbInfo?.status === 'OK' ? 'bg-emerald-500' : 'bg-amber-500'}`} />
-                {hbInfo?.status === 'OK' ? 'Online' : 'Aguardando'}
-              </span>
+          {/* Status adaptativo: Worker ERP (quando integrado) ou Modo Independente (quando standalone) */}
+          {erpIntegrado ? (
+            <div className="hidden lg:flex items-center gap-4 pl-5 border-l border-slate-200 dark:border-slate-700">
+              <div>
+                <span className="text-[10px] font-medium text-slate-400 uppercase block leading-none">ERP</span>
+                <span className={`text-xs font-bold mt-0.5 inline-flex items-center gap-1.5 ${
+                  hbInfo?.status === 'OK' ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'
+                }`}>
+                  <span className={`w-1.5 h-1.5 rounded-full ${hbInfo?.status === 'OK' ? 'bg-emerald-500' : 'bg-amber-500'}`} />
+                  {hbInfo?.status === 'OK' ? 'Online' : 'Sincronizado'}
+                </span>
+              </div>
+              <div>
+                <span className="text-[10px] font-medium text-slate-400 uppercase block leading-none">Notas Sync</span>
+                <span className="text-xs font-bold text-slate-900 dark:text-white mt-0.5 block tabular-nums">
+                  {(getSyncInfo('dash_cargas')?.registros || cargas.length || 0).toLocaleString('pt-BR')}
+                </span>
+              </div>
+              <div>
+                <span className="text-[10px] font-medium text-slate-400 uppercase block leading-none">Clientes Sync</span>
+                <span className="text-xs font-bold text-slate-900 dark:text-white mt-0.5 block tabular-nums">
+                  {(getSyncInfo('dash_clientes')?.registros || 0).toLocaleString('pt-BR')}
+                </span>
+              </div>
             </div>
-            <div>
-              <span className="text-[10px] font-medium text-slate-400 uppercase block leading-none">Notas Sync</span>
-              <span className="text-xs font-bold text-slate-900 dark:text-white mt-0.5 block tabular-nums">
-                {(getSyncInfo('dash_cargas')?.registros || cargas.length || 0).toLocaleString('pt-BR')}
-              </span>
+          ) : (
+            <div className="hidden lg:flex items-center gap-4 pl-5 border-l border-slate-200 dark:border-slate-700">
+              <div>
+                <span className="text-[10px] font-medium text-slate-400 uppercase block leading-none">Operação</span>
+                <span className="text-xs font-bold mt-0.5 inline-flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                  Modo Independente
+                </span>
+              </div>
+              <div>
+                <span className="text-[10px] font-medium text-slate-400 uppercase block leading-none">Notas no Banco</span>
+                <span className="text-xs font-bold text-slate-900 dark:text-white mt-0.5 block tabular-nums">
+                  {(diag?.notas_no_banco ?? cargas.length ?? 0).toLocaleString('pt-BR')}
+                </span>
+              </div>
             </div>
-            <div>
-              <span className="text-[10px] font-medium text-slate-400 uppercase block leading-none">Clientes Sync</span>
-              <span className="text-xs font-bold text-slate-900 dark:text-white mt-0.5 block tabular-nums">
-                {(getSyncInfo('dash_clientes')?.registros || 0).toLocaleString('pt-BR')}
-              </span>
-            </div>
-          </div>
+          )}
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5 shrink-0">
@@ -547,16 +568,18 @@ export default function CargasPage() {
             Regiões de Entrega
           </button>
 
-          <button
-            type="button"
-            onClick={handleConsolidarNotasErp}
-            disabled={consolidandoErp}
-            className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-semibold text-slate-700 dark:text-slate-200 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-700 transition-all"
-            title="Cruza Vendas, Clientes, Itens e Regiões do ERP para trazer 100% das NF-es emitidas"
-          >
-            {consolidandoErp ? <Loader2 className="w-4 h-4 animate-spin text-sky-600" /> : <RefreshCw className="w-4 h-4 text-sky-600" />}
-            Consolidar ERP
-          </button>
+          {erpIntegrado && (
+            <button
+              type="button"
+              onClick={handleConsolidarNotasErp}
+              disabled={consolidandoErp}
+              className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-semibold text-slate-700 dark:text-slate-200 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-700 transition-all"
+              title="Cruza Vendas, Clientes, Itens e Regiões do ERP para trazer 100% das NF-es emitidas"
+            >
+              {consolidandoErp ? <Loader2 className="w-4 h-4 animate-spin text-sky-600" /> : <RefreshCw className="w-4 h-4 text-sky-600" />}
+              Consolidar ERP
+            </button>
+          )}
 
           <button
             type="button"
@@ -810,7 +833,7 @@ export default function CargasPage() {
       {/* Lista de Cargas */}
       {isLoading ? (
         <div className="p-12 text-center text-slate-400 dark:text-slate-500 text-sm">
-          Carregando notas fiscais do ERP...
+          Carregando notas fiscais...
         </div>
       ) : cargas.length === 0 ? (
         <div className="bg-white dark:bg-slate-800 p-10 text-center rounded-2xl border border-dashed border-slate-200 dark:border-slate-700">
@@ -819,18 +842,20 @@ export default function CargasPage() {
             Nenhuma nota fiscal encontrada
           </h3>
 
-          {diag?.diagnostico && diag.diagnostico !== 'Sincronizacao ativa.' ? (
+          {diag?.diagnostico && diag.diagnostico !== 'Sincronizacao ativa.' && diag.diagnostico !== 'Modo Independente ativo.' ? (
             <>
-              <p className="text-sm text-amber-700 dark:text-amber-300 mt-2 max-w-lg mx-auto leading-relaxed">
+              <p className={`text-sm mt-2 max-w-lg mx-auto leading-relaxed ${
+                erpIntegrado ? 'text-amber-700 dark:text-amber-300' : 'text-slate-600 dark:text-slate-300'
+              }`}>
                 {diag.diagnostico}
               </p>
               {diag.acoes?.length > 0 && (
                 <div className="mt-5 max-w-lg mx-auto text-left bg-slate-50 dark:bg-slate-900/50 rounded-2xl border border-slate-200 dark:border-slate-800 p-4">
                   <p className="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-2">
-                    O que fazer
+                    Como importar ou cadastrar notas
                   </p>
                   <ol className="space-y-1.5">
-                    {diag.acoes.map((a, i) => (
+                    {diag.acoes.map((a: string, i: number) => (
                       <li key={i} className="text-xs text-slate-600 dark:text-slate-300 flex gap-2">
                         <span className="shrink-0 w-4 h-4 rounded-full bg-brand-100 dark:bg-brand-950 text-brand-700 dark:text-brand-300 text-[10px] font-bold flex items-center justify-center">
                           {i + 1}
@@ -844,7 +869,7 @@ export default function CargasPage() {
             </>
           ) : (
             <p className="text-sm text-slate-500 dark:text-slate-400 mt-1 max-w-sm mx-auto">
-              Ajuste os filtros de período, cliente ou busca. O Worker continua sincronizando novas notas automaticamente.
+              Ajuste os filtros de período, cliente ou busca, ou importe novos arquivos XML / MDe SEFAZ.
             </p>
           )}
 

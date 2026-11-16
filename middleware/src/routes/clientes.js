@@ -18,6 +18,22 @@ const {
 
 let _clientesColsReady = false;
 
+async function verificarTenantPossuiErpIntegrado(tenantId) {
+    try {
+        const { rows } = await db.query(
+            `SELECT (
+                EXISTS (SELECT 1 FROM dash_sync_metadata WHERE tenant_id = $1 AND operacao IS NULL)
+                OR EXISTS (SELECT 1 FROM dash_clientes WHERE tenant_id = $1 AND id_firebird IS NOT NULL)
+                OR EXISTS (SELECT 1 FROM dash_cargas WHERE tenant_id = $1 AND id_firebird IS NOT NULL)
+             ) AS erp_integrado`,
+            [tenantId]
+        );
+        return Boolean(rows[0]?.erp_integrado);
+    } catch (_) {
+        return false;
+    }
+}
+
 async function ensureClientesTransporteColumns() {
     if (_clientesColsReady) return;
     try {
@@ -567,7 +583,7 @@ router.get('/kpis', async (req, res) => {
         const tenantId = req.tenant.id;
         const { from, to } = getPeriodRange(req.query);
 
-        const [clientesStats, partesCountRes, cargasPendRes, regioesRes] = await Promise.all([
+        const [clientesStats, partesCountRes, cargasPendRes, regioesRes, erpIntegrado] = await Promise.all([
             db.query(
                 `SELECT
                     COUNT(*) FILTER (WHERE NOT ${getFornecedorCondition('c')})::int AS total_clientes,
@@ -619,6 +635,7 @@ router.get('/kpis', async (req, res) => {
                     [tenantId]
                 )
                 .catch(() => ({ rows: [{ total_regioes: 0 }] })),
+            verificarTenantPossuiErpIntegrado(tenantId),
         ]);
 
         const st = clientesStats.rows[0] || {};
@@ -632,6 +649,7 @@ router.get('/kpis', async (req, res) => {
                 cargas_pendentes: cargasPendRes.rows[0]?.cargas_pendentes || 0,
                 regioes_ativas: regioesRes.rows[0]?.total_regioes || 0,
                 clientes_ativos_periodo: st.total_clientes || 0,
+                erp_integrado: Boolean(erpIntegrado),
             },
         });
     } catch (err) {
@@ -1094,49 +1112,56 @@ router.post('/', async (req, res, next) => {
         );
 
         const novoCliente = rows[0];
+        const erpIntegrado = await verificarTenantPossuiErpIntegrado(tenantId);
 
-        // Mantém sincronização bidirecional para o Worker C# cadastrar no ERP Firebird
-        await db
-            .query(
-                `INSERT INTO dash_sync_metadata (tenant_id, tabela, operacao, payload, status, created_at)
-                 VALUES ($1, 'CLIENTES', 'INSERT', $2::jsonb, 'PENDENTE', NOW())`,
-                [
-                    tenantId,
-                    JSON.stringify({
-                        id_nexus: novoCliente.id,
-                        nome: novoCliente.nome,
-                        razao_social: novoCliente.razao_social,
-                        nome_fantasia: novoCliente.nome_fantasia,
-                        documento: formattedDoc,
-                        cpf_cnpj: formattedDoc,
-                        cliente_documento: formattedDoc,
-                        documento_formatado: formattedDoc,
-                        documento_limpo: digitsOnly(documento),
-                        inscricao_estadual: novoCliente.inscricao_estadual,
-                        email: novoCliente.email,
-                        email_financeiro: novoCliente.email_financeiro,
-                        telefone: novoCliente.telefone,
-                        celular_secundario: novoCliente.celular_secundario,
-                        cidade: novoCliente.cidade,
-                        estado: novoCliente.estado,
-                        cep: novoCliente.cep,
-                        codigo_municipio: novoCliente.codigo_municipio,
-                        endereco_completo: novoCliente.endereco_completo,
-                        origem: 'TRANSPORTE',
-                        criado_em: new Date().toISOString(),
-                    }),
-                ]
-            )
-            .catch((e) => {
-                logger.warn('[Sync] Falha ao enfileirar cliente para ERP:', e.message);
-            });
+        // Quando a empresa possui integração ativa com o ERP Coliseu (Worker), enfileira para sincronização bidirecional
+        if (erpIntegrado) {
+            await db
+                .query(
+                    `INSERT INTO dash_sync_metadata (tenant_id, tabela, operacao, payload, status, created_at)
+                     VALUES ($1, 'CLIENTES', 'INSERT', $2::jsonb, 'PENDENTE', NOW())`,
+                    [
+                        tenantId,
+                        JSON.stringify({
+                            id_nexus: novoCliente.id,
+                            nome: novoCliente.nome,
+                            razao_social: novoCliente.razao_social,
+                            nome_fantasia: novoCliente.nome_fantasia,
+                            documento: formattedDoc,
+                            cpf_cnpj: formattedDoc,
+                            cliente_documento: formattedDoc,
+                            documento_formatado: formattedDoc,
+                            documento_limpo: digitsOnly(documento),
+                            inscricao_estadual: novoCliente.inscricao_estadual,
+                            email: novoCliente.email,
+                            email_financeiro: novoCliente.email_financeiro,
+                            telefone: novoCliente.telefone,
+                            celular_secundario: novoCliente.celular_secundario,
+                            cidade: novoCliente.cidade,
+                            estado: novoCliente.estado,
+                            cep: novoCliente.cep,
+                            codigo_municipio: novoCliente.codigo_municipio,
+                            endereco_completo: novoCliente.endereco_completo,
+                            origem: 'TRANSPORTE',
+                            criado_em: new Date().toISOString(),
+                        }),
+                    ]
+                )
+                .catch((e) => {
+                    logger.warn('[Sync] Falha ao enfileirar cliente para ERP:', e.message);
+                });
+        }
 
         let parteSincronizada = null;
         if (sincronizar_parte && [11, 14].includes(digitsOnly(documento).length)) {
             parteSincronizada = await upsertParteTransporteFromCliente(tenantId, novoCliente).catch(() => null);
         }
 
-        return res.status(201).json({ data: novoCliente, parte: parteSincronizada });
+        return res.status(201).json({
+            data: novoCliente,
+            parte: parteSincronizada,
+            erp_integrado: erpIntegrado,
+        });
     } catch (err) {
         return next(err);
     }
@@ -1285,50 +1310,59 @@ router.put('/:id', async (req, res, next) => {
         }
 
         const clienteAtualizado = rows[0];
+        const erpIntegrado =
+            Boolean(clienteAtualizado.id_firebird) ||
+            (await verificarTenantPossuiErpIntegrado(tenantId));
 
-        // Enfileira alteração para o Worker C# atualizar no ERP Firebird
-        await db
-            .query(
-                `INSERT INTO dash_sync_metadata (tenant_id, tabela, operacao, payload, status, created_at)
-                 VALUES ($1, 'CLIENTES', 'UPDATE', $2::jsonb, 'PENDENTE', NOW())`,
-                [
-                    tenantId,
-                    JSON.stringify({
-                        id_nexus: clienteAtualizado.id,
-                        id_firebird: clienteAtualizado.id_firebird || null,
-                        nome: clienteAtualizado.nome,
-                        razao_social: clienteAtualizado.razao_social,
-                        nome_fantasia: clienteAtualizado.nome_fantasia,
-                        documento: formattedDoc,
-                        cpf_cnpj: formattedDoc,
-                        cliente_documento: formattedDoc,
-                        documento_formatado: formattedDoc,
-                        documento_limpo: digitsOnly(documento),
-                        inscricao_estadual: clienteAtualizado.inscricao_estadual,
-                        email: clienteAtualizado.email,
-                        email_financeiro: clienteAtualizado.email_financeiro,
-                        telefone: clienteAtualizado.telefone,
-                        celular_secundario: clienteAtualizado.celular_secundario,
-                        cidade: clienteAtualizado.cidade,
-                        estado: clienteAtualizado.estado,
-                        cep: clienteAtualizado.cep,
-                        codigo_municipio: clienteAtualizado.codigo_municipio,
-                        endereco_completo: clienteAtualizado.endereco_completo,
-                        origem: 'TRANSPORTE',
-                        alterado_em: new Date().toISOString(),
-                    }),
-                ]
-            )
-            .catch((e) => {
-                logger.warn('[Sync] Falha ao enfileirar atualização de cliente para ERP:', e.message);
-            });
+        // Quando a empresa possui integração ativa com o ERP Coliseu (Worker), enfileira atualização
+        if (erpIntegrado) {
+            await db
+                .query(
+                    `INSERT INTO dash_sync_metadata (tenant_id, tabela, operacao, payload, status, created_at)
+                     VALUES ($1, 'CLIENTES', 'UPDATE', $2::jsonb, 'PENDENTE', NOW())`,
+                    [
+                        tenantId,
+                        JSON.stringify({
+                            id_nexus: clienteAtualizado.id,
+                            id_firebird: clienteAtualizado.id_firebird || null,
+                            nome: clienteAtualizado.nome,
+                            razao_social: clienteAtualizado.razao_social,
+                            nome_fantasia: clienteAtualizado.nome_fantasia,
+                            documento: formattedDoc,
+                            cpf_cnpj: formattedDoc,
+                            cliente_documento: formattedDoc,
+                            documento_formatado: formattedDoc,
+                            documento_limpo: digitsOnly(documento),
+                            inscricao_estadual: clienteAtualizado.inscricao_estadual,
+                            email: clienteAtualizado.email,
+                            email_financeiro: clienteAtualizado.email_financeiro,
+                            telefone: clienteAtualizado.telefone,
+                            celular_secundario: clienteAtualizado.celular_secundario,
+                            cidade: clienteAtualizado.cidade,
+                            estado: clienteAtualizado.estado,
+                            cep: clienteAtualizado.cep,
+                            codigo_municipio: clienteAtualizado.codigo_municipio,
+                            endereco_completo: clienteAtualizado.endereco_completo,
+                            origem: 'TRANSPORTE',
+                            alterado_em: new Date().toISOString(),
+                        }),
+                    ]
+                )
+                .catch((e) => {
+                    logger.warn('[Sync] Falha ao enfileirar atualização de cliente para ERP:', e.message);
+                });
+        }
 
         let parteSincronizada = null;
         if (sincronizar_parte && [11, 14].includes(digitsOnly(clienteAtualizado.documento).length)) {
             parteSincronizada = await upsertParteTransporteFromCliente(tenantId, clienteAtualizado).catch(() => null);
         }
 
-        return res.json({ data: clienteAtualizado, parte: parteSincronizada });
+        return res.json({
+            data: clienteAtualizado,
+            parte: parteSincronizada,
+            erp_integrado: erpIntegrado,
+        });
     } catch (err) {
         return next(err);
     }
