@@ -5,6 +5,7 @@ import clsx from 'clsx'
 import api from '../services/api'
 import { useAuthStore } from '../store/authStore'
 import { formatBRL, formatDate, formatDateTime, formatNum } from '../utils/format'
+import SeletorMunicipioIbge from '../components/fiscal/SeletorMunicipioIbge'
 import {
   Users,
   Search,
@@ -276,6 +277,14 @@ export default function Clientes() {
     queryKey: ['clientes-transporte-kpis'],
     queryFn: async () => (await api.get('/clientes/kpis')).data,
   })
+
+  const municipiosIbgeQuery = useQuery({
+    queryKey: ['catalogo-ibge-completo'],
+    queryFn: async () => (await api.get('/transporte/municipios', { params: { limit: 6000 } })).data,
+    enabled: isModalOpen,
+    staleTime: 5 * 60 * 1000,
+  })
+  const municipiosIbge = municipiosIbgeQuery.data?.data || []
 
   const opcoesQuery = useQuery<OpcoesTransporteResponse>({
     queryKey: ['clientes-opcoes-transporte'],
@@ -1848,14 +1857,23 @@ export default function Clientes() {
 
                   <div className="sm:col-span-5">
                     <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                      Município
+                      Município Oficial IBGE (5.571 Cidades)
                     </label>
-                    <input
-                      type="text"
-                      value={form.cidade}
-                      onChange={(e) => setForm((prev) => ({ ...prev, cidade: e.target.value.toUpperCase() }))}
-                      placeholder="Ex: DOURADOS"
-                      className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white"
+                    <SeletorMunicipioIbge
+                      municipios={municipiosIbge}
+                      value={form.codigo_municipio}
+                      nomeFallback={form.cidade}
+                      ufFallback={form.estado}
+                      ufPreferencial={form.estado}
+                      placeholder="Buscar cidade ou código IBGE..."
+                      onChange={(m) =>
+                        setForm((prev) => ({
+                          ...prev,
+                          codigo_municipio: m.codigo_ibge,
+                          cidade: m.cidade.toUpperCase(),
+                          estado: m.uf || prev.estado,
+                        }))
+                      }
                     />
                   </div>
 

@@ -4,6 +4,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db/postgres');
 const logger = require('../config/logger');
+const { resolverIbgeMunicipioSync, normalizarUf } = require('../utils/ibgeMunicipios');
 
 // Middleware para auto-migration das tabelas de cadastros
 async function ensureTablesExist(req, res, next) {
@@ -281,21 +282,10 @@ router.delete('/centro-custos/:id', async (req, res, next) => {
 router.get('/regioes', async (req, res, next) => {
     try {
         const tenantId = req.tenant.id;
-        let { rows } = await db.query(
-            'SELECT * FROM dash_regioes WHERE tenant_id = $1 ORDER BY codigo ASC, id ASC',
+        const { rows } = await db.query(
+            'SELECT * FROM dash_regioes WHERE tenant_id = $1 ORDER BY cidade ASC, codigo ASC, id ASC',
             [tenantId]
         );
-
-        if (rows.length === 0) {
-            const seed = await db.query(
-                `INSERT INTO dash_regioes (tenant_id, codigo, cidade, distrito, uf, localizacao, cod_ibge, pais_codigo, pais_nome)
-                 VALUES ($1, 9939, 'ABDON BATISTA', 'ABDON BATISTA', 'SANTA CATARINA', '', '4200051', 1058, 'BRASIL'),
-                        ($1, 1001, 'CAMPO GRANDE', 'CAMPO GRANDE', 'MATO GROSSO DO SUL', 'CENTRO', '5002704', 1058, 'BRASIL')
-                 RETURNING *`,
-                [tenantId]
-            );
-            rows = seed.rows;
-        }
         res.json(rows);
     } catch (err) {
         next(err);
@@ -305,17 +295,34 @@ router.get('/regioes', async (req, res, next) => {
 router.post('/regioes', async (req, res, next) => {
     try {
         const tenantId = req.tenant.id;
-        const { codigo, cidade, distrito, uf, localizacao, cod_ibge, pais_codigo, pais_nome } = req.body;
+        const { codigo, cidade, distrito, uf, localizacao, cod_ibge, pais_codigo, pais_nome } = req.body || {};
+
+        const cidadeLimpa = String(cidade || '').trim().toUpperCase();
+        if (!cidadeLimpa) {
+            return res.status(400).json({ error: 'Informe o nome da cidade / município.' });
+        }
+        const ufNorm = normalizarUf(uf || 'MS') || 'MS';
+        const ibgeInfo = resolverIbgeMunicipioSync(cod_ibge, cidadeLimpa, ufNorm);
 
         const maxRes = await db.query('SELECT COALESCE(MAX(codigo), 0) + 1 AS next_cod FROM dash_regioes WHERE tenant_id = $1', [tenantId]);
-        const cod = codigo ? parseInt(codigo, 10) : maxRes.rows[0].next_cod;
+        const cod = codigo ? parseInt(codigo, 10) : (maxRes.rows?.[0]?.next_cod || 1);
 
         const { rows } = await db.query(
             `INSERT INTO dash_regioes (tenant_id, codigo, cidade, distrito, uf, localizacao, cod_ibge, pais_codigo, pais_nome)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-            [tenantId, cod, cidade || 'CAMPO GRANDE', distrito || cidade || '', uf || 'MS', localizacao || '', cod_ibge || '', pais_codigo || 1058, pais_nome || 'BRASIL']
+            [
+                tenantId,
+                cod,
+                cidadeLimpa,
+                String(distrito || cidadeLimpa).trim().toUpperCase(),
+                ufNorm,
+                String(localizacao || '').trim().toUpperCase(),
+                ibgeInfo.codigo,
+                pais_codigo || 1058,
+                pais_nome || 'BRASIL'
+            ]
         );
-        res.json(rows[0]);
+        res.status(201).json({ ...rows[0], data: rows[0] });
     } catch (err) {
         next(err);
     }
@@ -325,13 +332,28 @@ router.put('/regioes/:id', async (req, res, next) => {
     try {
         const tenantId = req.tenant.id;
         const { id } = req.params;
-        const { codigo, cidade, distrito, uf, localizacao, cod_ibge, pais_codigo, pais_nome } = req.body;
+        const { codigo, cidade, distrito, uf, localizacao, cod_ibge, pais_codigo, pais_nome } = req.body || {};
+
+        const cidadeLimpa = String(cidade || '').trim().toUpperCase();
+        const ufNorm = normalizarUf(uf || 'MS') || 'MS';
+        const ibgeInfo = resolverIbgeMunicipioSync(cod_ibge, cidadeLimpa, ufNorm);
 
         const { rows } = await db.query(
             `UPDATE dash_regioes
              SET codigo = $1, cidade = $2, distrito = $3, uf = $4, localizacao = $5, cod_ibge = $6, pais_codigo = $7, pais_nome = $8, updated_at = NOW()
              WHERE tenant_id = $9 AND id = $10 RETURNING *`,
-            [codigo, cidade, distrito, uf, localizacao, cod_ibge, pais_codigo || 1058, pais_nome || 'BRASIL', tenantId, id]
+            [
+                codigo,
+                cidadeLimpa,
+                String(distrito || cidadeLimpa).trim().toUpperCase(),
+                ufNorm,
+                String(localizacao || '').trim().toUpperCase(),
+                ibgeInfo.codigo,
+                pais_codigo || 1058,
+                pais_nome || 'BRASIL',
+                tenantId,
+                id
+            ]
         );
         res.json(rows[0]);
     } catch (err) {

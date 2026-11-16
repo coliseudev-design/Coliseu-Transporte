@@ -7,6 +7,7 @@ import { CampoFiscal, GradeCampos, SelectFiscal, InputFiscal, TextareaFiscal, ma
 import ListaEditavelFiscal, { BotaoRemover } from '../../components/fiscal/ListaEditavelFiscal';
 import SeletorNotasErp from '../../components/fiscal/SeletorNotasErp';
 import PainelSequenciaFiscal from '../../components/fiscal/PainelSequenciaFiscal';
+import SeletorMunicipioIbge from '../../components/fiscal/SeletorMunicipioIbge';
 import {
   FileText, Users, Wallet, Package, Truck, FileText as FileIcon,
   Save, Send, ChevronLeft, ChevronRight, AlertTriangle,
@@ -212,8 +213,9 @@ export default function CteWizardPage() {
   const emitentes = emitentesData?.data || [];
 
   const { data: municipiosData } = useQuery({
-    queryKey: ['municipios-wizard'],
-    queryFn: async () => (await api.get('/transporte/municipios')).data
+    queryKey: ['catalogo-ibge-completo'],
+    queryFn: async () => (await api.get('/transporte/municipios', { params: { limit: 6000 } })).data,
+    staleTime: 5 * 60 * 1000
   });
   const municipios = municipiosData?.data || [];
 
@@ -836,21 +838,6 @@ export default function CteWizardPage() {
   };
 
   // ── Auxiliares ──
-  const selecionarMunicipio = (campoCodigo: string, campoNome: string, campoUf: string, codigo: string) => {
-    const m = municipios.find((x: any) => x.codigo_ibge === codigo);
-    setForm(f => ({
-      ...f,
-      [campoCodigo]: codigo,
-      [campoNome]: m?.cidade || '',
-      [campoUf]: m?.uf || ''
-    }));
-  };
-
-  const opcoesMunicipios = municipios.map((m: any) => ({
-    valor: m.codigo_ibge,
-    rotulo: `${m.cidade} / ${m.uf} (IBGE ${m.codigo_ibge})`
-  }));
-
   const adicionarDocumento = () => {
     if (novoDoc.tipo === 'OUTRO') {
       const numDoc = novoDoc.chave.trim() || novoDoc.numero.trim() || String(form.documentos.length + 1);
@@ -1135,20 +1122,40 @@ export default function CteWizardPage() {
               </CampoFiscal>
 
               <CampoFiscal rotulo="Município de Início da Prestação" obrigatorio>
-                <SelectFiscal
+                <SeletorMunicipioIbge
+                  municipios={municipios}
                   value={form.codigo_municipio_inicio}
-                  onChange={v => selecionarMunicipio('codigo_municipio_inicio', 'municipio_inicio', 'uf_inicio', v)}
-                  opcoes={opcoesMunicipios}
-                  placeholder="Selecione..."
+                  nomeFallback={form.municipio_inicio}
+                  ufFallback={form.uf_inicio}
+                  ufPreferencial={form.uf_inicio}
+                  placeholder="Buscar município de início (5.571 cidades IBGE)..."
+                  onChange={m =>
+                    setForm(f => ({
+                      ...f,
+                      codigo_municipio_inicio: m.codigo_ibge,
+                      municipio_inicio: m.cidade,
+                      uf_inicio: m.uf
+                    }))
+                  }
                 />
               </CampoFiscal>
 
               <CampoFiscal rotulo="Município de Fim da Prestação" obrigatorio>
-                <SelectFiscal
+                <SeletorMunicipioIbge
+                  municipios={municipios}
                   value={form.codigo_municipio_fim}
-                  onChange={v => selecionarMunicipio('codigo_municipio_fim', 'municipio_fim', 'uf_fim', v)}
-                  opcoes={opcoesMunicipios}
-                  placeholder="Selecione..."
+                  nomeFallback={form.municipio_fim}
+                  ufFallback={form.uf_fim}
+                  ufPreferencial={form.uf_fim}
+                  placeholder="Buscar município de destino (5.571 cidades IBGE)..."
+                  onChange={m =>
+                    setForm(f => ({
+                      ...f,
+                      codigo_municipio_fim: m.codigo_ibge,
+                      municipio_fim: m.cidade,
+                      uf_fim: m.uf
+                    }))
+                  }
                 />
               </CampoFiscal>
             </GradeCampos>
@@ -1252,23 +1259,25 @@ export default function CteWizardPage() {
                       />
                     </div>
                   </CampoFiscal>
-                  <CampoFiscal rotulo="Município / UF">
-                    <SelectFiscal
+                  <CampoFiscal rotulo="Município / UF (IBGE)">
+                    <SeletorMunicipioIbge
+                      municipios={municipios}
                       value={form.remetente_dados.codigo_municipio}
-                      onChange={v => {
-                        const m = municipios.find((x: any) => x.codigo_ibge === v);
+                      nomeFallback={form.remetente_dados.municipio}
+                      ufFallback={form.remetente_dados.uf}
+                      ufPreferencial={form.remetente_dados.uf || form.uf_inicio}
+                      placeholder="Buscar cidade ou IBGE..."
+                      onChange={m =>
                         setForm(f => ({
                           ...f,
                           remetente_dados: {
                             ...f.remetente_dados,
-                            codigo_municipio: v,
-                            municipio: m?.cidade || f.remetente_dados.municipio,
-                            uf: m?.uf || f.remetente_dados.uf
+                            codigo_municipio: m.codigo_ibge,
+                            municipio: m.cidade,
+                            uf: m.uf
                           }
-                        }));
-                      }}
-                      opcoes={opcoesMunicipios}
-                      placeholder={form.remetente_dados.municipio ? `${form.remetente_dados.municipio}/${form.remetente_dados.uf}` : 'Selecione...'}
+                        }))
+                      }
                     />
                   </CampoFiscal>
                   <CampoFiscal rotulo="CEP">
@@ -1329,23 +1338,25 @@ export default function CteWizardPage() {
                       />
                     </div>
                   </CampoFiscal>
-                  <CampoFiscal rotulo="Município / UF">
-                    <SelectFiscal
+                  <CampoFiscal rotulo="Município / UF (IBGE)">
+                    <SeletorMunicipioIbge
+                      municipios={municipios}
                       value={form.destinatario_dados.codigo_municipio}
-                      onChange={v => {
-                        const m = municipios.find((x: any) => x.codigo_ibge === v);
+                      nomeFallback={form.destinatario_dados.municipio}
+                      ufFallback={form.destinatario_dados.uf}
+                      ufPreferencial={form.destinatario_dados.uf || form.uf_fim}
+                      placeholder="Buscar cidade ou IBGE..."
+                      onChange={m =>
                         setForm(f => ({
                           ...f,
                           destinatario_dados: {
                             ...f.destinatario_dados,
-                            codigo_municipio: v,
-                            municipio: m?.cidade || f.destinatario_dados.municipio,
-                            uf: m?.uf || f.destinatario_dados.uf
+                            codigo_municipio: m.codigo_ibge,
+                            municipio: m.cidade,
+                            uf: m.uf
                           }
-                        }));
-                      }}
-                      opcoes={opcoesMunicipios}
-                      placeholder={form.destinatario_dados.municipio ? `${form.destinatario_dados.municipio}/${form.destinatario_dados.uf}` : 'Selecione...'}
+                        }))
+                      }
                     />
                   </CampoFiscal>
                   <CampoFiscal rotulo="CEP">

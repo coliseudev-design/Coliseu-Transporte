@@ -28,8 +28,10 @@ const {
 } = require('../services/cargaConsolidatorService');
 const {
     resolverIbgeMunicipioAsync,
+    normalizarTextoBusca,
     normalizarUf,
     listarMunicipiosDicionario,
+    obterEstatisticasIbgeBrasil,
 } = require('../utils/ibgeMunicipios');
 const {
     EIXOS_VALIDOS,
@@ -3275,54 +3277,90 @@ router.get('/diagnostico', async (req, res) => {
 
 router.get('/municipios', async (req, res) => {
     const tenantId = req.tenant.id;
-    const { search = '', uf = '' } = req.query;
+    const { search = '', uf = '', limit, offset } = req.query;
 
     try {
         let sql = `
-            SELECT DISTINCT
-                COALESCE(r.cidade, c.nome) AS cidade,
-                COALESCE(r.uf, c.uf) AS uf,
-                COALESCE(r.cod_ibge, c.codigo_ibge) AS codigo_ibge
-            FROM dash_regioes r
-            FULL OUTER JOIN dash_coordenadas_municipios c ON UPPER(TRIM(c.nome)) = UPPER(TRIM(r.cidade))
-            WHERE (r.tenant_id = $1 OR r.tenant_id IS NULL)
+            SELECT id, codigo, cidade, distrito, uf, localizacao, cod_ibge AS codigo_ibge
+            FROM dash_regioes
+            WHERE tenant_id = $1
         `;
         const params = [tenantId];
 
         if (uf) {
             const ufNorm = normalizarUf(uf) || String(uf).toUpperCase().trim().slice(0, 2);
             params.push(ufNorm);
-            sql += ` AND (UPPER(TRIM(r.uf)) = $${params.length} OR UPPER(TRIM(c.uf)) = $${params.length})`;
+            sql += ` AND (UPPER(TRIM(uf)) = $${params.length} OR LENGTH(TRIM(uf)) > 2)`;
         }
 
         if (search) {
             params.push(`%${search.trim()}%`);
-            sql += ` AND (r.cidade ILIKE $${params.length} OR c.nome ILIKE $${params.length} OR r.cod_ibge ILIKE $${params.length} OR c.codigo_ibge ILIKE $${params.length})`;
+            sql += ` AND (cidade ILIKE $${params.length} OR COALESCE(distrito, '') ILIKE $${params.length} OR COALESCE(cod_ibge, '') ILIKE $${params.length})`;
         }
 
-        sql += ` ORDER BY cidade ASC LIMIT 1200`;
+        sql += ` ORDER BY cidade ASC LIMIT 2000`;
 
-        const { rows } = await db.query(sql, params).catch(() => ({ rows: [] }));
+        const { rows: regRows } = await db.query(sql, params).catch(() => ({ rows: [] }));
         const dictList = listarMunicipiosDicionario(uf, search);
+        const statsBrasil = obterEstatisticasIbgeBrasil();
+        const ufFiltroNorm = uf ? (normalizarUf(uf) || String(uf).toUpperCase().trim().slice(0, 2)) : '';
 
         const merged = new Map();
-        for (const r of rows) {
-            if (!r.cidade) continue;
-            const ufItem = normalizarUf(r.uf) || String(r.uf || '').toUpperCase().trim();
-            const key = `${String(r.cidade).toUpperCase().trim()}|${ufItem}`;
+
+        // 1. Carrega todos os municípios oficiais do IBGE (5.571 cidades / 27 UFs)
+        for (const d of dictList) {
+            const key = `${normalizarTextoBusca(d.nome)}|${d.uf}`;
             merged.set(key, {
-                cidade: r.cidade,
-                uf: ufItem,
-                codigo_ibge: r.codigo_ibge,
+                cidade: d.nome,
+                uf: d.uf,
+                codigo_ibge: d.codigo,
+                origem: 'IBGE',
             });
         }
-        for (const d of dictList) {
-            const key = `${String(d.nome).toUpperCase().trim()}|${d.uf}`;
-            if (!merged.has(key) || !merged.get(key).codigo_ibge) {
-                merged.set(key, {
-                    cidade: d.nome,
-                    uf: d.uf,
-                    codigo_ibge: d.codigo,
+
+        // 2. Mescla distritos/localidades extras cadastrados ou sincronizados em dash_regioes
+        for (const r of regRows) {
+            if (!r.cidade) continue;
+            const ufItem = normalizarUf(r.uf) || String(r.uf || '').toUpperCase().trim().slice(0, 2);
+            if (ufFiltroNorm && ufItem !== ufFiltroNorm) continue;
+            const codDigits = String(r.codigo_ibge || '').replace(/\D/g, '');
+            const baseKey = `${normalizarTextoBusca(r.cidade)}|${ufItem}`;
+            const hasCustomDistrito =
+                r.distrito &&
+                normalizarTextoBusca(r.distrito) !== '' &&
+                normalizarTextoBusca(r.distrito) !== normalizarTextoBusca(r.cidade);
+
+            if (hasCustomDistrito) {
+                const distKey = `${baseKey}|${normalizarTextoBusca(r.distrito)}`;
+                const existenteIbge = merged.get(baseKey);
+                merged.set(distKey, {
+                    id_regiao_local: r.id,
+                    codigo_local: r.codigo,
+                    cidade: `${r.cidade} (${r.distrito})`,
+                    municipio_base: r.cidade,
+                    distrito: r.distrito,
+                    localizacao: r.localizacao || '',
+                    uf: ufItem,
+                    codigo_ibge: codDigits.length === 7 ? codDigits : (existenteIbge?.codigo_ibge || ''),
+                    origem: 'PERSONALIZADO',
+                });
+            } else if (!merged.has(baseKey)) {
+                merged.set(baseKey, {
+                    id_regiao_local: r.id,
+                    codigo_local: r.codigo,
+                    cidade: r.cidade,
+                    localizacao: r.localizacao || '',
+                    uf: ufItem,
+                    codigo_ibge: codDigits,
+                    origem: 'PERSONALIZADO',
+                });
+            } else if (r.localizacao || r.id) {
+                const atual = merged.get(baseKey);
+                merged.set(baseKey, {
+                    ...atual,
+                    id_regiao_local: r.id,
+                    codigo_local: r.codigo,
+                    localizacao: r.localizacao || atual.localizacao || '',
                 });
             }
         }
@@ -3331,9 +3369,16 @@ router.get('/municipios', async (req, res) => {
             String(a.cidade || '').localeCompare(String(b.cidade || ''), 'pt-BR')
         );
 
+        const maxLimit = limit !== undefined ? Math.min(Math.max(parseInt(limit, 10) || 100, 1), 6000) : 6000;
+        const startOffset = offset !== undefined ? Math.max(parseInt(offset, 10) || 0, 0) : 0;
+
         return res.json({
             success: true,
-            data: listaOrdenada.slice(0, 1500),
+            total: listaOrdenada.length,
+            total_brasil: statsBrasil.total_municipios,
+            total_ufs: statsBrasil.total_ufs,
+            por_uf: statsBrasil.por_uf,
+            data: listaOrdenada.slice(startOffset, startOffset + maxLimit),
         });
     } catch (err) {
         logger.error('[Transporte] Erro ao buscar municípios:', err.message);

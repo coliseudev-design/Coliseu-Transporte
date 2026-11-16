@@ -775,3 +775,119 @@ test('GOLIVE-09: Modo Híbrido (Com Worker ERP) vs Modo Independente (Sem ERP) �
     db.pool.connect = prevPoolConnect;
   }
 });
+
+test('GOLIVE-10: Catálogo Oficial Completo IBGE (5.571 municípios / 27 UFs) + Distritos Personalizados', async () => {
+  const express = require('express');
+  const transporteRouter = require('../src/routes/transporte');
+  const cadastrosRouter = require('../src/routes/cadastros');
+  const {
+    obterEstatisticasIbgeBrasil,
+    resolverIbgeMunicipioSync,
+  } = require('../src/utils/ibgeMunicipios');
+
+  // 1. Cobertura integral da malha oficial IBGE (27 UFs, 5.571 municípios)
+  const stats = obterEstatisticasIbgeBrasil();
+  assert.equal(stats.total_municipios >= 5570, true, `Esperado >= 5570 municípios oficiais, obtido ${stats.total_municipios}`);
+  assert.equal(stats.total_ufs, 27, 'Deve cobrir todas as 27 Unidades da Federação');
+
+  // 2. Resolução exata de municípios pequenos/médios/novos que antes não estavam no dicionário parcial
+  const abdon = resolverIbgeMunicipioSync('', 'Abdon Batista', 'SC');
+  assert.equal(abdon.codigo, '4200051');
+  assert.equal(abdon.exato, true);
+
+  const sorriso = resolverIbgeMunicipioSync('', 'Sorriso', 'MT');
+  assert.equal(sorriso.codigo, '5107925');
+  assert.equal(sorriso.exato, true);
+
+  const uberlandia = resolverIbgeMunicipioSync('', 'Uberlandia', 'MG');
+  assert.equal(uberlandia.codigo, '3170206');
+  assert.equal(uberlandia.exato, true);
+
+  const boaEsperanca = resolverIbgeMunicipioSync('', 'Boa Esperanca do Norte', 'MT');
+  assert.equal(boaEsperanca.codigo, '5101837');
+  assert.equal(boaEsperanca.exato, true);
+
+  // Lookup reverso somente pelo código IBGE de 7 dígitos
+  const reverso = resolverIbgeMunicipioSync('4200051', '', '');
+  assert.equal(reverso.nome, 'Abdon Batista');
+  assert.equal(reverso.uf, 'SC');
+
+  // 3. API /api/transporte/municipios + /api/cadastros/regioes (distritos personalizados com herança IBGE)
+  const prevQuery = db.query;
+  let distritoSalvo = null;
+  try {
+    db.query = async (sql, params) => {
+      const s = String(sql);
+      if (s.includes('AS next_cod')) {
+        return { rows: [{ next_cod: 1001 }], rowCount: 1 };
+      }
+      if (s.includes('FROM dash_regioes')) {
+        return {
+          rows: distritoSalvo ? [distritoSalvo] : [],
+          rowCount: distritoSalvo ? 1 : 0,
+        };
+      }
+      if (s.includes('INSERT INTO dash_regioes')) {
+        distritoSalvo = {
+          id: 77,
+          codigo: params[1],
+          cidade: params[2],
+          distrito: params[3],
+          uf: params[4],
+          localizacao: params[5],
+          cod_ibge: params[6],
+          cod_pais: params[7],
+          nome_pais: params[8],
+        };
+        return { rows: [distritoSalvo], rowCount: 1 };
+      }
+      return { rows: [{ proximo: 1001 }], rowCount: 1 };
+    };
+
+    const testApp = express();
+    testApp.use(express.json());
+    testApp.use((req, _res, next) => {
+      req.tenant = { id: '33333333-4444-5555-6666-777777777777' };
+      req.user = { id: 1, role: 'admin', grupo_nome: 'Master' };
+      next();
+    });
+    testApp.use('/api/transporte', transporteRouter);
+    testApp.use('/api/cadastros', cadastrosRouter);
+
+    const srv = await startEphemeralServer(testApp);
+    try {
+      const rAll = await fetch(`${srv.url}/api/transporte/municipios`);
+      assert.equal(rAll.status, 200);
+      const jAll = await rAll.json();
+      assert.equal(jAll.total >= 5570, true);
+      assert.equal(jAll.total_ufs, 27);
+      assert.equal(jAll.por_uf.MG, 853);
+      assert.equal(jAll.por_uf.SP, 645);
+      assert.equal(jAll.por_uf.MS, 79);
+
+      const rBusca = await fetch(`${srv.url}/api/transporte/municipios?uf=SC&search=abdon`);
+      const jBusca = await rBusca.json();
+      assert.equal(jBusca.data.length >= 1, true);
+      assert.equal(jBusca.data[0].codigo_ibge, '4200051');
+
+      // Cadastro de distrito local sem informar cod_ibge -> herda automaticamente 5003702 de Dourados/MS
+      const rPostDistrito = await fetch(`${srv.url}/api/cadastros/regioes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          cidade: 'DOURADOS',
+          uf: 'MS',
+          distrito: 'VILA VARGAS',
+          localizacao: 'BR-163 KM 285',
+        }),
+      });
+      assert.equal(rPostDistrito.status, 201);
+      const jPostDistrito = await rPostDistrito.json();
+      assert.equal(jPostDistrito.data.cod_ibge, '5003702');
+    } finally {
+      await srv.close();
+    }
+  } finally {
+    db.query = prevQuery;
+  }
+});

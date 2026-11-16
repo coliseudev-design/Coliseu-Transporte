@@ -11,7 +11,7 @@ import DashboardLayout from './components/DashboardLayout'
 import Home from './pages/Home'
 import Usuarios from './pages/Usuarios'
 import Clientes from './pages/Clientes'
-import CadastrosPage from './pages/CadastrosPage'
+import RegioesCidadesPage from './pages/transporte/RegioesCidadesPage'
 
 // ─────────────────────────────────────────────────────────────
 // Módulo Coliseu Transporte
@@ -133,10 +133,11 @@ export default function App() {
         <Route path="transporte/cte/novo" element={<RequirePermission module="documentos" submenu="emitir_cte"><CteWizardPage /></RequirePermission>} />
         <Route path="transporte/mdfe/novo" element={<RequirePermission module="documentos" submenu="emitir_mdfe"><MdfeWizardPage /></RequirePermission>} />
 
-        {/* ── Cadastros do ERP Sincronizados ── */}
+        {/* ── Cadastros Híbridos (ERP Coliseu + Nativo Transporte + Catálogo Oficial IBGE) ── */}
         <Route path="clientes" element={<RequirePermission module="cadastros" submenu="clientes"><Clientes /></RequirePermission>} />
-        <Route path="regioes" element={<RequirePermission module="cadastros" submenu="regioes"><CadastrosPage type="regioes" /></RequirePermission>} />
-        <Route path="departamentos" element={<RequirePermission module="cadastros" submenu="regioes"><CadastrosPage type="regioes" /></RequirePermission>} />
+        <Route path="regioes" element={<RequirePermission module="cadastros" submenu="regioes"><RegioesCidadesPage /></RequirePermission>} />
+        <Route path="transporte/regioes" element={<RequirePermission module="cadastros" submenu="regioes"><RegioesCidadesPage /></RequirePermission>} />
+        <Route path="departamentos" element={<Navigate to="/regioes" replace />} />
 
         {/* Administração (mantida do sistema base) */}
         <Route path="usuarios" element={<RequirePermission module="configuracoes" submenu="usuarios"><Usuarios /></RequirePermission>} />

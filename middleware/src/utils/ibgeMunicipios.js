@@ -255,6 +255,7 @@ function normalizarUf(valor) {
 const INDEX_POR_CHAVE_UF_CIDADE = new Map();
 const INDEX_POR_CODIGO_IBGE = new Map();
 const INDEX_POR_CIDADE_UNICA = new Map();
+const CONTAGEM_POR_UF = {};
 
 function registrarMunicipioCache(codigo, nome, uf) {
   const cod = digitsOnly(codigo);
@@ -263,16 +264,34 @@ function registrarMunicipioCache(codigo, nome, uf) {
   if (cod.length !== 7 || !ufNorm || !nomeLimpo) return;
 
   const chaveCidade = normalizarTextoBusca(nomeLimpo);
-  const registro = { codigo: cod, nome: nomeLimpo, uf: ufNorm };
+  const jaExistia = INDEX_POR_CODIGO_IBGE.has(cod);
+  const registro = { codigo: cod, nome: nomeLimpo, uf: ufNorm, nome_busca: chaveCidade };
   INDEX_POR_CODIGO_IBGE.set(cod, registro);
   INDEX_POR_CHAVE_UF_CIDADE.set(`${ufNorm}:${chaveCidade}`, registro);
   if (!INDEX_POR_CIDADE_UNICA.has(chaveCidade)) {
     INDEX_POR_CIDADE_UNICA.set(chaveCidade, registro);
   }
+  if (!jaExistia) {
+    CONTAGEM_POR_UF[ufNorm] = (CONTAGEM_POR_UF[ufNorm] || 0) + 1;
+  }
 }
 
 for (const [cod, nome, uf] of MUNICIPIOS_BASE) {
   registrarMunicipioCache(cod, nome, uf);
+}
+
+// Carrega a tabela oficial completa do IBGE (todos os 5.571 municípios brasileiros das 27 UFs)
+try {
+  const MUNICIPIOS_BRASIL_COMPLETO = require('../data/ibgeMunicipiosBrasil.json');
+  if (Array.isArray(MUNICIPIOS_BRASIL_COMPLETO)) {
+    for (const item of MUNICIPIOS_BRASIL_COMPLETO) {
+      if (Array.isArray(item) && item.length >= 3) {
+        registrarMunicipioCache(item[0], item[1], item[2]);
+      }
+    }
+  }
+} catch (_) {
+  // Fallback gracioso para MUNICIPIOS_BASE caso arquivo estático não esteja presente
 }
 
 /**
@@ -402,12 +421,26 @@ async function resolverIbgeMunicipioAsync(dbOrClient, codigoIbge, nomeMunicipio,
 function listarMunicipiosDicionario(ufFiltro = '', busca = '') {
   const ufNorm = normalizarUf(ufFiltro);
   const q = normalizarTextoBusca(busca);
-  const lista = Array.from(INDEX_POR_CODIGO_IBGE.values()).filter((m) => {
-    if (ufNorm && m.uf !== ufNorm) return false;
-    if (q && !normalizarTextoBusca(m.nome).includes(q) && !m.codigo.includes(q)) return false;
-    return true;
-  });
+  const qDigits = digitsOnly(busca);
+  const lista = [];
+  for (const m of INDEX_POR_CODIGO_IBGE.values()) {
+    if (ufNorm && m.uf !== ufNorm) continue;
+    if (q) {
+      const matchNome = m.nome_busca.includes(q);
+      const matchCod = qDigits.length >= 2 && m.codigo.includes(qDigits);
+      if (!matchNome && !matchCod) continue;
+    }
+    lista.push({ codigo: m.codigo, nome: m.nome, uf: m.uf });
+  }
   return lista.sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+}
+
+function obterEstatisticasIbgeBrasil() {
+  return {
+    total_municipios: INDEX_POR_CODIGO_IBGE.size,
+    total_ufs: Object.keys(CONTAGEM_POR_UF).length,
+    por_uf: { ...CONTAGEM_POR_UF },
+  };
 }
 
 module.exports = {
@@ -420,4 +453,5 @@ module.exports = {
   resolverIbgeMunicipioSync,
   resolverIbgeMunicipioAsync,
   listarMunicipiosDicionario,
+  obterEstatisticasIbgeBrasil,
 };

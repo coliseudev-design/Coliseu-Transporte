@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import api from '../../services/api';
+import SeletorMunicipioIbge from '../../components/fiscal/SeletorMunicipioIbge';
 import { Users, Plus, Pencil, Search, MapPin, Building2 } from 'lucide-react';
 
 interface Parte {
@@ -40,6 +41,14 @@ export default function PartesPage() {
     queryKey: ['partes', search],
     queryFn: async () => (await api.get('/transporte/partes', { params: { search } })).data
   });
+
+  const { data: municipiosData } = useQuery({
+    queryKey: ['catalogo-ibge-completo'],
+    queryFn: async () => (await api.get('/transporte/municipios', { params: { limit: 6000 } })).data,
+    enabled: !!editando,
+    staleTime: 5 * 60 * 1000
+  });
+  const municipiosIbge = municipiosData?.data || [];
 
   const partes: Parte[] = data?.data || [];
 
@@ -275,27 +284,39 @@ export default function PartesPage() {
                     className="w-full px-3.5 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white font-mono"
                   />
                 </div>
-                <div>
-                  <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1">Código IBGE</label>
-                  <input
-                    type="text" placeholder="5107875"
-                    value={editando.codigo_municipio}
-                    onChange={e => setEditando({ ...editando, codigo_municipio: e.target.value })}
-                    className="w-full px-3.5 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white font-mono"
-                  />
-                </div>
-                <div>
-                  <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1">Município</label>
-                  <input
-                    type="text"
-                    value={editando.municipio}
-                    onChange={e => setEditando({ ...editando, municipio: e.target.value })}
-                    className="w-full px-3.5 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white"
+                <div className="sm:col-span-2">
+                  <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1">
+                    Município Oficial IBGE (5.571 Cidades)
+                  </label>
+                  <SeletorMunicipioIbge
+                    municipios={municipiosIbge}
+                    value={editando.codigo_municipio || ''}
+                    nomeFallback={editando.municipio || ''}
+                    ufFallback={editando.uf || ''}
+                    ufPreferencial={editando.uf || ''}
+                    placeholder="Selecionar cidade / IBGE..."
+                    onChange={m =>
+                      setEditando({
+                        ...editando,
+                        codigo_municipio: m.codigo_ibge,
+                        municipio: m.cidade,
+                        uf: m.uf
+                      })
+                    }
                   />
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
+                <div>
+                  <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1">Código IBGE</label>
+                  <input
+                    type="text" placeholder="5003702"
+                    value={editando.codigo_municipio}
+                    onChange={e => setEditando({ ...editando, codigo_municipio: e.target.value.replace(/\D/g, '').slice(0, 7) })}
+                    className="w-full px-3.5 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white font-mono"
+                  />
+                </div>
                 <div>
                   <label className="block font-medium text-slate-700 dark:text-slate-300 text-xs mb-1">UF</label>
                   <input

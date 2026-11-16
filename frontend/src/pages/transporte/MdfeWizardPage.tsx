@@ -6,6 +6,7 @@ import { CampoFiscal, GradeCampos, SelectFiscal, InputFiscal, TextareaFiscal, ma
 import ListaEditavelFiscal, { BotaoRemover } from '../../components/fiscal/ListaEditavelFiscal';
 import SeletorNotasErp, { CargaErpItem } from '../../components/fiscal/SeletorNotasErp';
 import PainelSequenciaFiscal from '../../components/fiscal/PainelSequenciaFiscal';
+import SeletorMunicipioIbge from '../../components/fiscal/SeletorMunicipioIbge';
 import {
   Truck, Users, CreditCard, FileText, Package, Shield, Save, Send,
   ChevronLeft, ChevronRight, AlertTriangle, CheckCircle2, Loader2, Info,
@@ -178,8 +179,9 @@ export default function MdfeWizardPage() {
   );
 
   const { data: municipiosData } = useQuery({
-    queryKey: ['municipios-mdfe'],
-    queryFn: async () => (await api.get('/transporte/municipios')).data
+    queryKey: ['catalogo-ibge-completo'],
+    queryFn: async () => (await api.get('/transporte/municipios', { params: { limit: 6000 } })).data,
+    staleTime: 5 * 60 * 1000
   });
   const municipios = municipiosData?.data || [];
 
@@ -931,14 +933,25 @@ export default function MdfeWizardPage() {
                   </CampoFiscal>
 
                   <CampoFiscal rotulo="Município de Carga" obrigatorio erro={erros.dados.find(e => e.includes('Município de carga'))}>
-                    <SelectFiscal
+                    <SeletorMunicipioIbge
+                      municipios={municipios}
                       value={form.codigo_municipio_carga}
-                      onChange={v => {
-                        const m = municipios.find(x => x.codigo_ibge === v);
-                        setForm(f => ({ ...f, codigo_municipio_carga: v, municipio_carga: m?.cidade || '' }));
-                      }}
-                      opcoes={municipios.map(m => ({ valor: m.codigo_ibge, rotulo: `${m.cidade} / ${m.uf}` }))}
-                      placeholder="Selecione..."
+                      nomeFallback={form.municipio_carga}
+                      ufFallback={form.uf_inicio}
+                      ufPreferencial={form.uf_inicio}
+                      placeholder="Buscar município de carga (5.571 cidades IBGE)..."
+                      onChange={m =>
+                        setForm(f => {
+                          const ufCarga = m.uf || f.uf_inicio;
+                          return {
+                            ...f,
+                            codigo_municipio_carga: m.codigo_ibge,
+                            municipio_carga: m.cidade,
+                            uf_inicio: ufCarga,
+                            ufs_percurso: ufCarga && f.uf_fim ? resolverPercursoUfs(ufCarga, f.uf_fim) : f.ufs_percurso
+                          };
+                        })
+                      }
                     />
                   </CampoFiscal>
                 </GradeCampos>
