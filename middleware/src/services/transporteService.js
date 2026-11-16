@@ -7220,6 +7220,259 @@ class TransporteService {
 
     return { criadas, uf: ufEmit, situacao_tributaria: cstBase };
   }
+
+  /**
+   * Calcula o resumo em tempo real da sequência fiscal (CT-e e MDF-e) de um emitente por Série.
+   */
+  static async obterResumoSequenciaEmitente(
+    tenantId,
+    emitenteId,
+    { serieCte = null, serieMdfe = null } = {}
+  ) {
+    const emit = await this.getEmitente(tenantId, emitenteId);
+    if (!emit || !emit.id) {
+      const err = new Error('Empresa emitente não encontrada.');
+      err.statusCode = 404;
+      throw err;
+    }
+
+    const emitIdInt = parseInt(emit.id, 10);
+    const seriePadraoCte = String(Number(digitsOnly(emit.serie_cte) || 1) || 1);
+    const seriePadraoMdfe = String(Number(digitsOnly(emit.serie_mdfe) || 1) || 1);
+    const sCte = String(Number(digitsOnly(serieCte ?? seriePadraoCte) || 1) || 1);
+    const sMdfe = String(Number(digitsOnly(serieMdfe ?? seriePadraoMdfe) || 1) || 1);
+
+    const [cteMaxRes, mdfeMaxRes] = await Promise.all([
+      db.query(
+        `SELECT COALESCE(MAX(numero), 0)::int AS max_geral,
+                COALESCE(MAX(numero) FILTER (WHERE status IN ('AUTORIZADO', 'PROCESSANDO', 'CANCELADO')), 0)::int AS max_sefaz
+         FROM dash_ctes
+         WHERE tenant_id = $1
+           AND (emitente_id = $2 OR emitente_id IS NULL)
+           AND COALESCE(NULLIF(TRIM(serie::text), ''), '1') = $3`,
+        [tenantId, emitIdInt, sCte]
+      ),
+      db.query(
+        `SELECT COALESCE(MAX(numero), 0)::int AS max_geral,
+                COALESCE(MAX(numero) FILTER (WHERE status IN ('AUTORIZADO', 'PROCESSANDO', 'CANCELADO', 'ENCERRADO')), 0)::int AS max_sefaz
+         FROM dash_mdfes
+         WHERE tenant_id = $1
+           AND (emitente_id = $2 OR emitente_id IS NULL)
+           AND COALESCE(NULLIF(TRIM(serie::text), ''), '1') = $3`,
+        [tenantId, emitIdInt, sMdfe]
+      ),
+    ]);
+
+    const maxGeralCte = Number(cteMaxRes.rows[0]?.max_geral || 0);
+    const maxSefazCte = Number(cteMaxRes.rows[0]?.max_sefaz || 0);
+    const pisoMigracaoCte =
+      sCte === seriePadraoCte ? Math.max(0, parseInt(emit.ultimo_numero_cte ?? 0, 10) || 0) : 0;
+    const ultimoEfetivoCte = Math.max(maxGeralCte, pisoMigracaoCte);
+
+    const maxGeralMdfe = Number(mdfeMaxRes.rows[0]?.max_geral || 0);
+    const maxSefazMdfe = Number(mdfeMaxRes.rows[0]?.max_sefaz || 0);
+    const pisoMigracaoMdfe =
+      sMdfe === seriePadraoMdfe ? Math.max(0, parseInt(emit.ultimo_numero_mdfe ?? 0, 10) || 0) : 0;
+    const ultimoEfetivoMdfe = Math.max(maxGeralMdfe, pisoMigracaoMdfe);
+
+    return {
+      emitente_id: emitIdInt,
+      serie_cte: sCte,
+      ultimo_numero_cte: pisoMigracaoCte,
+      ultimo_numero_efetivo_cte: ultimoEfetivoCte,
+      maior_numero_cte_sefaz: maxSefazCte,
+      proximo_numero_cte: Math.max(1, ultimoEfetivoCte + 1),
+      serie_mdfe: sMdfe,
+      ultimo_numero_mdfe: pisoMigracaoMdfe,
+      ultimo_numero_efetivo_mdfe: ultimoEfetivoMdfe,
+      maior_numero_mdfe_sefaz: maxSefazMdfe,
+      proximo_numero_mdfe: Math.max(1, ultimoEfetivoMdfe + 1),
+    };
+  }
+
+  /**
+   * Atualiza a sequência contínua de CT-e ou MDF-e do emitente (exclusivo Admin/Master),
+   * bloqueando retrocesso/colisão contra números já utilizados na SEFAZ na mesma Série
+   * e sincronizando em best-effort com a Focus NFe.
+   */
+  static async atualizarSequenciaFiscalEmitente(
+    tenantId,
+    emitenteId,
+    { tipo, serie, proximo_numero, ultimo_numero, doc_id = null } = {}
+  ) {
+    const tipoNorm = String(tipo || 'CTE').trim().toUpperCase();
+    if (tipoNorm !== 'CTE' && tipoNorm !== 'MDFE') {
+      const err = new Error('Tipo de documento inválido para sequência fiscal. Use CTE ou MDFE.');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const emit = await this.getEmitente(tenantId, emitenteId);
+    if (!emit || !emit.id) {
+      const err = new Error('Empresa emitente não encontrada.');
+      err.statusCode = 404;
+      throw err;
+    }
+
+    const emitIdInt = parseInt(emit.id, 10);
+    const serieBase = tipoNorm === 'CTE' ? emit.serie_cte : emit.serie_mdfe;
+    const serieDigits = digitsOnly(serie !== undefined && serie !== null && String(serie).trim() !== '' ? serie : serieBase || '1');
+    const serieInt = parseInt(serieDigits, 10);
+    if (!Number.isInteger(serieInt) || serieInt < 1 || serieInt > 999) {
+      const err = new Error('Informe uma Série fiscal válida entre 1 e 999.');
+      err.statusCode = 400;
+      throw err;
+    }
+    const serieNorm = String(serieInt);
+
+    let proximoInt = null;
+    if (proximo_numero !== undefined && proximo_numero !== null && String(proximo_numero).trim() !== '') {
+      proximoInt = parseInt(String(proximo_numero).replace(/\D/g, ''), 10);
+    } else if (ultimo_numero !== undefined && ultimo_numero !== null && String(ultimo_numero).trim() !== '') {
+      const ult = parseInt(String(ultimo_numero).replace(/\D/g, ''), 10);
+      proximoInt = (Number.isInteger(ult) ? Math.max(0, ult) : 0) + 1;
+    }
+
+    if (!Number.isInteger(proximoInt) || proximoInt < 1 || proximoInt > 999999999) {
+      const err = new Error('Informe um Próximo Número válido (entre 1 e 999.999.999).');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const tabela = tipoNorm === 'CTE' ? 'dash_ctes' : 'dash_mdfes';
+    const labelDoc = tipoNorm === 'CTE' ? 'CT-e' : 'MDF-e';
+    const statusSefazList =
+      tipoNorm === 'CTE'
+        ? "('AUTORIZADO', 'PROCESSANDO', 'CANCELADO')"
+        : "('AUTORIZADO', 'PROCESSANDO', 'CANCELADO', 'ENCERRADO')";
+
+    const { rows: checkRows } = await db.query(
+      `SELECT COALESCE(MAX(numero) FILTER (WHERE status IN ${statusSefazList}), 0)::int AS max_sefaz,
+              EXISTS (
+                SELECT 1 FROM ${tabela}
+                WHERE tenant_id = $1
+                  AND (emitente_id = $2 OR emitente_id IS NULL)
+                  AND COALESCE(NULLIF(TRIM(serie::text), ''), '1') = $3
+                  AND numero = $4
+                  AND status IN ${statusSefazList}
+              ) AS numero_exato_usado
+       FROM ${tabela}
+       WHERE tenant_id = $1
+         AND (emitente_id = $2 OR emitente_id IS NULL)
+         AND COALESCE(NULLIF(TRIM(serie::text), ''), '1') = $3`,
+      [tenantId, emitIdInt, serieNorm, proximoInt]
+    );
+
+    const maxSefaz = Number(checkRows[0]?.max_sefaz || 0);
+    const exatoUsado = Boolean(checkRows[0]?.numero_exato_usado);
+
+    if (exatoUsado || proximoInt <= maxSefaz) {
+      const err = new Error(
+        `Não é permitido definir o próximo ${labelDoc} como nº ${proximoInt} na Série ${serieNorm}, pois a sequência SEFAZ nesta série já atingiu o nº ${maxSefaz}. Informe um número a partir de ${maxSefaz + 1} (ou utilize outra Série).`
+      );
+      err.statusCode = 409;
+      err.code = 'NUMERO_JA_AUTORIZADO_NA_SERIE';
+      throw err;
+    }
+
+    const novoUltimo = proximoInt - 1;
+    const colSerie = tipoNorm === 'CTE' ? 'serie_cte' : 'serie_mdfe';
+    const colUltimo = tipoNorm === 'CTE' ? 'ultimo_numero_cte' : 'ultimo_numero_mdfe';
+    const colCfgSerie = tipoNorm === 'CTE' ? 'focus_serie_cte' : 'focus_serie_mdfe';
+
+    await db.query(
+      `UPDATE dash_emitentes
+       SET ${colSerie} = $1,
+           ${colUltimo} = $2,
+           updated_at = NOW()
+       WHERE tenant_id = $3 AND id = $4`,
+      [serieNorm, novoUltimo, tenantId, emitIdInt]
+    );
+
+    await db
+      .query(
+        `UPDATE dash_integracoes_config
+         SET ${colCfgSerie} = $1, updated_at = NOW()
+         WHERE tenant_id = $2`,
+        [serieNorm, tenantId]
+      )
+      .catch(() => null);
+
+    // Limpa números provisórios >= proximoInt em rascunhos/rejeitados locais da mesma série para não pular a nova sequência
+    await db
+      .query(
+        `UPDATE ${tabela}
+         SET numero = NULL
+         WHERE tenant_id = $1
+           AND (emitente_id = $2 OR emitente_id IS NULL)
+           AND COALESCE(NULLIF(TRIM(serie::text), ''), '1') = $3
+           AND status IN ('RASCUNHO', 'REJEITADO')
+           AND numero >= $4`,
+        [tenantId, emitIdInt, serieNorm, proximoInt]
+      )
+      .catch(() => null);
+
+    if (doc_id) {
+      const docIdInt = parseInt(doc_id, 10);
+      if (docIdInt > 0) {
+        await db
+          .query(
+            `UPDATE ${tabela}
+             SET serie = $1, numero = NULL
+             WHERE tenant_id = $2 AND id = $3 AND status IN ('RASCUNHO', 'REJEITADO')`,
+            [serieNorm, tenantId, docIdInt]
+          )
+          .catch(() => null);
+      }
+    }
+
+    // Sincronização best-effort da nova série/próximo número na Focus NFe (/v2/empresas)
+    let focusSincronizado = false;
+    if (emit.focus_empresa_id) {
+      try {
+        const masterCfg = await this.getMasterFocusConfig();
+        if (masterCfg.temMasterToken && masterCfg.masterToken) {
+          const focusAdmin = new FocusClient({
+            token: masterCfg.masterToken,
+            ambiente: 'producao',
+          });
+          const focusPatch =
+            tipoNorm === 'CTE'
+              ? {
+                  serie_cte_producao: serieInt,
+                  serie_cte_homologacao: serieInt,
+                  proximo_numero_cte_producao: proximoInt,
+                  proximo_numero_cte_homologacao: proximoInt,
+                }
+              : {
+                  serie_mdfe_producao: serieInt,
+                  serie_mdfe_homologacao: serieInt,
+                  proximo_numero_mdfe_producao: proximoInt,
+                  proximo_numero_mdfe_homologacao: proximoInt,
+                };
+          await focusAdmin.atualizarEmpresa(emit.focus_empresa_id, focusPatch);
+          focusSincronizado = true;
+        }
+      } catch (focusErr) {
+        logger.warn('[SequenciaFiscal] Aviso ao sincronizar sequência na Focus NFe', {
+          tenantId,
+          emitenteId: emitIdInt,
+          erro: focusErr.message,
+        });
+      }
+    }
+
+    const resumo = await this.obterResumoSequenciaEmitente(tenantId, emitIdInt, {
+      serieCte: tipoNorm === 'CTE' ? serieNorm : null,
+      serieMdfe: tipoNorm === 'MDFE' ? serieNorm : null,
+    });
+
+    return {
+      ...resumo,
+      focus_sincronizado: focusSincronizado,
+      mensagem: `Sequência de ${labelDoc} atualizada: Série ${serieNorm} iniciará no nº ${proximoInt} (próximas emissões seguirão ${proximoInt}, ${proximoInt + 1}, ${proximoInt + 2}...).`,
+    };
+  }
 }
 
 TransporteService.validarCnpjReal = validarCnpjReal;

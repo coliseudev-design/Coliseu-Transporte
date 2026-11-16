@@ -11,6 +11,7 @@ const {
     requireSuperAdminMaster,
     isSuperAdminMaster,
     requireAdmin,
+    isTenantAdminOrMaster,
     requireActionPermission,
     invalidateUserAuthCache,
 } = require('../middleware/auth');
@@ -1489,6 +1490,28 @@ router.post('/ctes', requireActionPermission('permitir_emitir_cte'), async (req,
         }
 
         const modeloCodigo = b.modelo === '67' || b.modelo_cte === 'cteos' ? '67' : '57';
+        const emitPadrao = await TransporteService.getEmitente(tenantId, emitId).catch(() => null);
+        const seriePadraoEmit = String(Number(String(emitPadrao?.serie_cte || '1').replace(/\D/g, '')) || 1);
+        const isAdminSeq = isTenantAdminOrMaster(req);
+
+        let serieSalvarCte = seriePadraoEmit;
+        let numeroSalvarCte = null;
+        if (isAdminSeq) {
+            if (b.serie !== undefined && b.serie !== null && String(b.serie).trim() !== '') {
+                serieSalvarCte = String(Number(String(b.serie).replace(/\D/g, '')) || 1);
+            }
+            const numSolicitado = b.numero !== undefined && b.numero !== null && String(b.numero).trim() !== ''
+                ? parseInt(String(b.numero).replace(/\D/g, ''), 10)
+                : null;
+            if (numSolicitado && numSolicitado > 0) {
+                await TransporteService.atualizarSequenciaFiscalEmitente(tenantId, emitId, {
+                    tipo: 'CTE',
+                    serie: serieSalvarCte,
+                    proximo_numero: numSolicitado,
+                });
+                numeroSalvarCte = numSolicitado;
+            }
+        }
 
         const { rows } = await db.query(
             `INSERT INTO dash_ctes (
@@ -1531,8 +1554,8 @@ router.post('/ctes', requireActionPermission('permitir_emitir_cte'), async (req,
                 tenantId,
                 emitId,
                 ref,
-                b.serie || '1',
-                b.numero ? parseInt(b.numero, 10) : null,
+                serieSalvarCte,
+                numeroSalvarCte,
                 modeloCodigo,
                 b.formato_dacte || 'retrato',
                 b.finalidade || '0',
@@ -1876,7 +1899,7 @@ router.put('/ctes/:id', requireActionPermission('permitir_emitir_cte'), async (r
 
     try {
         const atualRes = await db.query(
-            `SELECT id, status FROM dash_ctes WHERE id = $1 AND tenant_id = $2`,
+            `SELECT id, emitente_id, serie, numero, status FROM dash_ctes WHERE id = $1 AND tenant_id = $2`,
             [cteId, tenantId]
         );
         if (atualRes.rows.length === 0) {
@@ -1886,6 +1909,28 @@ router.put('/ctes/:id', requireActionPermission('permitir_emitir_cte'), async (r
             return res.status(409).json({
                 error: 'CT-e já AUTORIZADO pela SEFAZ não pode ser alterado. Gere um novo documento para retificação ou teste.'
             });
+        }
+
+        const isAdminPutCte = isTenantAdminOrMaster(req);
+        let seriePutCte = null;
+        let numeroPutCte = null;
+        if (isAdminPutCte) {
+            if (b.serie !== undefined && b.serie !== null && String(b.serie).trim() !== '') {
+                seriePutCte = String(Number(String(b.serie).replace(/\D/g, '')) || 1);
+            }
+            const numCand = b.numero !== undefined && b.numero !== null && String(b.numero).trim() !== ''
+                ? parseInt(String(b.numero).replace(/\D/g, ''), 10)
+                : null;
+            if (numCand && numCand > 0 && numCand !== Number(atualRes.rows[0].numero || 0)) {
+                const emitAlvo = b.emitente_id || atualRes.rows[0].emitente_id;
+                await TransporteService.atualizarSequenciaFiscalEmitente(tenantId, emitAlvo, {
+                    tipo: 'CTE',
+                    serie: seriePutCte || atualRes.rows[0].serie || '1',
+                    proximo_numero: numCand,
+                    doc_id: cteId,
+                });
+                numeroPutCte = numCand;
+            }
         }
 
         const modeloCodigo = b.modelo === '67' || b.modelo_cte === 'cteos' ? '67' : '57';
@@ -1965,8 +2010,8 @@ router.put('/ctes/:id', requireActionPermission('permitir_emitir_cte'), async (r
              RETURNING *`,
             [
                 b.emitente_id || null,
-                b.serie || null,
-                b.numero ? parseInt(b.numero, 10) : null,
+                seriePutCte,
+                numeroPutCte,
                 modeloCodigo,
                 b.formato_dacte || null,
                 b.finalidade || null,
@@ -2417,6 +2462,28 @@ router.post('/mdfes', requireActionPermission('permitir_emitir_mdfe'), async (re
                 ((cargasIds.length > 0 || chavesNfeManuais.length > 0) && ctesIds.length === 0 ? '2' : '1')
         );
         const ref = TransporteService.gerarRef('MDFE', tenantId, Date.now().toString().slice(-6));
+        const emitPadraoMdfe = await TransporteService.getEmitente(tenantId, emitId).catch(() => null);
+        const seriePadraoEmitMdfe = String(Number(String(emitPadraoMdfe?.serie_mdfe || '1').replace(/\D/g, '')) || 1);
+        const isAdminMdfeSeq = isTenantAdminOrMaster(req);
+
+        let serieSalvarMdfe = seriePadraoEmitMdfe;
+        let numeroSalvarMdfe = null;
+        if (isAdminMdfeSeq) {
+            if (b.serie !== undefined && b.serie !== null && String(b.serie).trim() !== '') {
+                serieSalvarMdfe = String(Number(String(b.serie).replace(/\D/g, '')) || 1);
+            }
+            const numSolicitadoMdfe = b.numero !== undefined && b.numero !== null && String(b.numero).trim() !== ''
+                ? parseInt(String(b.numero).replace(/\D/g, ''), 10)
+                : null;
+            if (numSolicitadoMdfe && numSolicitadoMdfe > 0) {
+                await TransporteService.atualizarSequenciaFiscalEmitente(tenantId, emitId, {
+                    tipo: 'MDFE',
+                    serie: serieSalvarMdfe,
+                    proximo_numero: numSolicitadoMdfe,
+                });
+                numeroSalvarMdfe = numSolicitadoMdfe;
+            }
+        }
 
         const { rows } = await db.query(
             `INSERT INTO dash_mdfes (
@@ -2450,8 +2517,8 @@ router.post('/mdfes', requireActionPermission('permitir_emitir_mdfe'), async (re
                 tenantId,
                 emitId,
                 ref,
-                b.serie || '1',
-                b.numero ? parseInt(b.numero, 10) : null,
+                serieSalvarMdfe,
+                numeroSalvarMdfe,
                 tipoEmitenteFinal,
                 String(b.tipo_transporte || '1'),
                 normalizarUf(b.uf_inicio || 'MS') || 'MS',
@@ -2923,7 +2990,48 @@ router.get('/emitentes', async (req, res) => {
             rows = insRes.rows;
         }
 
-        const masterCfg = await TransporteService.getMasterFocusConfig();
+        const [masterCfg, cteSeqRes, mdfeSeqRes] = await Promise.all([
+            TransporteService.getMasterFocusConfig(),
+            db
+                .query(
+                    `SELECT COALESCE(emitente_id, 0)::int AS emit_id,
+                            COALESCE(NULLIF(TRIM(serie::text), ''), '1') AS serie_norm,
+                            COALESCE(MAX(numero), 0)::int AS max_geral,
+                            COALESCE(MAX(numero) FILTER (WHERE status IN ('AUTORIZADO', 'PROCESSANDO', 'CANCELADO')), 0)::int AS max_sefaz
+                     FROM dash_ctes
+                     WHERE tenant_id = $1
+                     GROUP BY COALESCE(emitente_id, 0), COALESCE(NULLIF(TRIM(serie::text), ''), '1')`,
+                    [tenantId]
+                )
+                .catch(() => ({ rows: [] })),
+            db
+                .query(
+                    `SELECT COALESCE(emitente_id, 0)::int AS emit_id,
+                            COALESCE(NULLIF(TRIM(serie::text), ''), '1') AS serie_norm,
+                            COALESCE(MAX(numero), 0)::int AS max_geral,
+                            COALESCE(MAX(numero) FILTER (WHERE status IN ('AUTORIZADO', 'PROCESSANDO', 'CANCELADO', 'ENCERRADO')), 0)::int AS max_sefaz
+                     FROM dash_mdfes
+                     WHERE tenant_id = $1
+                     GROUP BY COALESCE(emitente_id, 0), COALESCE(NULLIF(TRIM(serie::text), ''), '1')`,
+                    [tenantId]
+                )
+                .catch(() => ({ rows: [] })),
+        ]);
+
+        const lookupMax = (seqRows, emitIdNum, serieNorm) => {
+            let maxGeral = 0;
+            let maxSefaz = 0;
+            for (const row of seqRows) {
+                if (
+                    (Number(row.emit_id) === Number(emitIdNum) || Number(row.emit_id) === 0) &&
+                    String(row.serie_norm) === String(serieNorm)
+                ) {
+                    maxGeral = Math.max(maxGeral, Number(row.max_geral || 0));
+                    maxSefaz = Math.max(maxSefaz, Number(row.max_sefaz || 0));
+                }
+            }
+            return { maxGeral, maxSefaz };
+        };
 
         const enriched = rows.map((r) => {
             const rawTokHomolog =
@@ -2940,6 +3048,14 @@ router.get('/emitentes', async (req, res) => {
             const plainProd = String(decryptSecret(rawTokProd) || '').trim();
             const plainCiotToken = String(decryptSecret(r.ciot_integrador_token) || '').trim();
             const plainCiotSenha = String(decryptSecret(r.ciot_senha) || '').trim();
+            const serieCteNorm = String(Number(String(r.serie_cte || cfg.focus_serie_cte || '1').replace(/\D/g, '')) || 1);
+            const serieMdfeNorm = String(Number(String(r.serie_mdfe || cfg.focus_serie_mdfe || '1').replace(/\D/g, '')) || 1);
+            const pisoCte = Math.max(0, parseInt(r.ultimo_numero_cte ?? 0, 10) || 0);
+            const pisoMdfe = Math.max(0, parseInt(r.ultimo_numero_mdfe ?? 0, 10) || 0);
+            const cteStats = lookupMax(cteSeqRes.rows, r.id, serieCteNorm);
+            const mdfeStats = lookupMax(mdfeSeqRes.rows, r.id, serieMdfeNorm);
+            const ultimoEfetivoCte = Math.max(cteStats.maxGeral, pisoCte);
+            const ultimoEfetivoMdfe = Math.max(mdfeStats.maxGeral, pisoMdfe);
             return {
                 ...r,
                 focus_ambiente: r.focus_ambiente || cfg.focus_ambiente || 'homologacao',
@@ -2980,8 +3096,16 @@ router.get('/emitentes', async (req, res) => {
                         : String(r.mdfe_tipo_emitente_padrao || '1') === '2'
                         ? '2'
                         : '1',
-                serie_cte: r.serie_cte || cfg.focus_serie_cte || '1',
-                serie_mdfe: r.serie_mdfe || cfg.focus_serie_mdfe || '1',
+                serie_cte: serieCteNorm,
+                serie_mdfe: serieMdfeNorm,
+                ultimo_numero_cte: pisoCte,
+                ultimo_numero_mdfe: pisoMdfe,
+                ultimo_numero_efetivo_cte: ultimoEfetivoCte,
+                ultimo_numero_efetivo_mdfe: ultimoEfetivoMdfe,
+                maior_numero_cte_sefaz: cteStats.maxSefaz,
+                maior_numero_mdfe_sefaz: mdfeStats.maxSefaz,
+                proximo_numero_cte: Math.max(1, ultimoEfetivoCte + 1),
+                proximo_numero_mdfe: Math.max(1, ultimoEfetivoMdfe + 1),
                 cfop_padrao_cte: r.cfop_padrao_cte || cfg.focus_cfop_padrao || '5353',
                 natureza_padrao_cte:
                     r.natureza_padrao_cte || cfg.focus_natureza_padrao || 'PRESTACAO DE SERVICO DE TRANSPORTE',
@@ -2998,8 +3122,55 @@ router.get('/emitentes', async (req, res) => {
             meta: {
                 software_house_disponivel: masterCfg.temMasterToken,
                 is_super_admin_master: isSuperAdminMaster(req),
+                is_tenant_admin: isTenantAdminOrMaster(req),
                 webhook_endpoint: masterCfg.webhookEndpoint,
             },
+        });
+    } catch (err) {
+        return sendSafeError(res, err);
+    }
+});
+
+/**
+ * GET /api/transporte/emitentes/:id/sequencia
+ * Consulta em tempo real a Série, Último Emitido e Próximo Número de CT-e e MDF-e.
+ */
+router.get('/emitentes/:id/sequencia', async (req, res) => {
+    try {
+        const resumo = await TransporteService.obterResumoSequenciaEmitente(
+            req.tenant.id,
+            req.params.id,
+            {
+                serieCte: req.query.serie_cte || null,
+                serieMdfe: req.query.serie_mdfe || null,
+            }
+        );
+        return res.json({
+            success: true,
+            data: resumo,
+            is_tenant_admin: isTenantAdminOrMaster(req),
+        });
+    } catch (err) {
+        return sendSafeError(res, err);
+    }
+});
+
+/**
+ * PATCH /api/transporte/emitentes/:id/sequencia
+ * Exclusivo Administrador (Master): ajusta a Série e o Próximo Número contínuo da empresa,
+ * bloqueando colisão contra números já registrados na SEFAZ na mesma Série.
+ */
+router.patch('/emitentes/:id/sequencia', requireAdmin, async (req, res) => {
+    try {
+        const resultado = await TransporteService.atualizarSequenciaFiscalEmitente(
+            req.tenant.id,
+            req.params.id,
+            req.body || {}
+        );
+        return res.json({
+            success: true,
+            data: resultado,
+            mensagem: resultado.mensagem,
         });
     } catch (err) {
         return sendSafeError(res, err);

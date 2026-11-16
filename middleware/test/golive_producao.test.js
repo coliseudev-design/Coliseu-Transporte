@@ -516,3 +516,116 @@ test('GOLIVE-07: Isolamento total contra legados do Nexus (rotas desmontadas, we
   assert.equal(fs.existsSync(path.join(frontendPublic, 'nexus-logo.png')), false);
   assert.equal(fs.existsSync(path.join(frontendPublic, 'assets', 'logo-coliseu-transporte.svg')), true);
 });
+
+test('GOLIVE-08: Painel de Sequência Fiscal restringe ajuste a Admin (Master), bloqueia nº já usado na SEFAZ e atualiza sequência contínua', async () => {
+  const express = require('express');
+  const transporteRouter = require('../src/routes/transporte');
+  const prevQuery = db.query;
+
+  let estadoEmitente = {
+    id: 5,
+    tenant_id: '11111111-2222-3333-4444-555555555555',
+    cnpj: '12345678000199',
+    razao_social: 'TRANSPORTADORA SEQUENCIA LTDA',
+    serie_cte: '1',
+    serie_mdfe: '1',
+    ultimo_numero_cte: 120,
+    ultimo_numero_mdfe: 40,
+    focus_empresa_id: null,
+  };
+
+  try {
+    db.query = async (sql, params = []) => {
+      const s = String(sql);
+      if (s.includes('FROM dash_emitentes')) {
+        return { rows: [{ ...estadoEmitente }] };
+      }
+      if (s.includes('FROM dash_integracoes_config')) {
+        return { rows: [{}] };
+      }
+      if (s.includes('numero_exato_usado') && s.includes('FROM dash_ctes')) {
+        const serieConsultada = String(params[2] || '1');
+        const numTentado = Number(params[3] || 0);
+        const maxSefaz = serieConsultada === '1' ? 120 : 0;
+        return {
+          rows: [
+            {
+              max_sefaz: maxSefaz,
+              numero_exato_usado: serieConsultada === '1' && numTentado <= 120,
+            },
+          ],
+        };
+      }
+      if (s.includes('UPDATE dash_emitentes') && s.includes('ultimo_numero_cte')) {
+        estadoEmitente.serie_cte = String(params[0]);
+        estadoEmitente.ultimo_numero_cte = Number(params[1]);
+        return { rowCount: 1, rows: [{ ...estadoEmitente }] };
+      }
+      if (s.includes('MAX(numero)') && s.includes('FROM dash_ctes')) {
+        const serieQ = String(params[2] || '1');
+        const maxSefaz = serieQ === '1' ? 120 : 0;
+        return { rows: [{ max_geral: maxSefaz, max_sefaz: maxSefaz }] };
+      }
+      if (s.includes('MAX(numero)') && s.includes('FROM dash_mdfes')) {
+        return { rows: [{ max_geral: 40, max_sefaz: 40 }] };
+      }
+      return { rows: [], rowCount: 0 };
+    };
+
+    // 1. Monta servidor efêmero simulando usuário Operador Fiscal vs Admin Master
+    let currentRole = 'viewer';
+    let currentGrupo = 'Fiscal / Emissão';
+    const testApp = express();
+    testApp.use(express.json());
+    testApp.use((req, _res, next) => {
+      req.tenant = { id: estadoEmitente.tenant_id };
+      req.user = {
+        id: 88,
+        email: 'operador@transportadora.com.br',
+        role: currentRole,
+        grupo_nome: currentGrupo,
+        permissoes_acoes: { permitir_emitir_cte: true, permitir_emitir_mdfe: true },
+      };
+      next();
+    });
+    testApp.use('/api/transporte', transporteRouter);
+
+    const srv = await startEphemeralServer(testApp);
+    try {
+      // A1: Operador comum (Fiscal / Emissão) é bloqueado ao tentar alterar sequência
+      const rViewer = await fetch(`${srv.url}/api/transporte/emitentes/5/sequencia`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tipo: 'CTE', serie: '1', proximo_numero: 1850 }),
+      });
+      assert.equal(rViewer.status, 403);
+
+      // Promove contexto para Administrador (Master)
+      currentRole = 'admin';
+      currentGrupo = 'Master';
+
+      // A2: Bloqueia tentativa de definir próximo número <= maior já utilizado na SEFAZ (120)
+      const rColisao = await fetch(`${srv.url}/api/transporte/emitentes/5/sequencia`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tipo: 'CTE', serie: '1', proximo_numero: 120 }),
+      });
+      assert.equal(rColisao.status, 409);
+
+      // A2: Define próximo número contínuo = 1850 -> grava ultimo_numero_cte = 1849 e retorna proximo_numero_cte = 1850
+      const rOk = await fetch(`${srv.url}/api/transporte/emitentes/5/sequencia`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tipo: 'CTE', serie: '1', proximo_numero: 1850 }),
+      });
+      assert.equal(rOk.status, 200);
+      const jOk = await rOk.json();
+      assert.equal(estadoEmitente.ultimo_numero_cte, 1849);
+      assert.equal(jOk.data.proximo_numero_cte, 1850);
+    } finally {
+      await srv.close();
+    }
+  } finally {
+    db.query = prevQuery;
+  }
+});

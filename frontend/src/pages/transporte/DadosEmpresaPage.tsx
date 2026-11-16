@@ -303,6 +303,10 @@ export default function DadosEmpresaPage() {
       emAtual?.razao_social,
       emAtual?.perfil_operacional,
       emAtual?.mdfe_tipo_emitente_padrao,
+      emAtual?.serie_cte,
+      emAtual?.serie_mdfe,
+      emAtual?.ultimo_numero_cte,
+      emAtual?.ultimo_numero_mdfe,
       emAtual?.ciot_provedor,
       emAtual?.ciot_ambiente
     ]);
@@ -721,13 +725,22 @@ export default function DadosEmpresaPage() {
             Provisionamento automático na Focus NFe v2, Certificado A1, Webhooks SEFAZ e parâmetros fiscais.
           </p>
         </div>
-        <span className={`px-3.5 py-1.5 rounded-full text-xs font-bold uppercase tracking-wider self-start sm:self-auto ${
-          form.focus_ambiente === 'producao'
-            ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300'
-            : 'bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300'
-        }`}>
-          Ambiente Ativo: {form.focus_ambiente === 'producao' ? 'Produção (SEFAZ Real)' : 'Homologação (Testes)'}
-        </span>
+        <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
+          <a
+            href="#secao-sequencia-fiscal"
+            className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-xs font-bold bg-slate-100 hover:bg-slate-200 dark:bg-slate-900 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 border border-slate-200 dark:border-slate-700 transition-colors"
+          >
+            <FileText className="w-3.5 h-3.5 text-brand-600 dark:text-brand-400" />
+            Sequência CT-e (#{String(emAtual?.proximo_numero_cte || (Number(form.ultimo_numero_cte || 0) + 1)).padStart(6, '0')})
+          </a>
+          <span className={`px-3.5 py-1.5 rounded-full text-xs font-bold uppercase tracking-wider ${
+            form.focus_ambiente === 'producao'
+              ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300'
+              : 'bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300'
+          }`}>
+            Ambiente Ativo: {form.focus_ambiente === 'producao' ? 'Produção (SEFAZ Real)' : 'Homologação (Testes)'}
+          </span>
+        </div>
       </div>
 
       {/* Painel Exclusivo Super Admin Master — Conta Software House Focus NFe (Coliseu Sistemas) */}
@@ -1637,11 +1650,11 @@ export default function DadosEmpresaPage() {
           </div>
         </div>
 
-        {/* 4. Parâmetros Fiscais Padrão */}
-        <div className="pt-4 border-t border-slate-100 dark:border-slate-700/60">
+        {/* 4. Parâmetros Fiscais Padrão & Sequência de Numeração */}
+        <div id="secao-sequencia-fiscal" className="pt-4 border-t border-slate-100 dark:border-slate-700/60 scroll-mt-6">
           <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4 flex items-center gap-2">
             <FileText className="w-4 h-4" />
-            Parâmetros Fiscais Padrão (Regime Tributário, Séries e ICMS)
+            Sequência de Numeração Fiscal (CT-e / MDF-e) e Parâmetros Tributários
           </h3>
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
             <div className="md:col-span-2">

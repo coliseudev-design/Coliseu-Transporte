@@ -5,6 +5,7 @@ import api from '../../services/api';
 import { CampoFiscal, GradeCampos, SelectFiscal, InputFiscal, TextareaFiscal, mascaras } from '../../components/fiscal/CampoFiscal';
 import ListaEditavelFiscal, { BotaoRemover } from '../../components/fiscal/ListaEditavelFiscal';
 import SeletorNotasErp, { CargaErpItem } from '../../components/fiscal/SeletorNotasErp';
+import PainelSequenciaFiscal from '../../components/fiscal/PainelSequenciaFiscal';
 import {
   Truck, Users, CreditCard, FileText, Package, Shield, Save, Send,
   ChevronLeft, ChevronRight, AlertTriangle, CheckCircle2, Loader2, Info,
@@ -689,9 +690,9 @@ export default function MdfeWizardPage() {
                 Preencher Dados de Teste (Homologação)
               </button>
             )}
-            <span className="text-white/80 text-[11px] font-mono">
-              {form.serie ? `Série ${form.serie}` : 'Série 1'}
-              {form.numero ? ` · Nº ${form.numero}` : ''}
+            <span className="text-white/90 text-[11px] font-mono font-semibold bg-black/15 px-2.5 py-1 rounded-lg">
+              {`Série ${form.serie || emitenteSelecionado?.serie_mdfe || '1'}`}
+              {` · Próx. #${String(form.numero || emitenteSelecionado?.proximo_numero_mdfe || 1).padStart(6, '0')}`}
             </span>
             <button
               onClick={() => navigate('/transporte/mdfes')}
@@ -805,6 +806,17 @@ export default function MdfeWizardPage() {
                 </button>
               </div>
 
+              <PainelSequenciaFiscal
+                tipo="MDFE"
+                emitente={emitenteSelecionado}
+                docId={mdfeId}
+                numeroRascunhoAtual={form.numero || null}
+                isTenantAdminMeta={emitentesData?.meta?.is_tenant_admin}
+                onSequenciaAtualizada={({ serie }) =>
+                  setForm(f => ({ ...f, serie, numero: '' }))
+                }
+              />
+
               {/* Bloco: Dados Gerais */}
               <fieldset className="border border-slate-200 dark:border-slate-700 rounded-xl p-4">
                 <legend className="px-2 text-xs font-bold text-slate-500 uppercase tracking-wider">
@@ -821,6 +833,8 @@ export default function MdfeWizardPage() {
                         if (em) {
                           setForm(f => ({
                             ...f,
+                            serie: String(em.serie_mdfe || f.serie || '1'),
+                            numero: '',
                             uf_inicio: f.uf_inicio || em.uf || '',
                             codigo_municipio_carga: f.codigo_municipio_carga || em.codigo_municipio || '',
                             municipio_carga: f.municipio_carga || em.municipio || ''
@@ -860,12 +874,18 @@ export default function MdfeWizardPage() {
                     <InputFiscal value="58 — Manifesto Eletrônico" disabled />
                   </CampoFiscal>
 
-                  <CampoFiscal rotulo="Série">
-                    <InputFiscal value={form.serie} onChange={v => setCampo('serie', v)} />
+                  <CampoFiscal rotulo="Série Ativa" dica="Ajustável pelo Admin no painel acima">
+                    <InputFiscal
+                      value={form.serie || emitenteSelecionado?.serie_mdfe || '1'}
+                      disabled
+                    />
                   </CampoFiscal>
 
-                  <CampoFiscal rotulo="Número" obrigatorio>
-                    <InputFiscal value={form.numero} onChange={v => setCampo('numero', v)} placeholder="Automático" />
+                  <CampoFiscal rotulo="Próximo Número" dica="Sequência contínua automática">
+                    <InputFiscal
+                      value={`#${String(form.numero || emitenteSelecionado?.proximo_numero_mdfe || 1).padStart(6, '0')} (Automático)`}
+                      disabled
+                    />
                   </CampoFiscal>
 
                   <CampoFiscal rotulo="Estado de Carga" obrigatorio erro={erros.dados.find(e => e.includes('Estado de carga'))}>

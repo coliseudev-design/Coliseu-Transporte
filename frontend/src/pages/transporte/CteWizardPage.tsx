@@ -6,6 +6,7 @@ import WizardStepper from '../../components/fiscal/WizardStepper';
 import { CampoFiscal, GradeCampos, SelectFiscal, InputFiscal, TextareaFiscal, mascaras } from '../../components/fiscal/CampoFiscal';
 import ListaEditavelFiscal, { BotaoRemover } from '../../components/fiscal/ListaEditavelFiscal';
 import SeletorNotasErp from '../../components/fiscal/SeletorNotasErp';
+import PainelSequenciaFiscal from '../../components/fiscal/PainelSequenciaFiscal';
 import {
   FileText, Users, Wallet, Package, Truck, FileText as FileIcon,
   Save, Send, ChevronLeft, ChevronRight, AlertTriangle,
@@ -131,6 +132,7 @@ export default function CteWizardPage() {
   const [form, setForm] = useState({
     // Aba 1 — Dados
     emitente_id: '',
+    serie: '1',
     modelo: '57',
     modelo_cte: 'normal',
     cfop: '5353',
@@ -332,6 +334,7 @@ export default function CteWizardPage() {
       setForm(f => ({
         ...f,
         emitente_id: String(em.id),
+        serie: String(em.serie_cte || f.serie || '1'),
         rntrc: f.rntrc || em.rntrc || '',
         cfop: em.cfop_padrao_cte || f.cfop || '5353',
         natureza_operacao: em.natureza_padrao_cte || f.natureza_operacao,
@@ -999,6 +1002,11 @@ export default function CteWizardPage() {
                 ? 'Ambiente: Produção (Validade Jurídica SEFAZ)'
                 : 'Ambiente: Homologação (Testes SEFAZ — Sem Valor Fiscal)'}
             </span>
+            {emitenteSelecionado && (
+              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-mono font-bold bg-slate-100 dark:bg-slate-900 text-slate-800 dark:text-slate-200 border border-slate-200 dark:border-slate-700">
+                Série {form.serie || emitenteSelecionado.serie_cte || '1'} · Próx. #{String(cteExistente?.data?.numero || emitenteSelecionado.proximo_numero_cte || 1).padStart(6, '0')}
+              </span>
+            )}
           </div>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
             Preencha as 6 etapas na ordem da SEFAZ. Vincular uma NF-e preenche automaticamente Remetente, Destinatário e Carga.
@@ -1059,6 +1067,15 @@ export default function CteWizardPage() {
         {/* ─── ABA 1: DADOS ─── */}
         {passoAtual === 0 && (
           <div className="space-y-6">
+            <PainelSequenciaFiscal
+              tipo="CTE"
+              emitente={emitenteSelecionado}
+              docId={cteId}
+              numeroRascunhoAtual={cteExistente?.data?.numero ?? null}
+              isTenantAdminMeta={emitentesData?.meta?.is_tenant_admin}
+              onSequenciaAtualizada={({ serie }) => setForm(f => ({ ...f, serie }))}
+            />
+
             <GradeCampos>
               <CampoFiscal rotulo="Transportadora Emitente" obrigatorio erro={erros.dados.find(e => e.includes('transportadora'))}>
                 <SelectFiscal
@@ -1069,6 +1086,7 @@ export default function CteWizardPage() {
                     if (em) {
                       setForm(f => ({
                         ...f,
+                        serie: String(em.serie_cte || f.serie || '1'),
                         rntrc: f.rntrc || em.rntrc || '',
                         codigo_municipio_inicio: f.codigo_municipio_inicio || em.codigo_municipio || '',
                         municipio_inicio: f.municipio_inicio || em.municipio || '',
